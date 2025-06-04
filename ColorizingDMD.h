@@ -4,6 +4,7 @@
 #include <string>
 #include "ResizeFilters.h"
 #include <opencv2/opencv.hpp>
+#include "cRom.h"
 using namespace cv;
 
 #define FRAME_STRIP_W_MARGIN 15
@@ -18,7 +19,7 @@ using namespace cv;
 #define RAW_DIGIT_H 15
 #define FIRST_KEY_TIMER_INT 700
 #define NEXT_KEY_TIMER_INT 50
-#define MARGIN_PALETTE_X 20
+#define MARGIN_PALETTE_X 40
 #define MARGIN_PALETTE_Y 100
 #define AUTOSAVE_TICKS 600000 // 10*60*1000 autosave every 10 minutes
 
@@ -86,6 +87,15 @@ void ModBackgroundMask(bool AddMask);
 void generateAIImage(const std::string& prompt, const std::string api_key, HWND hDlg);
 void variationAIImage(const std::string api_key, HWND hDlg);
 void DrawImagePix(UINT8* pimage, UINT16* protation, UINT pixnb, UINT width, UINT16 pcol, UINT sizepix, UINT16 colrot, UINT16 nocolrot);
+int is_another_instance_running();
+void SaveTestWin(void);
+void LoadTestWin(void);
+bool AddTXTFrames2Frame(UINT nFrames, sFrames* pFrames, bool mustpad128x16);
+void AffLastError(char* lpszFunction);
+void StartSaving();
+void StopSaving(HWND actwin);
+void EraseFirstSavedAction(bool isUndo);
+void SetSSpotButton(bool ison);
 
 //void (*resizefilterFunc)(UINT16*, UINT16*);
 enum

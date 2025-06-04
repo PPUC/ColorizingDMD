@@ -170,6 +170,7 @@
     <ClInclude Include="framework.h" />
     <ClInclude Include="Gif.h" />
     <ClInclude Include="OGL_Immediate_2D.h" />
+    <ClInclude Include="PupTester.h" />
     <ClInclude Include="ResizeFilters.h" />
     <ClInclude Include="Resource.h" />
     <ClInclude Include="serum.h" />
@@ -185,6 +186,7 @@
     <ClCompile Include="crc32.cpp" />
     <ClCompile Include="dmddevice.cpp" />
     <ClCompile Include="OGL_Immediate_2D.cpp" />
+    <ClCompile Include="PupTester.cpp" />
     <ClCompile Include="ResizeFilters.cpp" />
     <ClCompile Include="serumdll.cpp" />
     <ClCompile Include="serumwin.cpp" />
@@ -229,6 +231,7 @@
     <Image Include="icons\delspr.ico" />
     <Image Include="icons\deltab.ico" />
     <Image Include="icons\downscale.ico" />
+    <Image Include="icons\dynatocol.ico" />
     <Image Include="icons\ellipse.ico" />
     <Image Include="icons\ellipse.png" />
     <Image Include="icons\export.ico" />

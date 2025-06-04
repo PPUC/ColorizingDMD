@@ -53,10 +53,12 @@ enum
 	SA_SHAPEMODE,
 	SA_COLSETS,
 	SA_DYNACOLOR,
+	SA_DYNASCOLOR,
 	SA_DYNAALL,
 	SA_PALDYNACOLOR,
 	SA_COPYMASK,
 	SA_DYNAMASK,
+	SA_DYNASMASK,
 	SA_ACCOLORS,
 	SA_ACSPRITE,
 	SA_SPRITE,
@@ -79,6 +81,7 @@ enum
 	SA_ISBGX,
 	SA_TRIGGERID,
 	SA_DYNASHADOW,
+	SA_SPRSHAPEMODE,
 };
 
 //#define MAX_DYNA_SETS_PER_FRAMEN 32 // max number of color sets for dynamic content for each frame
@@ -165,6 +168,12 @@ typedef struct
 	UINT8*		DynaShadowsDirX; // UINT8[nF*MAX_DYNA_SETS_PER_FRAMEN] Flags giving the direction of the dynamic content shadows for the extra frame, can be OR-ed
 	// 0b1 - left, 0b10 - top left, 0b100 - top, 0b1000 - top right, 0b10000 - right, 0b100000 - bottom right, 0b1000000 - bottom, 0b10000000 - bottom left
 	UINT16*		DynaShadowsColX; // UINT16[nF*MAX_DYNA_SETS_PER_FRAMEN] Color of the shadow for this dynamic set of the extra frame
+	UINT8*		DynaSpriteMasks; // UINT8[nS*MAX_SPRITE_WIDTH*MAX_SPRITE_HEIGHT] is this sprite pixel dynamically colored (<255) or not (255)
+	UINT8*		DynaSpriteMasksX; // UINT8[nS*MAX_SPRITE_WIDTH*MAX_SPRITE_HEIGHT] is this sprite pixel dynamically colored (<255) or not (255) for extra res sprites
+	UINT16*		DynaSprite4Cols; // UINT16[nS*MAX_DYNA_SETS_PER_SPRITE*noC] color sets used to colorize the dynamic content of sprites
+	UINT16*		DynaSprite4ColsX; // UINT16[nS*MAX_DYNA_SETS_PER_SPRITE*noC] color sets used to colorize the dynamic content of sprites for extra res sprites
+
+	UINT8*		SpriteShapeMode; // UINT8[nS] is this sprite detected in shape mode?
 }cRom_struct;
 
 typedef struct
@@ -204,6 +213,8 @@ typedef struct
 	UINT		isImported; // UINT is it a file imported from a pre 14*sizeof(UINT) version? if so (>0) the former palettes are saved after
 	UINT8*		importedPal; // UINT8[isImported] the imported palettes from the 64 color former version of this file
 	DWORD		TimeElapsed; // time elapsed since the start of the project
+	BOOL		isPupPack; // is there a pup pack available
+	wchar_t		PupPack[256]; // name of the pup pack
 }cRP_struct;
 
 typedef struct {

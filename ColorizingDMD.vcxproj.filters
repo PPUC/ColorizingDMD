@@ -66,6 +66,9 @@
     <ClInclude Include="ResizeFilters.h">
       <Filter>Fichiers d%27en-tête</Filter>
     </ClInclude>
+    <ClInclude Include="PupTester.h">
+      <Filter>Fichiers d%27en-tête</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="ColorizingDMD.cpp">
@@ -90,6 +93,9 @@
       <Filter>Fichiers sources</Filter>
     </ClCompile>
     <ClCompile Include="ResizeFilters.cpp">
+      <Filter>Fichiers sources</Filter>
+    </ClCompile>
+    <ClCompile Include="PupTester.cpp">
       <Filter>Fichiers sources</Filter>
     </ClCompile>
   </ItemGroup>
@@ -328,6 +334,9 @@
       <Filter>Fichiers de ressources</Filter>
     </Image>
     <Image Include="icons\delframems.ico">
+      <Filter>Fichiers de ressources</Filter>
+    </Image>
+    <Image Include="icons\dynatocol.ico">
       <Filter>Fichiers de ressources</Filter>
     </Image>
   </ItemGroup>
