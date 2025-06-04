@@ -1,7 +1,7 @@
-
-
-
-
+//{{NO_DEPENDENCIES}}
+// fichier Include Microsoft Visual C++.
+// Utilisé par ColorizingDMD.rc
+//
 #define IDC_MYICON                      2
 #define IDD_COLORIZINGDMD_DIALOG        102
 #define IDI_CROM                        103
@@ -108,6 +108,8 @@
 #define IDI_ICON16                      287
 #define IDI_ZOOM2XON                    287
 #define IDI_DELFRMS                     288
+#define IDI_ICON17                      289
+#define IDI_DYNATOCOL                   289
 #define IDC_COLMODE                     1000
 #define IDC_COLMODE2                    1001
 #define IDC_NEW                         1001
@@ -138,7 +140,6 @@
 #define IDC_DRAWCIRC                    1015
 #define IDC_BGLIST                      1015
 #define IDC_CZONELIST                   1015
-#define IDC_TRIGGERLIST                 1015
 #define IDC_FILL                        1016
 #define IDC_ELLIPSE                     1017
 #define IDC_DELDETSPR                   1017
@@ -212,6 +213,7 @@
 #define IDC_STRY19                      1060
 #define IDC_STRY9                       1061
 #define IDC_STRY10                      1062
+#define IDC_STRY23                      1062
 #define IDC_SHAPEMODE                   1063
 #define IDC_STRY11                      1063
 #define IDC_STRY13                      1064
@@ -243,19 +245,11 @@
 #define IDC_COL15                       1089
 #define IDC_COL16                       1090
 #define IDC_DYNACOL1                    1091
-#define IDC_SPRITENAME                  1091
 #define IDC_DYNACOL2                    1092
-#define IDC_SPRITELIST                  1092
 #define IDC_DYNACOL3                    1093
-#define IDC_ADDSPRITE                   1093
 #define IDC_DYNACOL4                    1094
-#define IDC_DELSPRITE                   1094
 #define IDC_DYNACOL5                    1095
-#define IDC_STRY1                       1095
 #define IDC_DYNACOL6                    1096
-#define IDC_ISDWORD                     1096
-#define IDC_DELSPR                      1096
-#define IDC_DETSPR                      1096
 #define IDC_DYNACOL7                    1097
 #define IDC_DYNACOL8                    1098
 #define IDC_DYNACOL9                    1099
@@ -269,12 +263,18 @@
 #define IDC_INVERTSEL                   1107
 #define IDC_ADDSECTION2                 1107
 #define IDC_STRY15                      1107
+#define IDC_DYNACOL17                   1107
 #define IDC_INVERTSEL2                  1108
+#define IDC_DYNACOL18                   1108
 #define IDC_MOVESECTION                 1109
+#define IDC_DYNACOL19                   1109
 #define IDC_STRY16                      1110
+#define IDC_DYNACOL20                   1110
 #define IDC_SPRITELIST2                 1111
 #define IDC_ADDSPRITE2                  1112
+#define IDC_DYNACOL21                   1112
 #define IDC_DELSPRITE2                  1113
+#define IDC_DYNACOL22                   1113
 #define IDC_BUTTON1                     1114
 #define IDC_COLROT                      1114
 #define IDC_REWIND                      1114
@@ -300,6 +300,7 @@
 #define IDC_DELTIME                     1118
 #define IDC_ANIGIF                      1118
 #define IDC_OLDCOL5                     1118
+#define IDC_MOVESECTION2                1118
 #define IDC_ADDTID                      1119
 #define IDC_TIMELEN                     1119
 #define IDC_STRY21                      1119
@@ -308,8 +309,11 @@
 #define IDC_DELCOL                      1120
 #define IDC_STRY22                      1120
 #define IDC_OLDCOL7                     1120
+#define IDC_COLTODYNA2                  1120
 #define IDC_DELMASK                     1121
 #define IDC_OLDCOL8                     1121
+#define IDC_DELTID2                     1121
+#define IDC_VALTID                      1121
 #define IDC_FRUSESPRITE                 1123
 #define IDC_NCOL                        1124
 #define IDC_BROWSEIMAGE                 1126
@@ -320,7 +324,6 @@
 #define IDC_SPIN1                       1132
 #define IDC_TIMESPIN                    1132
 #define IDC_HOURSPIN                    1132
-#define IDC_LUMSPIN                     1132
 #define IDC_MINSPIN                     1133
 #define IDC_HOUR                        1133
 #define IDC_SECSPIN                     1134
@@ -361,6 +364,8 @@
 #define IDC_SPDHALF                     1167
 #define IDC_CHECK1                      1167
 #define IDC_KEEPSEL                     1167
+#define IDC_VERTSEL                     1167
+#define IDC_SHAPEM                      1167
 #define IDC_SPDHALF2                    1168
 #define IDC_SPDQUARTER                  1168
 #define IDC_IMPORT                      1168
@@ -375,6 +380,7 @@
 #define IDC_BGNB                        1174
 #define IDC_COMMON                      1175
 #define IDC_OUTTL                       1176
+#define IDC_COMMON2                     1176
 #define IDC_UPDATESAME                  1177
 #define IDC_LOOP                        1177
 #define IDC_SAMEFRAMELIST               1178
@@ -421,22 +427,48 @@
 #define IDC_IMGTOBG                     1213
 #define IDC_BAW                         1213
 #define IDC_DELFRMS                     1214
-#define IDC_BAW2                        1214
 #define IDC_CFTOOF                      1214
 #define IDC_MASKTOSEL                   1215
-#define IDC_EDIT1                       1215
+#define IDC_LUMPCT                      1215
 #define IDC_FRAME32                     1216
 #define IDC_FRAME64                     1217
+#define IDC_ISEXTRA                     1218
+#define IDC_ISEXTRAE                    1219
+#define IDC_APPLYLUM                    1220
+#define IDC_PROMPTAI                    1221
+#define IDC_GENAIIMG                    1222
+#define IDC_DYNASHADOW                  1223
+#define IDC_AUTOSEL                     1224
+#define IDC_AUTONOSEL                   1225
+#define IDC_DOAUTOSEL                   1226
+#define IDC_OFFSETAUTOSEL               1227
+#define IDC_ADDFRAME                    1227
+#define IDC_MOVESPRITES                 1228
+#define IDC_ISPUPPACK                   1228
+#define IDC_COMMON2MASK                 1229
+#define IDC_PUPPACK                     1229
+#define IDC_TRIGGERLIST                 1230
+#define IDC_NEXUNID                     1230
+#define IDC_NEXTUNID                    1230
+#define IDC_DYNATOCOL                   1231
+#define IDC_SPRITENAME                  1232
+#define IDC_SPRITELIST                  1233
+#define IDC_ADDSPRITE                   1234
+#define IDC_DELSPRITE                   1235
+#define IDC_STRY1                       1236
+#define IDC_ISDWORD                     1237
+#define IDC_DELSPR                      1238
+#define IDC_DETSPR                      1239
 #define IDC_STATIC                      -1
 
-
-
+// Next default values for new objects
+// 
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NO_MFC                     1
-#define _APS_NEXT_RESOURCE_VALUE        289
+#define _APS_NEXT_RESOURCE_VALUE        290
 #define _APS_NEXT_COMMAND_VALUE         32776
-#define _APS_NEXT_CONTROL_VALUE         1217
+#define _APS_NEXT_CONTROL_VALUE         1231
 #define _APS_NEXT_SYMED_VALUE           110
 #endif
 #endif

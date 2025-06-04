@@ -6,8 +6,8 @@
 #pragma once
 
 #define ZEDMD_VERSION_MAJOR 0  // X Digits
-#define ZEDMD_VERSION_MINOR 7  // Max 2 Digits
-#define ZEDMD_VERSION_PATCH 2  // Max 2 Digits
+#define ZEDMD_VERSION_MINOR 9  // Max 2 Digits
+#define ZEDMD_VERSION_PATCH 1  // Max 2 Digits
 
 #define _ZEDMD_STR(x) #x
 #define ZEDMD_STR(x) _ZEDMD_STR(x)
@@ -19,7 +19,6 @@
 
 #define ZEDMD_MAX_WIDTH 256
 #define ZEDMD_MAX_HEIGHT 64
-#define ZEDMD_MAX_PALETTE 192
 
 #ifdef _MSC_VER
 #define ZEDMDAPI __declspec(dllexport)
@@ -45,6 +44,13 @@ class ZEDMDAPI ZeDMD
   ZeDMD();
   ~ZeDMD();
 
+  /** @brief Set the log callback
+   *
+   *  Set the log callback.
+   *
+   *  @param callback
+   *  @param userData
+   */
   void SetLogCallback(ZeDMD_LogCallback callback, const void* userData);
 
   /** @brief Ignore a serial device when searching for ZeDMD
@@ -103,7 +109,7 @@ class ZEDMDAPI ZeDMD
    *
    *  ZeDMD could be connected via WiFi instead of USB.
    *  The WiFi settings need to be stored in ZeDMD's EEPROM
-   *  first using a USB connection.
+   *  first using a USB connection or via the web interface.
    *  @see Open()
    *  @see SetWiFiSSID()
    *  @see SetWiFiPassword()
@@ -111,9 +117,20 @@ class ZEDMDAPI ZeDMD
    *  @see SaveSettings()
    *
    *  @param ip the IPv4 address of the ZeDMD device
-   *  @param port the port
    */
-  bool OpenWiFi(const char* ip, int port);
+  bool OpenWiFi(const char* ip);
+
+  /** @brief Open default WiFi connection to ZeDMD.
+   *
+   *  ZeDMD could be connected via WiFi instead of USB.
+   *  The WiFi settings need to be stored in ZeDMD's EEPROM.
+   *  Connect to http://zedmd-wifi.local to configure the device.
+   *  For the first time configuration, establish a connection to
+   *  this network:
+   *  SSID: ZeDMD-WiFi
+   *  Password: zedmd1234
+   */
+  bool OpenDefaultWiFi();
 
   /** @brief Close connection to ZeDMD
    *
@@ -133,10 +150,8 @@ class ZEDMDAPI ZeDMD
    *  next on the ZeDMD device. Depending on the settings and
    *  the physical dimensions of the LED panels, the content
    *  will by centered and scaled correctly.
-   *  @see EnablePreDownscaling()
-   *  @see EnablePreUpscaling()
-   *  @see EnableDownscaling()
    *  @see EnableUpscaling()
+   *  @see DisableUpscaling()
    *
    *  @param width the frame width
    *  @param height the frame height
@@ -168,49 +183,21 @@ class ZEDMDAPI ZeDMD
    */
   bool const IsS3();
 
-  /** @brief Set the palette
+  /** @brief Get the libezedmd version
    *
-   *  Set the color palette to use to render gray scaled content.
-   *  This library stores and tracks changes to 4, 16 and 64
-   *  color palettes individually.
-   *  @see RenderGray2()
-   *  @see RenderGray4()
+   *  Get the version of the library.
    *
-   *  @param pPalette the palette as RGB array
-   *  @param numColors 4, 16, or 64 colors palette
+   *  @return version string
    */
-  void SetPalette(uint8_t* pPalette, uint8_t numColors);
+  const char* GetVersion();
 
-  /** @brief Set the 4 color palette
+  /** @brief Get the ZeDMD firmware version
    *
-   *  Backward compatibility version of SetPalette() to directly
-   *  set the 4 color palette.
-   *  @see RenderGray4()
+   *  Get the version of the ZeDMD firmware.
    *
-   *  @param pPalette the palette as RGB array
-   *  @param numColors 4, 16, or 64 colors palette
+   *  @return version string
    */
-  void SetPalette(uint8_t* pPalette);
-
-  /** @brief Set the default palette
-   *
-   *  Use a default palette of shades of orange to render gray
-   *  scaled content.
-   *  @see RenderGray2()
-   *  @see RenderGray4()
-   *
-   *  @param bitDepth the bit depth, 2 means 4 colors, 4 means 16 colors
-   */
-  void SetDefaultPalette(uint8_t bitDepth);
-
-  /** @brief Get the default palette
-   *
-   *  Get the values of a default palette of shades of orange.
-   *
-   *  @param bitDepth the bit depth, 2 means 4 colors, 4 means 16 colors
-   *  @return RGB array
-   */
-  uint8_t* GetDefaultPalette(uint8_t bitDepth);
+  const char* GetFirmwareVersion();
 
   /** @brief Test the panels attached to ZeDMD
    *
@@ -278,6 +265,88 @@ class ZEDMDAPI ZeDMD
    */
   void SetWiFiPort(int port);
 
+  /** @brief Set the panel clock phase
+   *
+   *  Set the clock phase of the LED panels.
+   *  @see https://github.com/PPUC/ZeDMD
+   *
+   *  @param clockPhase a value between 0 and 1
+   */
+  void SetPanelClockPhase(uint8_t clockPhase);
+
+  /** @brief Set the panel i2s speed
+   *
+   *  Set the i2s speed of the LED panels.
+   *  @see https://github.com/PPUC/ZeDMD
+   *
+   *  @param i2sspeed a value of 8, 16 or 20
+   */
+  void SetPanelI2sSpeed(uint8_t i2sSpeed);
+
+  /** @brief Set the panel latch blanking
+   *
+   *  Set the latch blanking of the LED panels.
+   *  @see https://github.com/PPUC/ZeDMD
+   *
+   *  @param clkphase a value between 0 and 4
+   */
+  void SetPanelLatchBlanking(uint8_t latchBlanking);
+
+  /** @brief Set the panel minimla refresh rate
+   *
+   *  Set the minimal refresh rate of the LED panels.
+   *  @see https://github.com/PPUC/ZeDMD
+   *
+   *  @param minRefreshRate a value between 0 and 1
+   */
+  void SetPanelMinRefreshRate(uint8_t minRefreshRate);
+
+  /** @brief Set the panel driver
+   *
+   *  Set the driver of the LED panels.
+   *  @see https://github.com/PPUC/ZeDMD
+   *
+   *  @param driver a value between 0 and 6; 0(SHIFTREG), 1(FM6124), 2(FM6126A), 3(ICN2038S), 4(MBI5124), 5(SM5266P),
+   * 6(DP3246_SM5368)
+   */
+  void SetPanelDriver(uint8_t driver);
+
+  /** @brief Set the transport
+   *
+   *  Set the transport of ZeDMD. Note, this is just to change ZeDMD's settings, not for connecting.
+   *  @see https://github.com/PPUC/ZeDMD
+   *
+   *  @param transport a value between 0 and 3; 0(USB), 1(UDP), 2(TCP), 3(SPI)
+   */
+  void SetTransport(uint8_t transport);
+
+  /** @brief Set the UDP delay
+   *
+   *  Set the UDP Delay.
+   *  @see https://github.com/PPUC/ZeDMD
+   *
+   *  @param udpDelay a value between 0 and 9
+   */
+  void SetUdpDelay(uint8_t udpDelay);
+
+  /** @brief Set the USB package size
+   *
+   *  Set the USB package size.
+   *  @see https://github.com/PPUC/ZeDMD
+   *
+   *  @param usbPackageSize a value between 32 and 1920, but only multiple of 32
+   */
+  void SetUsbPackageSize(uint16_t usbPackageSize);
+
+  /** @brief Set the Y-offset of 128x64 panels
+   *
+   *  Set the Y-offset of 128x64 panels.
+   *  @see https://github.com/PPUC/ZeDMD
+   *
+   *  @param yOffset a value between 0 and 32
+   */
+  void SetYOffset(uint8_t yOffset);
+
   /** @brief Save the current setting
    *
    *  Saves all current setting within ZeDMD's EEPROM to be used
@@ -293,138 +362,25 @@ class ZEDMDAPI ZeDMD
    */
   void SaveSettings();
 
-  /** @brief Enable downscaling on the client side
-   *
-   *  If enabled, the content will centered and scaled down to
-   *  fit into the physical dimensions of the ZeDMD panels,
-   *  before the content gets send to ZeDMD, if required.
-   */
-  void EnablePreDownscaling();
-
-  /** @brief Disable downscaling on the client side
-   *
-   *  @see EnablePreDownscaling()
-   */
-  void DisablePreDownscaling();
-
   /** @brief Enable upscaling on the client side
    *
    *  If enabled, the content will centered and scaled up to
    *  fit into the physical dimensions of the ZeDMD panels,
    *  before the content gets send to ZeDMD, if required.
    */
-  void EnablePreUpscaling();
-
-  /** @brief Disable downscaling on the client side
-   *
-   *  @see EnablePreUpscaling()
-   */
-  void DisablePreUpscaling();
-
-  /** @brief Enable upscaling on ZeDMD itself
-   *
-   *  If enabled and required, the content will centered and scaled
-   *  up to fit into the physical dimensions of the ZeDMD panels
-   *  by ZeDMD itself. Compared to EnablePreUpscaling(), less data
-   *  needs to be send to ZeDMD and this might resut in a higher
-   *  frame rate.
-   *  But this optimized variant won't work with zone streaming modes.
-   *  @see EnforceStreaming()
-   *  @see DisableRGB24Streaming()
-   *  @see RenderRgb24EncodedAs565()
-   */
   void EnableUpscaling();
 
-  /** @brief Disable upscaling on ZeDMD itself
+  /** @brief Disable upscaling on the client side
    *
    *  @see EnableUpscaling()
    */
   void DisableUpscaling();
-
-  /** @brief Enforce zone streaming
-   *
-   *  ZeDMD has two different render modes. One renders entire frames.
-   *  This is the classic way and works pretty well.
-   *  The other one is "zone streaming" which will be enable by this
-   *  function. Zone streaming divides a frame into rectangular zones
-   *  and only updates zones that have changes compared to the previous
-   *  frame. This method results in less data that needs to be transfered
-   *  and in smoother animations. But it takes a bit longer if the entire
-   *  frame changes. Zone streaming is the default for RenderRGB24() and
-   *  RenderRgb24EncodedAs565(). All other modes use the classic way by
-   *  default unless EnforceStreaming() is called.
-   *  @see RenderGray2()
-   *  @see RenderGray4()
-   *  @see RenderColoredGray6()
-   *  @see RenderRgb24()
-   *  @see DisableRGB24Streaming()
-   */
-  void EnforceStreaming();
-
-  /** @brief Disable zone streaming for RGB24
-   *
-   *  By default, "zone streaming" is used for RenderRgb24(). That could be
-   *  turned off using this function.
-   *  @see EnforceStreaming()
-   */
-  void DisableRGB24Streaming();
 
   /** @brief Clear the screen
    *
    *  Turn off all pixels of ZeDMD, so a blank black screen will be shown.
    */
   void ClearScreen();
-
-  /** @brief Render a 2 bit gray scaled frame
-   *
-   *  Renders a 2 bit gray scaled (indexed) frame using 4 colors.
-   *  The colors will be used from the current palette set via SetPalette().
-   *  @see SetPalette()
-   *
-   *  @param frame the indexed frame
-   */
-  void RenderGray2(uint8_t* frame);
-
-  /** @brief Render a 4 bit gray scaled frame
-   *
-   *  Renders a 4 bit gray scaled (indexed) frame using 16 colors.
-   *  The colors will be used from the current palette set via SetPalette().
-   *  @see SetPalette()
-   *
-   *  @param frame the indexed frame
-   */
-  void RenderGray4(uint8_t* frame);
-
-  /** @brief Render a 6 bit frame
-   *
-   *  Renders a 6 bit(indexed) frame using 64 colors.
-   *  The colors will be used from the current palette set via SetPalette().
-   *  ZeDMD is able to rotate parts of the palette natively as defined by the
-   *  Serum format until the next frame is received.
-   *  @see SetPalette()
-   *
-   *  @param frame the indexed frame
-   *  @param rotations optional rotation command array according to the Serum
-   * format
-   */
-  void RenderColoredGray6(uint8_t* frame, uint8_t* rotations);
-
-  /** @brief Render a 6 bit frame
-   *
-   *  Renders a 6 bit(indexed) frame using 64 colors.
-   *  In oposite to standrad RenderColoredGray6(), the colors will not be used
-   *  from the current palette set via SetPalette() but form the one provided
-   *  to this function.
-   *  ZeDMD is able to rotate parts of the palette natively as defined by the
-   *  Serum format until the next frame is received.
-   *
-   *  @param frame the indexed frame
-   *  @param palette the colors to use
-   *  @param rotations optional rotation command array according to the Serum
-   * format
-   */
-  void RenderColoredGray6(uint8_t* frame, uint8_t* palette, uint8_t* rotations);
-
   /** @brief Render a RGB24 frame
    *
    *  Renders a true color RGB frame. By default the zone streaming mode is
@@ -433,25 +389,7 @@ class ZEDMDAPI ZeDMD
    *
    *  @param frame the RGB frame
    */
-  void RenderRgb24(uint8_t* frame);
-
-  /** @brief Render a RGB24 frame
-   *
-   *  Renders a true color RGB frame. Only zone streaming mode is supported.
-   *  The encoding is RGB565.
-   *
-   *  @param frame the RGB frame
-   */
-  void RenderRgb24EncodedAs565(uint8_t* frame);
-
-  /** @brief Render a RGB24 frame
-   *
-   *  Renders a true color RGB frame. Only zone streaming mode is supported.
-   *  The encoding is RGB16. In fact, RGB16 is just another name for RGB565.
-   *
-   *  @param frame the RGB frame
-   */
-  void RenderRgb24EncodedAs16(uint8_t* frame) { RenderRgb24EncodedAs565(frame); }
+  void RenderRgb888(uint8_t* frame);
 
   /** @brief Render a RGB565 frame
    *
@@ -461,23 +399,12 @@ class ZEDMDAPI ZeDMD
    */
   void RenderRgb565(uint16_t* frame);
 
-  /** @brief Render a RGB16 frame
-   *
-   *  Renders a true color RGB16 frame. Only zone streaming mode is supported.
-   *  In fact, RGB16 is just another name for RGB565.
-   *
-   *  @param frame the RGB16 frame
-   */
-  void RenderRgb16(uint16_t* frame) { RenderRgb565(frame); }
-
  private:
-  bool UpdateFrameBuffer8(uint8_t* pFrame);
-  bool UpdateFrameBuffer24(uint8_t* pFrame);
+  bool UpdateFrameBuffer888(uint8_t* pFrame);
   bool UpdateFrameBuffer565(uint16_t* pFrame);
-  uint8_t GetScaleMode(uint16_t frameWidth, uint16_t frameHeight, uint16_t* pWidth, uint16_t* pHeight,
-                       uint8_t* pXOffset, uint8_t* pYOffset);
-  int Scale(uint8_t* pScaledFrame, uint8_t* pFrame, uint8_t bytes, uint16_t* width, uint16_t* height);
-  int Scale16(uint8_t* pScaledFrame, uint16_t* pFrame, uint16_t* width, uint16_t* height, bool bigEndian);
+  uint8_t GetScaleMode(uint16_t frameWidth, uint16_t frameHeight, uint8_t* pXOffset, uint8_t* pYOffset);
+  int Scale888(uint8_t* pScaledFrame, uint8_t* pFrame, uint8_t bytes);
+  int Scale565(uint8_t* pScaledFrame, uint16_t* pFrame, bool bigEndian);
 
   ZeDMDComm* m_pZeDMDComm;
   ZeDMDWiFi* m_pZeDMDWiFi;
@@ -488,25 +415,11 @@ class ZEDMDAPI ZeDMD
   bool m_usb = false;
   bool m_wifi = false;
   bool m_hd = false;
-  bool m_downscaling = false;
   bool m_upscaling = false;
-  bool m_streaming = false;
-  bool m_rgb24Streaming = true;
-  bool m_paletteChanged = false;
 
   uint8_t* m_pFrameBuffer;
   uint8_t* m_pScaledFrameBuffer;
-  uint8_t* m_pCommandBuffer;
-  uint8_t* m_pPlanes;
   uint8_t* m_pRgb565Buffer;
-
-  uint8_t m_palette4[4 * 3] = {0};
-  uint8_t m_palette16[16 * 3] = {0};
-  uint8_t m_palette64[64 * 3] = {0};
-  uint8_t m_DmdDefaultPalette2Bit[12] = {0, 0, 0, 144, 34, 0, 192, 76, 0, 255, 127, 0};
-  uint8_t m_DmdDefaultPalette4Bit[48] = {0,  0,   0,   51, 25,  0,   64, 32,  0,   77, 38,  0,   89, 44,  0,   102,
-                                         51, 0,   115, 57, 0,   128, 64, 0,   140, 70, 0,   153, 76, 0,   166, 83,
-                                         0,  179, 89,  0,  191, 95,  0,  204, 102, 0,  230, 114, 0,  255, 127, 0};
 };
 
 #ifdef __cplusplus
@@ -515,39 +428,41 @@ extern "C"
 #endif
 
   extern ZEDMDAPI ZeDMD* ZeDMD_GetInstance();
+  extern ZEDMDAPI const char* ZeDMD_GetVersion();
+  extern ZEDMDAPI const char* ZeDMD_GetFirmwareVersion(ZeDMD* pZeDMD);
   extern ZEDMDAPI void ZeDMD_IgnoreDevice(ZeDMD* pZeDMD, const char* const ignore_device);
   extern ZEDMDAPI void ZeDMD_SetDevice(ZeDMD* pZeDMD, const char* const device);
   extern ZEDMDAPI bool ZeDMD_Open(ZeDMD* pZeDMD);
-  extern ZEDMDAPI bool ZeDMD_OpenWiFi(ZeDMD* pZeDMD, const char* ip, int port);
+  extern ZEDMDAPI bool ZeDMD_OpenWiFi(ZeDMD* pZeDMD, const char* ip);
+  extern ZEDMDAPI bool ZeDMD_OpenDefaultWiFi(ZeDMD* pZeDMD);
   extern ZEDMDAPI void ZeDMD_Close(ZeDMD* pZeDMD);
-
+  extern ZEDMDAPI void ZeDMD_SetLogCallback(ZeDMD* pZeDMD, ZeDMD_LogCallback callback, const void* userData);
   extern ZEDMDAPI void ZeDMD_SetFrameSize(ZeDMD* pZeDMD, uint16_t width, uint16_t height);
-  extern ZEDMDAPI void ZeDMD_SetPalette(ZeDMD* pZeDMD, uint8_t* pPalette, uint8_t numColors);
   extern ZEDMDAPI void ZeDMD_SetDefaultPalette(ZeDMD* pZeDMD, uint8_t bitDepth);
-  extern ZEDMDAPI uint8_t* ZeDMD_GetDefaultPalette(ZeDMD* pZeDMD, uint8_t bitDepth);
   extern ZEDMDAPI void ZeDMD_LedTest(ZeDMD* pZeDMD);
   extern ZEDMDAPI void ZeDMD_EnableDebug(ZeDMD* pZeDMD);
   extern ZEDMDAPI void ZeDMD_DisableDebug(ZeDMD* pZeDMD);
   extern ZEDMDAPI void ZeDMD_SetRGBOrder(ZeDMD* pZeDMD, uint8_t rgbOrder);
   extern ZEDMDAPI void ZeDMD_SetBrightness(ZeDMD* pZeDMD, uint8_t brightness);
   extern ZEDMDAPI void ZeDMD_SaveSettings(ZeDMD* pZeDMD);
-  extern ZEDMDAPI void ZeDMD_EnablePreDownscaling(ZeDMD* pZeDMD);
-  extern ZEDMDAPI void ZeDMD_DisablePreDownscaling(ZeDMD* pZeDMD);
-  extern ZEDMDAPI void ZeDMD_EnablePreUpscaling(ZeDMD* pZeDMD);
-  extern ZEDMDAPI void ZeDMD_DisablePreUpscaling(ZeDMD* pZeDMD);
   extern ZEDMDAPI void ZeDMD_EnableUpscaling(ZeDMD* pZeDMD);
   extern ZEDMDAPI void ZeDMD_DisableUpscaling(ZeDMD* pZeDMD);
   extern ZEDMDAPI void ZeDMD_SetWiFiSSID(ZeDMD* pZeDMD, const char* const ssid);
   extern ZEDMDAPI void ZeDMD_SetWiFiPassword(ZeDMD* pZeDMD, const char* const password);
   extern ZEDMDAPI void ZeDMD_SetWiFiPort(ZeDMD* pZeDMD, int port);
-  extern ZEDMDAPI void ZeDMD_EnforceStreaming(ZeDMD* pZeDMD);
+  extern ZEDMDAPI void ZeDMD_SetPanelClockPhase(ZeDMD* pZeDMD, uint8_t clockPhase);
+  extern ZEDMDAPI void ZeDMD_SetPanelI2sSpeed(ZeDMD* pZeDMD, uint8_t i2sSpeed);
+  extern ZEDMDAPI void ZeDMD_SetPanelLatchBlanking(ZeDMD* pZeDMD, uint8_t latchBlanking);
+  extern ZEDMDAPI void ZeDMD_SetPanelMinRefreshRate(ZeDMD* pZeDMD, uint8_t minRefreshRate);
+  extern ZEDMDAPI void ZeDMD_SetPanelDriver(ZeDMD* pZeDMD, uint8_t driver);
+  extern ZEDMDAPI void ZeDMD_SetTransport(ZeDMD* pZeDMD, uint8_t transport);
+  extern ZEDMDAPI void ZeDMD_SetUdpDelay(ZeDMD* pZeDMD, uint8_t udpDelay);
+  extern ZEDMDAPI void ZeDMD_SetUsbPackageSize(ZeDMD* pZeDMD, uint16_t usbPackageSize);
+  extern ZEDMDAPI void ZeDMD_SetYOffset(ZeDMD* pZeDMD, uint8_t yOffset);
 
   extern ZEDMDAPI void ZeDMD_ClearScreen(ZeDMD* pZeDMD);
-  extern ZEDMDAPI void ZeDMD_RenderGray2(ZeDMD* pZeDMD, uint8_t* frame);
-  extern ZEDMDAPI void ZeDMD_RenderGray4(ZeDMD* pZeDMD, uint8_t* frame);
-  extern ZEDMDAPI void ZeDMD_RenderColoredGray6(ZeDMD* pZeDMD, uint8_t* frame, uint8_t* rotations);
-  extern ZEDMDAPI void ZeDMD_RenderRgb24(ZeDMD* pZeDMD, uint8_t* frame);
-  extern ZEDMDAPI void ZeDMD_RenderRgb24EncodedAs565(ZeDMD* pZeDMD, uint8_t* frame);
+  extern ZEDMDAPI void ZeDMD_RenderRgb888(ZeDMD* pZeDMD, uint8_t* frame);
+  extern ZEDMDAPI void ZeDMD_RenderRgb565(ZeDMD* pZeDMD, uint16_t* frame);
 
 #ifdef __cplusplus
 }
