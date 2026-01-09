@@ -1,6 +1,7 @@
 #include "legacy_project.h"
 
 #include <algorithm>
+#include <cstring>
 #include <fstream>
 
 #include "serum_constants.h"
@@ -346,10 +347,12 @@ bool LoadLegacyProject(const std::string& path,
         }
     }
 
-    const std::size_t hash_bytes = static_cast<std::size_t>(n_frames) * sizeof(uint32_t);
-    const std::size_t shape_bytes = static_cast<std::size_t>(n_frames);
-    const std::size_t comp_id_bytes = static_cast<std::size_t>(n_frames);
-    if (!SkipExact(file, hash_bytes + shape_bytes + comp_id_bytes)) {
+    std::vector<uint32_t> hash_codes(n_frames, 0);
+    std::vector<uint8_t> shape_comp(n_frames, 0);
+    std::vector<uint8_t> comp_mask_id(n_frames, 255);
+    if (!ReadExact(file, hash_codes.data(), hash_codes.size() * sizeof(uint32_t)) ||
+        !ReadExact(file, shape_comp.data(), shape_comp.size()) ||
+        !ReadExact(file, comp_mask_id.data(), comp_mask_id.size())) {
         if (error) {
             *error = "Unexpected end of file (header data)";
         }
@@ -358,11 +361,15 @@ bool LoadLegacyProject(const std::string& path,
 
     const std::size_t comp_masks_bytes =
         static_cast<std::size_t>(n_comp_masks) * frame_width * frame_height;
-    if (!SkipExact(file, comp_masks_bytes)) {
-        if (error) {
-            *error = "Unexpected end of file (comparison masks)";
+    std::vector<uint8_t> comp_masks;
+    if (comp_masks_bytes > 0) {
+        comp_masks.resize(comp_masks_bytes);
+        if (!ReadExact(file, comp_masks.data(), comp_masks_bytes)) {
+            if (error) {
+                *error = "Unexpected end of file (comparison masks)";
+            }
+            return false;
         }
-        return false;
     }
 
     if (!SkipExact(file, static_cast<std::size_t>(n_frames))) {
@@ -615,8 +622,26 @@ bool LoadLegacyProject(const std::string& path,
     out.frame_height_x = frame_height_x;
     out.sprite_width = MAX_SPRITE_WIDTH;
     out.sprite_height = MAX_SPRITE_HEIGHT;
+    out.no_colors = no_colors;
+
+    out.frame_comp_mask_ids = comp_mask_id;
+    out.comp_masks.resize(MAX_MASKS);
+    if (n_comp_masks > 0 && !comp_masks.empty()) {
+        const std::size_t mask_pixels = static_cast<std::size_t>(frame_width) * frame_height;
+        const uint32_t masks_to_copy = std::min<uint32_t>(n_comp_masks, MAX_MASKS);
+        for (uint32_t i = 0; i < masks_to_copy; ++i) {
+            cv::Mat mask(static_cast<int>(frame_height), static_cast<int>(frame_width), CV_8UC1, cv::Scalar(0));
+            const std::size_t offset = static_cast<std::size_t>(i) * mask_pixels;
+            std::memcpy(mask.data, comp_masks.data() + offset, mask_pixels);
+            out.comp_masks[i] = mask;
+        }
+    }
 
     out.frames.reserve(n_frames);
+    out.frame_refs.reserve(n_frames);
+    out.frame_dynamic_colors.reserve(n_frames);
+    out.frame_dynamic_mask_ids.assign(n_frames, 255);
+    out.dynamic_masks.resize(MAX_DYNA_SETS_PER_FRAMEN);
     for (uint32_t index = 0; index < n_frames; ++index) {
         const std::size_t offset = static_cast<std::size_t>(index) * frame_width * frame_height;
         const uint16_t* frame_data = frames_565.data() + offset;
@@ -631,6 +656,44 @@ bool LoadLegacyProject(const std::string& path,
                                              cols_data,
                                              ref_data,
                                              no_colors));
+
+        if (mask_data) {
+            uint8_t selected_set = 255;
+            const std::size_t pixels = static_cast<std::size_t>(frame_width) * frame_height;
+            for (std::size_t i = 0; i < pixels; ++i) {
+                const uint8_t value = mask_data[i];
+                if (value != 255) {
+                    selected_set = value;
+                    break;
+                }
+            }
+            if (selected_set != 255 && selected_set < MAX_DYNA_SETS_PER_FRAMEN) {
+                out.frame_dynamic_mask_ids[index] = selected_set;
+                cv::Mat dynMask(static_cast<int>(frame_height), static_cast<int>(frame_width), CV_8UC1, cv::Scalar(0));
+                for (std::size_t i = 0; i < pixels; ++i) {
+                    if (mask_data[i] == selected_set) {
+                        dynMask.data[i] = 1;
+                    }
+                }
+                if (out.dynamic_masks[selected_set].empty()) {
+                    out.dynamic_masks[selected_set] = dynMask;
+                } else {
+                    cv::bitwise_or(out.dynamic_masks[selected_set], dynMask, out.dynamic_masks[selected_set]);
+                }
+            }
+        }
+        if (ref_data) {
+            cv::Mat refMat(static_cast<int>(frame_height), static_cast<int>(frame_width), CV_8UC1);
+            std::memcpy(refMat.data, ref_data, frame_width * frame_height);
+            out.frame_refs.push_back(refMat);
+        } else {
+            out.frame_refs.emplace_back();
+        }
+        std::vector<uint16_t> colors(MAX_DYNA_SETS_PER_FRAMEN * no_colors, 0);
+        if (cols_data) {
+            std::memcpy(colors.data(), cols_data, colors.size() * sizeof(uint16_t));
+        }
+        out.frame_dynamic_colors.push_back(std::move(colors));
     }
 
     out.sprites.reserve(n_sprites);

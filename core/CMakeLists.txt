@@ -5,6 +5,7 @@ add_library(colorizing_core STATIC
     image_processing.cpp
     image_resize.cpp
     legacy_project.cpp
+    legacy_project_writer.cpp
 )
 
 target_include_directories(colorizing_core PUBLIC
