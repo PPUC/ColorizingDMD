@@ -1,0 +1,14 @@
+<RCC>
+    <qresource prefix="/app">
+        <file alias="app.ico">../ColorizingDMD.ico</file>
+    </qresource>
+    <qresource prefix="/icons">
+        <file alias="new.png">../icons/new.png</file>
+        <file alias="open.png">../icons/open.png</file>
+        <file alias="save.png">../save.png</file>
+        <file alias="import.png">../icons/loadimage.png</file>
+        <file alias="add.png">../icons/add.png</file>
+        <file alias="addspr.png">../icons/addspr.png</file>
+        <file alias="remove.png">../icons/delimage.png</file>
+    </qresource>
+</RCC>

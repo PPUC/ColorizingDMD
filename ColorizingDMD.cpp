@@ -40,6 +40,11 @@ using namespace Gdiplus;
 #include <iostream>
 #include <string.h>
 #include "cdecode.h"
+#include "core/image_processing.h"
+#include "core/color_utils.h"
+#include "core/image_resize.h"
+#include "core/image_crop.h"
+#include "core/image_copy.h"
 #include <ole2.h>
 #include <oleauto.h>
 #include "PupTester.h"
@@ -3864,96 +3869,6 @@ void ResizeBGMask(UINT8* pdImage, UINT dwidth, UINT dheight, UINT8* psImage, boo
 
 
 
-void ResizeRGB565Image(UINT16* pdImage, UINT dwidth, UINT dheight, UINT16* psImage, UINT swidth, UINT sheight, int filter)
-{
-    cv::Mat imageMat(sheight, swidth, CV_8UC3);
-    UINT8 rgb888[3];
-    
-    for (UINT y = 0; y < sheight; ++y)
-    {
-        for (UINT x = 0; x < swidth; ++x)
-        {
-            rgb565_to_rgb888(psImage[y * swidth + x], rgb888);
-            imageMat.at<cv::Vec3b>(y, x) = cv::Vec3b(rgb888[2], rgb888[1], rgb888[0]); 
-        }
-    }
-    
-    cv::Mat destmat;
-    cv::resize(imageMat, destmat, cv::Size(dwidth, dheight), 0, 0, filter);
-    
-    for (UINT y = 0; y < dheight; ++y)
-    {
-        for (UINT x = 0; x < dwidth; ++x)
-        {
-            cv::Vec3b pixel = destmat.at<cv::Vec3b>(y, x);
-            pdImage[y * dwidth + x] = rgb888_to_rgb565(pixel[2], pixel[1], pixel[0]);
-        }
-    }
-}
-
-void ResizeRGB565Sprite(UINT16* pdSprite, UINT8* pdSprMask, UINT16* psSprite, UINT8* psSprMask, bool shrink, int filter)
-{
-    
-    int ssprw = 0, ssprh = 0;
-    for (int tj = 0; tj < MAX_SPRITE_HEIGHT; tj++)
-    {
-        for (int ti = 0; ti < MAX_SPRITE_WIDTH; ti++)
-        {
-            if (psSprMask[tj * MAX_SPRITE_WIDTH + ti] < 255)
-            {
-                if (tj > ssprh) ssprh = tj;
-                if (ti > ssprw) ssprw = ti;
-            }
-        }
-    }
-    ssprh++;
-    ssprw++;
-    cv::Mat imageMat(ssprh, ssprw, CV_8UC3);
-    UINT8 rgb888[3];
-    
-    for (int y = 0; y < ssprh; ++y)
-    {
-        for (int x = 0; x < ssprw; ++x)
-        {
-            rgb565_to_rgb888(psSprite[y * MAX_SPRITE_WIDTH + x], rgb888);
-            imageMat.at<cv::Vec3b>(y, x) = cv::Vec3b(rgb888[2], rgb888[1], rgb888[0]); 
-        }
-    }
-    int dsprw, dsprh;
-    if (shrink)
-    {
-        dsprw = ssprw / 2;
-        dsprh = ssprh / 2;
-    }
-    else
-    {
-        dsprw = min(ssprw * 2, MAX_SPRITE_WIDTH);
-        dsprh = min(ssprh * 2, MAX_SPRITE_HEIGHT);
-    }
-    
-    cv::Mat destmat;
-    cv::resize(imageMat, destmat, cv::Size(dsprw, dsprh), 0, 0, filter);
-    
-    for (int y = 0; y < dsprh; ++y)
-    {
-        for (int x = 0; x < dsprw; ++x)
-        {
-            cv::Vec3b pixel = destmat.at<cv::Vec3b>(y, x);
-            pdSprite[y * MAX_SPRITE_WIDTH + x] = rgb888_to_rgb565(pixel[2], pixel[1], pixel[0]);
-            UINT8* finmsk = &pdSprMask[y * MAX_SPRITE_WIDTH + x];
-            if (shrink)
-            {
-                UINT8* tmsk = &psSprMask[y * 2 * MAX_SPRITE_WIDTH + x * 2];
-                if (tmsk[0] == tmsk[1] || tmsk[0] == tmsk[MAX_SPRITE_WIDTH] || tmsk[0] == tmsk[MAX_SPRITE_WIDTH + 1]) *finmsk = tmsk[0];
-                else if (tmsk[1] == tmsk[MAX_SPRITE_WIDTH] || tmsk[1] == tmsk[MAX_SPRITE_WIDTH + 1]) *finmsk = tmsk[1];
-                else if (tmsk[MAX_SPRITE_WIDTH] == tmsk[MAX_SPRITE_WIDTH + 1]) *finmsk = tmsk[MAX_SPRITE_WIDTH];
-                else *finmsk = tmsk[0];
-            }
-            else *finmsk = psSprMask[y / 2 * MAX_SPRITE_WIDTH + x / 2];
-        }
-    }
-}
-
 /*void ResizeRGB565SpriteProc(UINT16* pdSprite, UINT8* pdSprMask, UINT16* psSprite, UINT8* psSprMask, bool shrink, void(*filterproc)(UINT16*, UINT16*, UINT, UINT))
 {
     
@@ -5584,28 +5499,6 @@ void ConvertCopyToEllipseRadialGradient(int xd, int yd, int xf, int yf)
     }
 }
 /// <summary>
-/// Convert a RGB565 UINT16 to 3 UINT8 RGB24
-/// copying the most significant bits of the RGB565 value to the less significant bits of the RGB888
-/// rather than always injecting 0 permit a linear progression from full black 0 to full bright 255
-/// </summary>
-void rgb565_to_rgb888(uint16_t rgb565, uint8_t* r, uint8_t* g, uint8_t* b)
-{
-    *r = ((rgb565 >> 8) & 0xF8) | ((rgb565 >> 13) & 0x07); // shifting then copying the 3 most significant bits to the right
-    *g = ((rgb565 >> 3) & 0xFC) | ((rgb565 >> 9) & 0x03); // shifting then copying the 2 most significant bits to the right
-    *b = ((rgb565 << 3) & 0xF8) | ((rgb565 >> 2) & 0x07); // shifting then copying the 3 most significant bits to the right
-}
-/// <summary>
-/// Convert a RGB565 UINT16 to 3 UINT8 RGB24 (version destination as a buffer)
-/// copying the most significant bits of the RGB565 value to the less significant bits of the RGB888
-/// rather than always injecting 0 permit a linear progression from full black 0 to full bright 255
-/// </summary>
-void rgb565_to_rgb888(uint16_t rgb565, uint8_t* rgb888)
-{
-    rgb888[0] = ((rgb565 >> 8) & 0xF8) | ((rgb565 >> 13) & 0x07); // shifting then copying the 3 most significant bits to the right
-    rgb888[1] = ((rgb565 >> 3) & 0xFC) | ((rgb565 >> 9) & 0x03); // shifting then copying the 2 most significant bits to the right
-    rgb888[2] = ((rgb565 << 3) & 0xF8) | ((rgb565 >> 2) & 0x07); // shifting then copying the 3 most significant bits to the right
-}
-/// <summary>
 /// convert a 16 bits RGB565 color to a COLORREF (for gdiplus brush functions)
 /// copying the most significant bits of the RGB565 value to the less significant bits of the RGB888
 /// rather than always injecting 0 permit a linear progression from full black 0 to full bright 255
@@ -5619,22 +5512,6 @@ COLORREF RGB565_to_RGB888(UINT16 rgb565)
     COLORREF rgb888 = (b8 << 16) | (g8 << 8) | r8;
     return rgb888;
 }
-/// <summary>
-/// Convert 3 UINT8 RGB24 to a RGB565 color
-/// </summary>
-uint16_t rgb888_to_rgb565(uint8_t r, uint8_t g, uint8_t b)
-{
-    // Scaling components to fit into 5-bit and 6-bit ranges
-    uint8_t r5 = r >> 3;
-    uint8_t g6 = g >> 2;
-    uint8_t b5 = b >> 3;
-
-    // Combining components into RGB565 format
-    uint16_t rgb565 = (r5 << 11) | (g6 << 5) | b5;
-
-    return rgb565;
-}
-
 /// <summary>
 /// Set a UINT8 pointer to R8, G8, B8 color from a UINT16 RGB565
 /// </summary>
@@ -18035,28 +17912,6 @@ LRESULT CALLBACK ButtonSubclassProc3(HWND hBut, UINT message, WPARAM wParam, LPA
 /// </summary>
 
 /// <summary>
-/// Apply brightness (image_brightness) and contrast (image_contrast) factors to a cv::Mat
-/// </summary>
-/// <param name="mat">the cv::Mat that'll be modified</param>
-void ApplyBrightnessContrastAndBlur(cv::Mat mat)
-{
-    cv::Mat floatImage;
-    mat.convertTo(floatImage, CV_32F);
-
-    // Adjust brightness and contrast
-    double alpha = 1 + 0.05 * image_contrast;
-    if (alpha == 1.0) alpha = 1.001;
-    double beta = 2.5 * image_brightness;
-    floatImage = alpha * floatImage + beta;
-
-    // Apply blur
-    if (image_blur > 0) cv::blur(floatImage, floatImage, cv::Size(image_blur, image_blur));
-
-    // Convert back to original type
-    floatImage.convertTo(mat, mat.type());
-}
-
-/// <summary>
 /// create an openGL texture from an image file (apply the brightness, contrast and blur)
 /// </summary>
 /// <param name="filename">path to the image file</param>
@@ -18065,52 +17920,14 @@ void ApplyBrightnessContrastAndBlur(cv::Mat mat)
 /// <returns>returns the texture ID or (UINT)-1 if it failed</returns>
 UINT CreateTextureFromImage(char* filename, UINT* width, UINT* height)
 {
-    cv::Mat mat = cv::imread(filename);
-    ApplyBrightnessContrastAndBlur(mat);
-    if (mat.empty()) return (UINT)-1;
-    if (mat.cols % 4 != 0)
+    image_mat = LoadAndPrepareImage(filename, image_brightness, image_contrast, image_blur);
+    if (image_mat.empty()) return (UINT)-1;
+    GLenum format = GL_RGB;
+    GLenum iformat = GL_BGR;
+    GLenum type = GL_UNSIGNED_BYTE;
+    if (image_mat.channels() != 3 || image_mat.depth() != CV_8U)
     {
-        float ratio = (float)mat.cols / (float)mat.rows;
-        int cols = mat.cols - (mat.cols % 4) + 4; // we align to the multiple of 4 above
-        int rows = (int)((float)cols / ratio);
-        cv::Mat tmat;
-        resize(mat, tmat, cv::Size(cols, rows), 0, 0, cv::INTER_CUBIC);
-        mat.release();
-        mat = tmat.clone();
-        tmat.release();
-    }
-    // Create an OpenGL texture
-
-    // Determine the format and type of the pixel data based on the cv::Mat
-    GLenum format;
-    GLenum iformat;
-    GLenum type;
-    switch (mat.channels())
-    {
-    case 3:
-        format = GL_RGB;
-        iformat = GL_BGR;
-        image_mat = mat.clone();
-        mat.release();
-        break;
-    case 4:
-        format = GL_RGB;
-        iformat = GL_BGR;
-        cvtColor(mat, image_mat, COLOR_BGRA2BGR);
-        mat.release();
-        break;
-    default:
-        std::cerr << "Unsupported number of channels: " << mat.channels() << std::endl;
-        mat.release();
-        return (UINT)-1;
-    }
-    switch (image_mat.depth())
-    {
-    case CV_8U:
-        type = GL_UNSIGNED_BYTE;
-        break;
-    default:
-        std::cerr << "Unsupported data type: " << image_mat.depth() << std::endl;
+        std::cerr << "Unsupported image format for texture upload" << std::endl;
         image_mat.release();
         return (UINT)-1;
     }
@@ -18138,52 +17955,14 @@ UINT CreateTextureFromImage(char* filename, UINT* width, UINT* height)
 /// <returns>returns the texture ID or (UINT)-1 if it failed</returns>
 UINT CreateTextureFromMat(void)
 {
-    cv::Mat mat = image_org_mat.clone();
-    ApplyBrightnessContrastAndBlur(mat);
-    if (mat.empty()) return (UINT)-1;
-    if (mat.cols % 4 != 0)
+    image_mat = PrepareImageMat(image_org_mat, image_brightness, image_contrast, image_blur);
+    if (image_mat.empty()) return (UINT)-1;
+    GLenum format = GL_RGB;
+    GLenum iformat = GL_BGR;
+    GLenum type = GL_UNSIGNED_BYTE;
+    if (image_mat.channels() != 3 || image_mat.depth() != CV_8U)
     {
-        float ratio = (float)mat.cols / (float)mat.rows;
-        int cols = mat.cols - (mat.cols % 4) + 4; // we align to the multiple of 4 above
-        int rows = (int)((float)cols / ratio);
-        cv::Mat tmat;
-        resize(mat, tmat, cv::Size(cols, rows), 0, 0, cv::INTER_CUBIC);
-        mat.release();
-        mat = tmat.clone();
-        tmat.release();
-    }
-    // Create an OpenGL texture
-
-    // Determine the format and type of the pixel data based on the cv::Mat
-    GLenum format;
-    GLenum iformat;
-    GLenum type;
-    switch (mat.channels())
-    {
-    case 3:
-        format = GL_RGB;
-        iformat = GL_BGR;
-        image_mat = mat.clone();
-        mat.release();
-        break;
-    case 4:
-        format = GL_RGB;
-        iformat = GL_BGR;
-        cvtColor(mat, image_mat, COLOR_BGRA2BGR);
-        mat.release();
-        break;
-    default:
-        std::cerr << "Unsupported number of channels: " << mat.channels() << std::endl;
-        mat.release();
-        return (UINT)-1;
-    }
-    switch (image_mat.depth())
-    {
-    case CV_8U:
-        type = GL_UNSIGNED_BYTE;
-        break;
-    default:
-        std::cerr << "Unsupported data type: " << image_mat.depth() << std::endl;
+        std::cerr << "Unsupported image format for texture upload" << std::endl;
         image_mat.release();
         return (UINT)-1;
     }
@@ -18204,78 +17983,17 @@ UINT CreateTextureFromMat(void)
 }
 
 /// <summary>
-/// extract an image from a video and return it as a cv::Mat
-/// </summary>
-/// <param name="cap">the VideoCapture video</param>
-/// <returns>return the cv::Mat, if it failed, its "data" component is NULL</returns>
-cv::Mat getFrameAtTime(VideoCapture cap)
-{
-    int totalFrames = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_COUNT));
-    image_video_frame_rate = (long)(cap.get(cv::CAP_PROP_FPS) + 0.5);
-    double timeInSeconds = image_video_hour * 3600 + image_video_minute * 60 + image_video_second + ((float)image_video_frame / (float)image_video_frame_rate);
-    int positionInFrames = static_cast<int>(timeInSeconds * cap.get(cv::CAP_PROP_FPS));
-    positionInFrames = std::max(0, std::min(totalFrames - 1, positionInFrames));
-    cap.set(cv::CAP_PROP_POS_FRAMES, positionInFrames);
-    cv::Mat frame;
-    if (!cap.read(frame))
-        frame.data = NULL;
-    return frame;
-}
-
-/// <summary>
 /// create a cv::Mat in the general var image_mat from a video. image_mat is release'd if it failed
 /// </summary>
 /// <param name="video">the VideoCapture video</param>
 void CreateMatFromVideo(VideoCapture video)
 {
-    cv::Mat mat = getFrameAtTime(video);
-    if (!mat.data) return;
-    ApplyBrightnessContrastAndBlur(mat);
-    if (mat.cols % 4 != 0)
+    image_mat = LoadAndPrepareVideoFrame(video, image_video_hour, image_video_minute, image_video_second, image_video_frame, image_brightness, image_contrast, image_blur, &image_video_frame_rate);
+    if (image_mat.empty()) return;
+    if (image_mat.channels() != 3 || image_mat.depth() != CV_8U)
     {
-        float ratio = (float)mat.cols / (float)mat.rows;
-        int cols = mat.cols - (mat.cols % 4) + 4; // we align to the multiple of 4 above
-        int rows = (int)((float)cols / ratio);
-        cv::Mat tmat;
-        resize(mat, tmat, cv::Size(cols, rows), 0, 0, cv::INTER_CUBIC);
-        mat.release();
-        mat = tmat.clone();
-        tmat.release();
-    }
-    // Create an OpenGL texture
-
-    // Determine the format and type of the pixel data based on the cv::Mat
-    GLenum format;
-    GLenum iformat;
-    GLenum type;
-    switch (mat.channels())
-    {
-    case 3:
-        format = GL_RGB;
-        iformat = GL_BGR;
-        image_mat = mat.clone();
-        mat.release();
-        break;
-    case 4:
-        format = GL_RGB;
-        iformat = GL_BGR;
-        cvtColor(mat, image_mat, COLOR_BGRA2BGR);
-        mat.release();
-        break;
-    default:
-        std::cerr << "Unsupported number of channels: " << mat.channels() << std::endl;
-        mat.release();
-        return;
-    }
-    switch (image_mat.depth())
-    {
-    case CV_8U:
-        type = GL_UNSIGNED_BYTE;
-        break;
-    default:
-        std::cerr << "Unsupported data type: " << image_mat.depth() << std::endl;
+        std::cerr << "Unsupported image format for video frame" << std::endl;
         image_mat.release();
-        return;
     }
 }
 /// <summary>
@@ -18287,52 +18005,14 @@ void CreateMatFromVideo(VideoCapture video)
 /// <returns>return the texture ID or (UINT)-1 if it failed</returns>
 UINT CreateTextureFromVideo(VideoCapture video, UINT* width, UINT* height)
 {
-    cv::Mat mat = getFrameAtTime(video);
-    if (!mat.data) return (UINT)-1;
-    ApplyBrightnessContrastAndBlur(mat);
-    if (mat.cols % 4 != 0)
+    image_mat = LoadAndPrepareVideoFrame(video, image_video_hour, image_video_minute, image_video_second, image_video_frame, image_brightness, image_contrast, image_blur, &image_video_frame_rate);
+    if (image_mat.empty()) return (UINT)-1;
+    GLenum format = GL_RGB;
+    GLenum iformat = GL_BGR;
+    GLenum type = GL_UNSIGNED_BYTE;
+    if (image_mat.channels() != 3 || image_mat.depth() != CV_8U)
     {
-        float ratio = (float)mat.cols / (float)mat.rows;
-        int cols = mat.cols - (mat.cols % 4) + 4; // we align to the multiple of 4 above
-        int rows = (int)((float)cols / ratio);
-        cv::Mat tmat;
-        resize(mat, tmat, cv::Size(cols, rows), 0, 0, cv::INTER_CUBIC);
-        mat.release();
-        mat = tmat.clone();
-        tmat.release();
-    }
-    // Create an OpenGL texture
-
-    // Determine the format and type of the pixel data based on the cv::Mat
-    GLenum format;
-    GLenum iformat;
-    GLenum type;
-    switch (mat.channels())
-    {
-    case 3:
-        format = GL_RGB;
-        iformat = GL_BGR;
-        image_mat = mat.clone();
-        mat.release();
-        break;
-    case 4:
-        format = GL_RGB;
-        iformat = GL_BGR;
-        cvtColor(mat, image_mat, COLOR_BGRA2BGR);
-        mat.release();
-        break;
-    default:
-        std::cerr << "Unsupported number of channels: " << mat.channels() << std::endl;
-        mat.release();
-        return (UINT)-1;
-    }
-    switch (image_mat.depth())
-    {
-    case CV_8U:
-        type = GL_UNSIGNED_BYTE;
-        break;
-    default:
-        std::cerr << "Unsupported data type: " << image_mat.depth() << std::endl;
+        std::cerr << "Unsupported image format for texture upload" << std::endl;
         image_mat.release();
         return (UINT)-1;
     }
@@ -18406,28 +18086,23 @@ void CopyImageToSelection(cv::Mat tmp32, cv::Mat tmp64)
             else
                 pfr64 = &MycRom.cFrames[(tSelFrames[ti]) * fw64 * 64];
         }
-        for (UINT tj = 0; tj < HiSelection; tj++)
-        {
-            for (UINT tk = 0; tk < WiSelection; tk++)
-            {
-                if (is64)
-                {
-                    if (Copy_iMask[(YiSelection + tj) * fw64 + XiSelection + tk] != 0)
-                    {
-                        cv::Vec3b color = tmp64.at<cv::Vec3b>(tj, tk);
-                        pfr64[(YiSelection + tj) * fw64 + (XiSelection + tk)] = rgb888_to_rgb565(color[2], color[1], color[0]);
-                    }
-                }
-                if (is32)
-                {
-                    if (Copy_iMask[(YiSelection + tj) * fw32 * 2 + XiSelection + tk] != 0)
-                    {
-                        cv::Vec3b color = tmp32.at<cv::Vec3b>(tj / 2, tk / 2);
-                        pfr32[(YiSelection + tj) / 2 * fw32 + (XiSelection + tk) / 2] = rgb888_to_rgb565(color[2], color[1], color[0]);
-                    }
-                }
-            }
-        }
+        ImageCopyParams params{};
+        params.frame32 = pfr32;
+        params.frame64 = pfr64;
+        params.width32 = fw32;
+        params.width64 = fw64;
+        params.sel_x = XiSelection;
+        params.sel_y = YiSelection;
+        params.sel_w = WiSelection;
+        params.sel_h = HiSelection;
+        params.mask64 = Copy_iMask;
+        params.mask32 = Copy_iMask;
+        params.mask_stride64 = fw64;
+        params.mask_stride32 = fw32 * 2;
+        params.copy_to_32 = is32;
+        params.copy_to_64 = is64;
+        params.use_mask = true;
+        ApplyImageToFrames(tmp32, tmp64, params);
     }
 }
 /// <summary>
@@ -18465,22 +18140,19 @@ void CopyImageToBackground(cv::Mat tmp32, cv::Mat tmp64)
         fw64 = MycRom.fWidth;
         pfr64 = &MycRom.BackgroundFrames[acBG * fw64 * 64];
     }
-    for (UINT tj = 0; tj < HiSelection; tj++)
-    {
-        for (UINT tk = 0; tk < WiSelection; tk++)
-        {
-            if (is64)
-            {
-                cv::Vec3b color = tmp64.at<cv::Vec3b>(tj, tk);
-                pfr64[(YiSelection + tj) * fw64 + (XiSelection + tk)] = rgb888_to_rgb565(color[2], color[1], color[0]);
-            }
-            if (is32)
-            {
-                cv::Vec3b color = tmp32.at<cv::Vec3b>(tj / 2, tk / 2);
-                pfr32[(YiSelection + tj) / 2 * fw32 + (XiSelection + tk) / 2] = rgb888_to_rgb565(color[2], color[1], color[0]);
-            }
-        }
-    }
+    ImageCopyParams params{};
+    params.frame32 = pfr32;
+    params.frame64 = pfr64;
+    params.width32 = fw32;
+    params.width64 = fw64;
+    params.sel_x = XiSelection;
+    params.sel_y = YiSelection;
+    params.sel_w = WiSelection;
+    params.sel_h = HiSelection;
+    params.copy_to_32 = is32;
+    params.copy_to_64 = is64;
+    params.use_mask = false;
+    ApplyImageToFrames(tmp32, tmp64, params);
 }
 
 /// <summary>
@@ -18531,28 +18203,23 @@ void CopyImageTo1Selection(cv::Mat tmp32, cv::Mat tmp64, UINT nofr)
         else
             pfr64 = &MycRom.cFrames[nofr * fw64 * 64];
     }
-    for (UINT tj = 0; tj < HiSelection; tj++)
-    {
-        for (UINT tk = 0; tk < WiSelection; tk++)
-        {
-            if (is64)
-            {
-                if (Copy_iMask[(YiSelection + tj) * fw64 + XiSelection + tk] != 0)
-                {
-                    cv::Vec3b color = tmp64.at<cv::Vec3b>(tj, tk);
-                    pfr64[(YiSelection + tj) * fw64 + (XiSelection + tk)] = rgb888_to_rgb565(color[2], color[1], color[0]);
-                }
-            }
-            if (is32)
-            {
-                if (Copy_iMask[(YiSelection + tj) * fw32 * 2 + XiSelection + tk] != 0)
-                {
-                    cv::Vec3b color = tmp32.at<cv::Vec3b>(tj / 2, tk / 2);
-                    pfr32[(YiSelection + tj) / 2 * fw32 + (XiSelection + tk) / 2] = rgb888_to_rgb565(color[2], color[1], color[0]);
-                }
-            }
-        }
-    }
+    ImageCopyParams params{};
+    params.frame32 = pfr32;
+    params.frame64 = pfr64;
+    params.width32 = fw32;
+    params.width64 = fw64;
+    params.sel_x = XiSelection;
+    params.sel_y = YiSelection;
+    params.sel_w = WiSelection;
+    params.sel_h = HiSelection;
+    params.mask64 = Copy_iMask;
+    params.mask32 = Copy_iMask;
+    params.mask_stride64 = fw64;
+    params.mask_stride32 = fw32 * 2;
+    params.copy_to_32 = is32;
+    params.copy_to_64 = is64;
+    params.use_mask = true;
+    ApplyImageToFrames(tmp32, tmp64, params);
 }
 /*void CopyImageTo1Selection(cv::Mat mat, UINT nofr)
 {
@@ -18683,7 +18350,7 @@ GLuint CreateTextureFromClipboard(UINT* pw, UINT* ph)
         iformat = GL_BGRA;
         image_mat = Create24bcvMatFrom32bBitmap(hBmp);
         image_org_mat = image_mat.clone();
-        ApplyBrightnessContrastAndBlur(image_mat);
+        ApplyBrightnessContrastAndBlur(image_mat, image_brightness, image_contrast, image_blur);
     }
     else if (bm.bmBitsPixel == 24)
     {
@@ -18940,13 +18607,23 @@ void ScrollCopy(HWND hDlg)
         float accentrey = centreiy + (centrefy - centreiy) * (float)ti / (float)(nSelFrames - 1); // the panning y center in real image dimensions
         float acsemiw = crop_isemiw + (crop_fsemiw - crop_isemiw) * (float)ti / (float)(nSelFrames - 1); // the panning width size in real image dimensions
         float acsemih = crop_isemih + (crop_fsemih - crop_isemih) * (float)ti / (float)(nSelFrames - 1); // the panning height size in real image dimensions
-        cv::Rect croprect((int)(accentrex - acsemiw), (int)(accentrey - acsemih), (int)(2 * acsemiw), (int)(2 * acsemih));
-        cv::Mat croppedimg = image_mat(croprect);
         cv::Mat tmp64;
-        cv::resize(croppedimg, tmp64, cv::Size(WiSelection, HiSelection), 0, 0, ImgResizeFilter);
         cv::Mat tmp32;
-        cv::resize(croppedimg, tmp32, cv::Size(WiSelection / 2, HiSelection / 2), 0, 0, ImgResizeFilter);
-        croppedimg.release();
+        if (!CropAndResizeSelection(image_mat,
+                                    (int)(accentrex - acsemiw),
+                                    (int)(accentrey - acsemih),
+                                    (int)(2 * acsemiw),
+                                    (int)(2 * acsemih),
+                                    WiSelection,
+                                    HiSelection,
+                                    ImgResizeFilter,
+                                    tmp64,
+                                    tmp32))
+        {
+            EnableWindow(GetDlgItem(hDlg, IDC_SCROLLCOPY), TRUE);
+            free(image);
+            return;
+        }
         UINT fw64, fw32;
         UINT16* pfr32 = NULL, * pfr64 = NULL;
         bool is64 = false, is32 = false;
@@ -18990,28 +18667,23 @@ void ScrollCopy(HWND hDlg)
             else
                 pfr64 = &MycRom.cFrames[(tSelFrames[ti]) * fw64 * 64];
         }
-        for (UINT tj = 0; tj < HiSelection; tj++)
-        {
-            for (UINT tk = 0; tk < WiSelection; tk++)
-            {
-                if (is64)
-                {
-                    if (Copy_iMask[(YiSelection + tj) * fw64 + XiSelection + tk] != 0)
-                    {
-                        cv::Vec3b color = tmp64.at<cv::Vec3b>(tj, tk);
-                        pfr64[(YiSelection + tj) * fw64 + (XiSelection + tk)] = rgb888_to_rgb565(color[2], color[1], color[0]);
-                    }
-                }
-                if (is32)
-                {
-                    if (Copy_iMask[(YiSelection + tj) * fw64 + XiSelection + tk] != 0)
-                    {
-                        cv::Vec3b color = tmp32.at<cv::Vec3b>(tj / 2, tk / 2);
-                        pfr32[(YiSelection + tj) / 2 * fw32 + (XiSelection + tk) / 2] = rgb888_to_rgb565(color[2], color[1], color[0]);
-                    }
-                }
-            }
-        }
+        ImageCopyParams params{};
+        params.frame32 = pfr32;
+        params.frame64 = pfr64;
+        params.width32 = fw32;
+        params.width64 = fw64;
+        params.sel_x = XiSelection;
+        params.sel_y = YiSelection;
+        params.sel_w = WiSelection;
+        params.sel_h = HiSelection;
+        params.mask64 = Copy_iMask;
+        params.mask32 = Copy_iMask;
+        params.mask_stride64 = fw64;
+        params.mask_stride32 = fw64;
+        params.copy_to_32 = is32;
+        params.copy_to_64 = is64;
+        params.use_mask = true;
+        ApplyImageToFrames(tmp32, tmp64, params);
         tmp64.release();
         tmp32.release();
     }
@@ -19075,10 +18747,8 @@ void LoadImageOrVideo(HWND hDlg, LPSTR filename)
     while ((i > 0) && (Dir_Images[i] != '\\')) i--;
     Dir_Images[i + 1] = 0;
     SavePaths();
-    Mat tmat = imread(filename);
-    if (tmat.data != NULL)
+    if (IsImageFile(filename))
     {
-        tmat.release();
         if (TxImage != (UINT)-1)
         {
             glfwMakeContextCurrent(glfwimages);
@@ -19119,23 +18789,8 @@ void LoadImageOrVideo(HWND hDlg, LPSTR filename)
         GetSelectionSize();
         UpdateCropSize();
     }
-    else
+    else if (CanOpenVideoFile(filename))
     {
-        cv::VideoCapture cap(filename);
-        if (!cap.isOpened())
-        {
-            MessageBoxA(hImages, "Can't open the file", "Failed", MB_OK);
-            return;
-        }
-        cv::Mat tmat;
-        cap >> tmat;
-        if (tmat.empty())
-        {
-            cap.release();
-            tmat.release();
-            return;
-        }
-        tmat.release();
         if (TxImage != (UINT)-1)
         {
             glfwMakeContextCurrent(glfwimages);
@@ -19146,7 +18801,6 @@ void LoadImageOrVideo(HWND hDlg, LPSTR filename)
         }
         EnableWindow(GetDlgItem(hDlg, IDC_BRIGHTNESS), TRUE);
         EnableWindow(GetDlgItem(hDlg, IDC_CONTRAST), TRUE);
-        image_mat = tmat;
         image_source_format_video = true;
         image_video_cap.open(filename);
         image_video_hour = image_video_minute = image_video_second = image_video_frame = 0;
@@ -19171,7 +18825,7 @@ void LoadImageOrVideo(HWND hDlg, LPSTR filename)
         CheckDlgButton(hDlg, IDC_REGULDUR, FALSE);
         CheckDlgButton(hDlg, IDC_CURFRAMEALL, FALSE);
         SetDlgItemTextA(hDlg, IDC_CURSORTIME, "0:00:00:00");
-        int total_frames = (int)cap.get(cv::CAP_PROP_FRAME_COUNT);
+        int total_frames = (int)image_video_cap.get(cv::CAP_PROP_FRAME_COUNT);
         LongToHMSF((long)total_frames, &image_video_nhours, &image_video_nminutes, &image_video_nseconds, &image_video_nframes);
         UpdateHMSF(hDlg);
         SendMessage(GetDlgItem(hDlg, IDC_VIDEOSLIDER), TBM_SETTICFREQ, 1, 0);
@@ -19194,6 +18848,10 @@ void LoadImageOrVideo(HWND hDlg, LPSTR filename)
         image_posy = (ScrH3 - image_sizeH) / 2;
         GetSelectionSize();
         UpdateCropSize();
+    }
+    else
+    {
+        MessageBoxA(hImages, "Can't open the file", "Failed", MB_OK);
     }
 }
 
@@ -19464,13 +19122,13 @@ INT_PTR CALLBACK Toolbar_Proc3(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
                         int ix = (int)(crop_ioffsetx * ratio), iy = (int)(crop_ioffsety * ratio), wid = (int)(crop_iOsizeW * ratio), hei = (int)(crop_iOsizeH * ratio);
                         if (ix + wid > image_mat.cols) wid = image_mat.cols - ix;
                         if (iy + hei > image_mat.rows) hei = image_mat.rows - iy;
-                        cv::Rect croprect(ix, iy, wid, hei);
-                        cv::Mat croppedimg = image_mat(croprect);
                         cv::Mat tmp64;
-                        cv::resize(croppedimg, tmp64, cv::Size(WiSelection, HiSelection), 0, 0, ImgResizeFilter);
                         cv::Mat tmp32;
-                        cv::resize(croppedimg, tmp32, cv::Size(WiSelection / 2, HiSelection / 2), 0, 0, ImgResizeFilter);
-                        croppedimg.release();
+                        if (!CropAndResizeSelection(image_mat, ix, iy, wid, hei, WiSelection, HiSelection, ImgResizeFilter, tmp64, tmp32))
+                        {
+                            EnableWindow(GetDlgItem(hDlg, IDC_COPY), TRUE);
+                            return TRUE;
+                        }
                         if (Button_GetCheck(GetDlgItem(hwTB3, IDC_IMGTOFRAME)) == BST_CHECKED) CopyImageToSelection(tmp32, tmp64);
                         else 
                             CopyImageToBackground(tmp32, tmp64);
@@ -19542,13 +19200,13 @@ INT_PTR CALLBACK Toolbar_Proc3(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
                             int ix = (int)(crop_ioffsetx * ratio), iy = (int)(crop_ioffsety * ratio), wid = (int)(crop_iOsizeW * ratio), hei = (int)(crop_iOsizeH * ratio);
                             if (ix + wid > image_mat.cols) wid = image_mat.cols - ix;
                             if (iy + hei > image_mat.rows) hei = image_mat.rows - iy;
-                            cv::Rect croprect(ix, iy, wid, hei);
-                            cv::Mat croppedimg = image_mat(croprect);
                             cv::Mat tmp64;
-                            cv::resize(croppedimg, tmp64, cv::Size(WiSelection, HiSelection), 0, 0, ImgResizeFilter);
                             cv::Mat tmp32;
-                            cv::resize(croppedimg, tmp32, cv::Size(WiSelection / 2, HiSelection / 2), 0, 0, ImgResizeFilter);
-                            croppedimg.release();
+                            if (!CropAndResizeSelection(image_mat, ix, iy, wid, hei, WiSelection, HiSelection, ImgResizeFilter, tmp64, tmp32))
+                            {
+                                EnableWindow(GetDlgItem(hDlg, IDC_COPY), TRUE);
+                                return TRUE;
+                            }
                             //unsigned char palette[64 * 3];
                             //unsigned char image[256 * 64];
                             //if (image_ncolsel > NiSelection) image_ncolsel = NiSelection;
