@@ -26,6 +26,14 @@ const cv::Mat* IndexedImageStore::at(int index) const
     return &m_images[index];
 }
 
+cv::Mat* IndexedImageStore::atMutable(int index)
+{
+    if (index < 0 || index >= m_images.size()) {
+        return nullptr;
+    }
+    return &m_images[index];
+}
+
 int IndexedImageStore::count() const
 {
     return m_images.size();

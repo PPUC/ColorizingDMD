@@ -4,6 +4,7 @@
 
 class GLCanvasWidget;
 class QLabel;
+class QToolButton;
 namespace cv {
 class Mat;
 }
@@ -16,8 +17,18 @@ public:
     void setTitle(const QString& title);
     void setStatusText(const QString& text);
     void setImage(const cv::Mat& image);
+    GLCanvasWidget* canvas() const;
+
+signals:
+    void fitRequested();
+    void gridToggled(bool enabled);
+
+protected:
+    void resizeEvent(QResizeEvent* event) override;
 
 private:
     GLCanvasWidget* m_canvas;
     QLabel* m_label;
+    QToolButton* m_fitButton;
+    QToolButton* m_gridButton;
 };

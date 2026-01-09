@@ -11,6 +11,7 @@ public:
     void removeAt(int index);
     void clear();
     const cv::Mat* at(int index) const;
+    cv::Mat* atMutable(int index);
     int count() const;
 
 private:

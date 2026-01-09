@@ -1,9 +1,11 @@
 #include "GLCanvasWidget.h"
 
 #include <algorithm>
+#include <cmath>
 
 #include <QMouseEvent>
 #include <QPainter>
+#include <QResizeEvent>
 #include <QWheelEvent>
 
 GLCanvasWidget::GLCanvasWidget(QWidget* parent)
@@ -12,6 +14,9 @@ GLCanvasWidget::GLCanvasWidget(QWidget* parent)
     , m_zoom(1.0)
     , m_pan(0.0, 0.0)
     , m_panning(false)
+    , m_panningEnabled(true)
+    , m_fitOnResize(false)
+    , m_gridEnabled(true)
 {
     setFocusPolicy(Qt::StrongFocus);
 }
@@ -22,20 +27,73 @@ void GLCanvasWidget::setOverlayText(const QString& text)
     update();
 }
 
-void GLCanvasWidget::setImage(const cv::Mat& image)
+namespace {
+cv::Mat ConvertToDisplayMat(const cv::Mat& image)
 {
     if (image.empty()) {
-        m_image.release();
-        update();
+        return cv::Mat();
+    }
+    cv::Mat converted;
+    if (image.channels() == 3) {
+        cv::cvtColor(image, converted, cv::COLOR_BGR2RGB);
+    } else if (image.channels() == 4) {
+        cv::cvtColor(image, converted, cv::COLOR_BGRA2RGBA);
+    } else {
+        converted = image.clone();
+    }
+    return converted;
+}
+}
+
+void GLCanvasWidget::setImage(const cv::Mat& image)
+{
+    m_image = ConvertToDisplayMat(image);
+    update();
+}
+
+void GLCanvasWidget::setPreviewImage(const cv::Mat& image)
+{
+    m_preview = ConvertToDisplayMat(image);
+    update();
+}
+
+void GLCanvasWidget::clearPreviewImage()
+{
+    m_preview.release();
+    update();
+}
+
+void GLCanvasWidget::setPanningEnabled(bool enabled)
+{
+    m_panningEnabled = enabled;
+    if (!m_panningEnabled) {
+        m_panning = false;
+    }
+}
+
+void GLCanvasWidget::fitToImage()
+{
+    if (m_image.empty()) {
         return;
     }
-    if (image.channels() == 3) {
-        cv::cvtColor(image, m_image, cv::COLOR_BGR2RGB);
-    } else if (image.channels() == 4) {
-        cv::cvtColor(image, m_image, cv::COLOR_BGRA2RGBA);
-    } else {
-        m_image = image.clone();
+    const double scaleX = width() > 0 ? static_cast<double>(width()) / m_image.cols : 1.0;
+    const double scaleY = height() > 0 ? static_cast<double>(height()) / m_image.rows : 1.0;
+    m_zoom = std::max(0.1, std::min(8.0, std::min(scaleX, scaleY)));
+    m_pan = QPointF(0.0, 0.0);
+    update();
+}
+
+void GLCanvasWidget::requestFitOnResize(bool enabled)
+{
+    m_fitOnResize = enabled;
+    if (m_fitOnResize) {
+        fitToImage();
     }
+}
+
+void GLCanvasWidget::setGridEnabled(bool enabled)
+{
+    m_gridEnabled = enabled;
     update();
 }
 
@@ -77,6 +135,51 @@ void GLCanvasWidget::paintGL()
         painter.drawText(rect(), Qt::AlignCenter, m_overlayText);
     }
 
+    if (!m_preview.empty()) {
+        QImage previewImage;
+        if (m_preview.channels() == 3) {
+            previewImage = QImage(m_preview.data, m_preview.cols, m_preview.rows, m_preview.step, QImage::Format_RGB888);
+        } else if (m_preview.channels() == 4) {
+            previewImage = QImage(m_preview.data, m_preview.cols, m_preview.rows, m_preview.step, QImage::Format_RGBA8888);
+        }
+        if (!previewImage.isNull()) {
+            painter.save();
+            painter.setOpacity(0.5);
+            painter.translate(width() / 2.0 + m_pan.x(), height() / 2.0 + m_pan.y());
+            painter.scale(m_zoom, m_zoom);
+            QRectF target(-previewImage.width() / 2.0, -previewImage.height() / 2.0,
+                          previewImage.width(), previewImage.height());
+            painter.drawImage(target, previewImage);
+            painter.restore();
+        }
+    }
+
+    if (m_gridEnabled && !m_image.empty() && m_zoom >= 4.0) {
+        painter.save();
+        painter.translate(width() / 2.0 + m_pan.x(), height() / 2.0 + m_pan.y());
+        painter.scale(m_zoom, m_zoom);
+        const double gap = 0.5;
+        const int w = m_image.cols;
+        const int h = m_image.rows;
+        painter.setOpacity(0.25);
+        painter.setPen(QPen(QColor(40, 40, 40), 0));
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                painter.fillRect(QRectF(x - w / 2.0, y - h / 2.0, 1.0 - gap, 1.0 - gap),
+                                 QColor(20, 20, 20));
+            }
+        }
+        painter.setOpacity(0.45);
+        painter.setPen(QPen(QColor(60, 60, 60), 0));
+        for (int x = 0; x <= w; ++x) {
+            painter.drawLine(QPointF(x - w / 2.0, -h / 2.0), QPointF(x - w / 2.0, h / 2.0));
+        }
+        for (int y = 0; y <= h; ++y) {
+            painter.drawLine(QPointF(-w / 2.0, y - h / 2.0), QPointF(w / 2.0, y - h / 2.0));
+        }
+        painter.restore();
+    }
+
     painter.setPen(QColor(150, 150, 150));
     painter.drawText(QRect(10, 10, width() - 20, 20),
                      Qt::AlignLeft,
@@ -86,18 +189,49 @@ void GLCanvasWidget::paintGL()
                          .arg(QString::number(m_pan.y(), 'f', 1)));
 }
 
+namespace {
+bool MapToImage(const QPoint& pos,
+                const cv::Mat& image,
+                double zoom,
+                const QPointF& pan,
+                const QSize& widgetSize,
+                int& outX,
+                int& outY)
+{
+    if (image.empty() || zoom <= 0.0) {
+        return false;
+    }
+    const QPointF center(widgetSize.width() / 2.0 + pan.x(), widgetSize.height() / 2.0 + pan.y());
+    const QPointF local = (pos - center) / zoom + QPointF(image.cols / 2.0, image.rows / 2.0);
+    const int x = static_cast<int>(std::floor(local.x()));
+    const int y = static_cast<int>(std::floor(local.y()));
+    if (x < 0 || y < 0 || x >= image.cols || y >= image.rows) {
+        return false;
+    }
+    outX = x;
+    outY = y;
+    return true;
+}
+}
+
 void GLCanvasWidget::wheelEvent(QWheelEvent* event)
 {
     const double delta = event->angleDelta().y() / 120.0;
     m_zoom = std::max(0.1, std::min(8.0, m_zoom + delta * 0.1));
+    m_fitOnResize = false;
     update();
 }
 
 void GLCanvasWidget::mousePressEvent(QMouseEvent* event)
 {
-    if (event->button() == Qt::LeftButton) {
+    if (event->button() == Qt::LeftButton && m_panningEnabled) {
         m_panning = true;
         m_lastPos = event->pos();
+    }
+    int x = 0;
+    int y = 0;
+    if (MapToImage(event->pos(), m_image, m_zoom, m_pan, size(), x, y)) {
+        emit imageClicked(x, y, event->button());
     }
     QOpenGLWidget::mousePressEvent(event);
 }
@@ -108,7 +242,15 @@ void GLCanvasWidget::mouseMoveEvent(QMouseEvent* event)
         const QPoint delta = event->pos() - m_lastPos;
         m_pan += QPointF(delta.x(), delta.y());
         m_lastPos = event->pos();
+        m_fitOnResize = false;
         update();
+    }
+    if (!m_panning && (event->buttons() & (Qt::LeftButton | Qt::RightButton))) {
+        int x = 0;
+        int y = 0;
+        if (MapToImage(event->pos(), m_image, m_zoom, m_pan, size(), x, y)) {
+            emit imageDragged(x, y, event->buttons());
+        }
     }
     QOpenGLWidget::mouseMoveEvent(event);
 }
@@ -118,5 +260,18 @@ void GLCanvasWidget::mouseReleaseEvent(QMouseEvent* event)
     if (event->button() == Qt::LeftButton) {
         m_panning = false;
     }
+    int x = 0;
+    int y = 0;
+    if (MapToImage(event->pos(), m_image, m_zoom, m_pan, size(), x, y)) {
+        emit imageReleased(x, y, event->button());
+    }
     QOpenGLWidget::mouseReleaseEvent(event);
+}
+
+void GLCanvasWidget::resizeEvent(QResizeEvent* event)
+{
+    QOpenGLWidget::resizeEvent(event);
+    if (m_fitOnResize) {
+        fitToImage();
+    }
 }

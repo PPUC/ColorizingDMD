@@ -14,6 +14,7 @@ public:
     void openProject(const QString& path);
     void saveProject(const QString& path);
     void addRecentFile(const QString& path);
+    void setRecentFiles(const QStringList& files);
     void addImportedImage(const QString& path);
     void addFrame();
     void addSprite();

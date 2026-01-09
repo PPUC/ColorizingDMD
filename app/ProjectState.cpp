@@ -56,6 +56,12 @@ void ProjectState::addRecentFile(const QString& path)
     emit recentFilesChanged(m_recentFiles);
 }
 
+void ProjectState::setRecentFiles(const QStringList& files)
+{
+    m_recentFiles = files;
+    emit recentFilesChanged(m_recentFiles);
+}
+
 void ProjectState::addImportedImage(const QString& path)
 {
     if (path.isEmpty()) {

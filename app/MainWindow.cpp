@@ -2,6 +2,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QActionGroup>
 #include <QComboBox>
 #include <QDockWidget>
 #include <QLabel>
@@ -13,10 +14,12 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QSettings>
 #include <QSpinBox>
 #include <QStatusBar>
 #include <QStyle>
 #include <QTabWidget>
+#include <QTimer>
 #include <QToolBar>
 #include <QSize>
 #include <QVBoxLayout>
@@ -25,11 +28,13 @@
 #include <QSignalBlocker>
 
 #include <algorithm>
+#include <cmath>
 #include <cctype>
 
 #include <opencv2/imgproc.hpp>
 
 #include "CanvasWidget.h"
+#include "GLCanvasWidget.h"
 #include "ProjectState.h"
 #include "ProjectIO.h"
 #include "ImageStore.h"
@@ -149,6 +154,31 @@ MainWindow::MainWindow(QWidget* parent)
     auto* addFrameAction = new QAction(QIcon(":/icons/add.png"), "Add &Frame", this);
     auto* addSpriteAction = new QAction(QIcon(":/icons/addspr.png"), "Add &Sprite", this);
     auto* removeSelectedAction = new QAction(QIcon(":/icons/remove.png"), "&Remove Selected", this);
+    auto* enableDrawAction = new QAction("Enable &Drawing", this);
+    enableDrawAction->setCheckable(true);
+    auto* toolPointAction = new QAction("&Point", this);
+    toolPointAction->setCheckable(true);
+    auto* toolLineAction = new QAction("&Line", this);
+    toolLineAction->setCheckable(true);
+    auto* toolRectAction = new QAction("&Rectangle", this);
+    toolRectAction->setCheckable(true);
+    auto* toolRectFillAction = new QAction("Rectangle &Fill", this);
+    toolRectFillAction->setCheckable(true);
+    auto* toolCircleAction = new QAction("&Circle", this);
+    toolCircleAction->setCheckable(true);
+    auto* toolCircleFillAction = new QAction("Circle F&ill", this);
+    toolCircleFillAction->setCheckable(true);
+    auto* toolEllipseAction = new QAction("&Ellipse", this);
+    toolEllipseAction->setCheckable(true);
+    auto* toolEllipseFillAction = new QAction("Ellipse Fi&ll", this);
+    toolEllipseFillAction->setCheckable(true);
+    auto* toolColorPickerAction = new QAction("Color &Picker", this);
+    toolColorPickerAction->setCheckable(true);
+    auto* toolMagicFillAction = new QAction("&Magic Fill", this);
+    toolMagicFillAction->setCheckable(true);
+    auto* cancelDrawAction = new QAction("&Cancel Draw", this);
+    cancelDrawAction->setShortcut(QKeySequence(Qt::Key_Escape));
+    auto* fitToViewAction = new QAction("Fit to &View", this);
     removeSelectedAction->setShortcut(QKeySequence::Delete);
     removeSelectedAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
 
@@ -166,6 +196,25 @@ MainWindow::MainWindow(QWidget* parent)
     editMenu->addAction(addSpriteAction);
     editMenu->addSeparator();
     editMenu->addAction(removeSelectedAction);
+    auto* drawMenu = editMenu->addMenu("&Draw");
+    drawMenu->addAction(enableDrawAction);
+    drawMenu->addSeparator();
+    drawMenu->addAction(toolPointAction);
+    drawMenu->addAction(toolLineAction);
+    drawMenu->addAction(toolRectAction);
+    drawMenu->addAction(toolRectFillAction);
+    drawMenu->addAction(toolCircleAction);
+    drawMenu->addAction(toolCircleFillAction);
+    drawMenu->addAction(toolEllipseAction);
+    drawMenu->addAction(toolEllipseFillAction);
+    drawMenu->addSeparator();
+    drawMenu->addAction(toolColorPickerAction);
+    drawMenu->addAction(toolMagicFillAction);
+    drawMenu->addSeparator();
+    drawMenu->addAction(cancelDrawAction);
+
+    viewMenu->addSeparator();
+    viewMenu->addAction(fitToViewAction);
 
     auto* toolbar = addToolBar("Main");
     toolbar->setIconSize(QSize(22, 22));
@@ -178,6 +227,24 @@ MainWindow::MainWindow(QWidget* parent)
     toolbar->addSeparator();
     toolbar->addAction(addFrameAction);
     toolbar->addAction(addSpriteAction);
+    toolbar->addSeparator();
+    toolbar->addAction(enableDrawAction);
+
+    auto* drawToolbar = addToolBar("Draw");
+    drawToolbar->setIconSize(QSize(18, 18));
+    drawToolbar->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+    drawToolbar->addAction(toolPointAction);
+    drawToolbar->addAction(toolLineAction);
+    drawToolbar->addAction(toolRectAction);
+    drawToolbar->addAction(toolRectFillAction);
+    drawToolbar->addAction(toolCircleAction);
+    drawToolbar->addAction(toolCircleFillAction);
+    drawToolbar->addAction(toolEllipseAction);
+    drawToolbar->addAction(toolEllipseFillAction);
+    drawToolbar->addAction(toolColorPickerAction);
+    drawToolbar->addAction(toolMagicFillAction);
+
+    addAction(cancelDrawAction);
 
     auto* status = statusBar();
     status->showMessage("Qt port: UI scaffolding in progress");
@@ -188,109 +255,19 @@ MainWindow::MainWindow(QWidget* parent)
         m_imageStore->clear();
         m_frameStore->clear();
         m_spriteStore->clear();
+        m_frameDurations.clear();
+        m_spriteNames.clear();
+        m_sectionStarts.clear();
+        m_sectionNames.clear();
+        updateMetadataForFrame(-1);
+        updateMetadataForSprite(-1);
         populateBookmarks({}, {});
         statusBar()->showMessage("New project (stub)", 3000);
     });
     connect(openAction, &QAction::triggered, this, [this]() {
         const QString filename = QFileDialog::getOpenFileName(this, "Open Project", QString(), "Serum Projects (*.crom *.cROM *.crp *.cRP);;All Files (*.*)");
         if (!filename.isEmpty()) {
-            const QFileInfo info(filename);
-            const QString suffix = info.suffix().toLower();
-            if (suffix == "crom" || suffix == "crp") {
-                if (suffix == "crom" && IsLikelyJsonFile(filename)) {
-                    QString error;
-                    m_imageStore->clear();
-                    m_frameStore->clear();
-                    m_spriteStore->clear();
-                    populateBookmarks({}, {});
-                    if (LoadProjectJson(*m_state, filename, &error)) {
-                        statusBar()->showMessage(QString("Open: %1").arg(filename), 5000);
-                    } else {
-                        statusBar()->showMessage(QString("Open failed: %1").arg(error), 5000);
-                    }
-                    return;
-                }
-                QString cromPath = filename;
-                QString rpPath;
-                if (suffix == "crp") {
-                    const QString base = info.completeBaseName();
-                    const QString dir = info.absolutePath();
-                    const QString candidate = dir + "/" + base + ".crom";
-                    if (QFileInfo::exists(candidate)) {
-                        cromPath = candidate;
-                    } else {
-                        const QString candidateUpper = dir + "/" + base + ".cROM";
-                        if (QFileInfo::exists(candidateUpper)) {
-                            cromPath = candidateUpper;
-                        }
-                    }
-                    rpPath = filename;
-                } else {
-                    const QString base = info.completeBaseName();
-                    const QString dir = info.absolutePath();
-                    const QString candidate = dir + "/" + base + ".cRP";
-                    if (QFileInfo::exists(candidate)) {
-                        rpPath = candidate;
-                    }
-                }
-                LegacyProject legacy;
-                std::string error;
-                if (!LoadLegacyProject(cromPath.toStdString(), rpPath.toStdString(), legacy, &error)) {
-                    statusBar()->showMessage(QString("Open failed: %1").arg(QString::fromStdString(error)), 5000);
-                    return;
-                }
-
-                m_imageStore->clear();
-                m_frameStore->clear();
-                m_spriteStore->clear();
-                for (const auto& frame : legacy.frames) {
-                    m_frameStore->add(frame);
-                }
-                for (const auto& sprite : legacy.sprites) {
-                    m_spriteStore->add(sprite);
-                }
-
-                QStringList frames;
-                for (int i = 0; i < static_cast<int>(legacy.frames.size()); ++i) {
-                    frames.append(QString("Frame %1").arg(i));
-                }
-                QStringList sprites;
-                if (!legacy.sprite_labels.empty()) {
-                    for (const auto& label : legacy.sprite_labels) {
-                        sprites.append(QString::fromStdString(label));
-                    }
-                } else {
-                    for (int i = 0; i < static_cast<int>(legacy.sprites.size()); ++i) {
-                        sprites.append(QString("Sprite %1").arg(i));
-                    }
-                }
-
-                {
-                    QSignalBlocker blocker(m_state);
-                    m_state->newProject();
-                    m_state->openProject(cromPath);
-                    m_state->setFramesAndSprites(frames, sprites);
-                }
-                updateWindowTitle();
-                m_projectLabel->setText(cromPath);
-                refreshRecentMenu();
-                refreshImageList();
-                refreshCounts();
-                refreshFrameSpriteLists();
-                populateBookmarks(legacy.section_firsts, legacy.section_names);
-                statusBar()->showMessage(QString("Open legacy: %1").arg(cromPath), 5000);
-                return;
-            }
-            QString error;
-            m_imageStore->clear();
-            m_frameStore->clear();
-            m_spriteStore->clear();
-            populateBookmarks({}, {});
-            if (LoadProjectJson(*m_state, filename, &error)) {
-                statusBar()->showMessage(QString("Open: %1").arg(filename), 5000);
-            } else {
-                statusBar()->showMessage(QString("Open failed: %1").arg(error), 5000);
-            }
+            openProjectFile(filename);
         }
     });
     connect(saveAction, &QAction::triggered, this, [this]() {
@@ -364,6 +341,48 @@ MainWindow::MainWindow(QWidget* parent)
         if (m_spritesList->count() > 0) {
             m_spritesList->setCurrentRow(m_spritesList->count() - 1);
         }
+    });
+    auto* drawToolGroup = new QActionGroup(this);
+    drawToolGroup->setExclusive(true);
+    drawToolGroup->addAction(toolPointAction);
+    drawToolGroup->addAction(toolLineAction);
+    drawToolGroup->addAction(toolRectAction);
+    drawToolGroup->addAction(toolRectFillAction);
+    drawToolGroup->addAction(toolCircleAction);
+    drawToolGroup->addAction(toolCircleFillAction);
+    drawToolGroup->addAction(toolEllipseAction);
+    drawToolGroup->addAction(toolEllipseFillAction);
+    drawToolGroup->addAction(toolColorPickerAction);
+    drawToolGroup->addAction(toolMagicFillAction);
+    toolPointAction->setChecked(true);
+
+    connect(enableDrawAction, &QAction::toggled, this, [this](bool checked) {
+        m_drawPointEnabled = checked;
+        m_framesCanvas->canvas()->setPanningEnabled(!checked);
+        m_spritesCanvas->canvas()->setPanningEnabled(!checked);
+        if (!checked) {
+            m_framesCanvas->canvas()->clearPreviewImage();
+            m_spritesCanvas->canvas()->clearPreviewImage();
+            m_frameHasStart = false;
+            m_spriteHasStart = false;
+        }
+        statusBar()->showMessage(checked ? "Drawing: enabled" : "Drawing: disabled", 2000);
+    });
+    connect(toolPointAction, &QAction::triggered, this, [this]() { m_drawTool = DrawTool::Point; });
+    connect(toolLineAction, &QAction::triggered, this, [this]() { m_drawTool = DrawTool::Line; });
+    connect(toolRectAction, &QAction::triggered, this, [this]() { m_drawTool = DrawTool::Rect; });
+    connect(toolRectFillAction, &QAction::triggered, this, [this]() { m_drawTool = DrawTool::RectFill; });
+    connect(toolCircleAction, &QAction::triggered, this, [this]() { m_drawTool = DrawTool::Circle; });
+    connect(toolCircleFillAction, &QAction::triggered, this, [this]() { m_drawTool = DrawTool::CircleFill; });
+    connect(toolEllipseAction, &QAction::triggered, this, [this]() { m_drawTool = DrawTool::Ellipse; });
+    connect(toolEllipseFillAction, &QAction::triggered, this, [this]() { m_drawTool = DrawTool::EllipseFill; });
+    connect(toolColorPickerAction, &QAction::triggered, this, [this]() { m_drawTool = DrawTool::ColorPicker; });
+    connect(toolMagicFillAction, &QAction::triggered, this, [this]() { m_drawTool = DrawTool::MagicFill; });
+    connect(cancelDrawAction, &QAction::triggered, this, [this]() { cancelCurrentDraw(); });
+    connect(fitToViewAction, &QAction::triggered, this, [this]() {
+        m_framesCanvas->canvas()->requestFitOnResize(true);
+        m_spritesCanvas->canvas()->requestFitOnResize(true);
+        statusBar()->showMessage("Fit to view", 1500);
     });
     connect(removeSelectedAction, &QAction::triggered, this, [this]() {
         if (m_framesList->hasFocus()) {
@@ -440,11 +459,15 @@ MainWindow::MainWindow(QWidget* parent)
     m_frameJump->setPrefix("Frame ");
     m_countsLabel = new QLabel("Frames: 0, Sprites: 0", inspectorWidget);
     m_selectionLabel = new QLabel("None", inspectorWidget);
+    m_frameMetaLabel = new QLabel("-", inspectorWidget);
+    m_spriteMetaLabel = new QLabel("-", inspectorWidget);
     inspectorLayout->addRow("Project", m_projectLabel);
     inspectorLayout->addRow("Bookmarks", m_bookmarksCombo);
     inspectorLayout->addRow("Go to frame", m_frameJump);
     inspectorLayout->addRow("Counts", m_countsLabel);
     inspectorLayout->addRow("Selection", m_selectionLabel);
+    inspectorLayout->addRow("Frame info", m_frameMetaLabel);
+    inspectorLayout->addRow("Sprite info", m_spriteMetaLabel);
     inspectorWidget->setLayout(inspectorLayout);
     inspectorDock->setWidget(inspectorWidget);
     addDockWidget(Qt::RightDockWidgetArea, inspectorDock);
@@ -464,6 +487,7 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(m_state, &ProjectState::recentFilesChanged, this, [this]() {
         refreshRecentMenu();
+        persistRecentFiles();
     });
     connect(m_state, &ProjectState::imagesChanged, this, [this]() {
         refreshImageList();
@@ -504,6 +528,7 @@ MainWindow::MainWindow(QWidget* parent)
                 QSignalBlocker blocker(m_frameJump);
                 m_frameJump->setValue(m_framesList->currentRow());
             }
+            updateMetadataForFrame(m_framesList->currentRow());
         } else {
             updateSelectionFromLists();
         }
@@ -514,6 +539,7 @@ MainWindow::MainWindow(QWidget* parent)
             m_spritesCanvas->setTitle(QString("Sprite canvas - %1").arg(text));
             m_spritesCanvas->setStatusText(QString("Selected %1").arg(text));
             showSpriteAtIndex(m_spritesList->currentRow());
+            updateMetadataForSprite(m_spritesList->currentRow());
         } else {
             updateSelectionFromLists();
         }
@@ -529,6 +555,38 @@ MainWindow::MainWindow(QWidget* parent)
         } else {
             updateSelectionFromLists();
         }
+    });
+
+    connect(m_framesCanvas->canvas(), &GLCanvasWidget::imageClicked, this, [this](int x, int y, Qt::MouseButton button) {
+        handleToolPress(true, x, y, button);
+    });
+    connect(m_framesCanvas->canvas(), &GLCanvasWidget::imageDragged, this, [this](int x, int y, Qt::MouseButtons buttons) {
+        handleToolDrag(true, x, y, buttons);
+    });
+    connect(m_framesCanvas->canvas(), &GLCanvasWidget::imageReleased, this, [this](int x, int y, Qt::MouseButton button) {
+        handleToolRelease(true, x, y, button);
+    });
+    connect(m_spritesCanvas->canvas(), &GLCanvasWidget::imageClicked, this, [this](int x, int y, Qt::MouseButton button) {
+        handleToolPress(false, x, y, button);
+    });
+    connect(m_spritesCanvas->canvas(), &GLCanvasWidget::imageDragged, this, [this](int x, int y, Qt::MouseButtons buttons) {
+        handleToolDrag(false, x, y, buttons);
+    });
+    connect(m_spritesCanvas->canvas(), &GLCanvasWidget::imageReleased, this, [this](int x, int y, Qt::MouseButton button) {
+        handleToolRelease(false, x, y, button);
+    });
+
+    connect(m_framesCanvas, &CanvasWidget::fitRequested, this, [this]() {
+        m_framesCanvas->canvas()->requestFitOnResize(true);
+    });
+    connect(m_spritesCanvas, &CanvasWidget::fitRequested, this, [this]() {
+        m_spritesCanvas->canvas()->requestFitOnResize(true);
+    });
+    connect(m_framesCanvas, &CanvasWidget::gridToggled, this, [this](bool enabled) {
+        m_framesCanvas->canvas()->setGridEnabled(enabled);
+    });
+    connect(m_spritesCanvas, &CanvasWidget::gridToggled, this, [this](bool enabled) {
+        m_spritesCanvas->canvas()->setGridEnabled(enabled);
     });
 
     connect(m_frameFilter, &QLineEdit::textChanged, this, [this](const QString& text) {
@@ -547,6 +605,12 @@ MainWindow::MainWindow(QWidget* parent)
     refreshImageList();
     refreshCounts();
     refreshFrameSpriteLists();
+
+    QSettings settings("PPUC", "ColorizingDMD");
+    const QStringList recent = settings.value("recentFiles").toStringList();
+    if (!recent.isEmpty()) {
+        m_state->setRecentFiles(recent);
+    }
 }
 
 void MainWindow::updateWindowTitle()
@@ -558,14 +622,157 @@ void MainWindow::updateWindowTitle()
     setWindowTitle(QString("ColorizingDMD - %1").arg(m_state->projectPath()));
 }
 
+void MainWindow::persistRecentFiles()
+{
+    QSettings settings("PPUC", "ColorizingDMD");
+    settings.setValue("recentFiles", m_state->recentFiles());
+    settings.sync();
+}
+
+void MainWindow::openProjectFile(const QString& filename)
+{
+    if (filename.isEmpty()) {
+        return;
+    }
+    const QFileInfo info(filename);
+    const QString suffix = info.suffix().toLower();
+    if (suffix == "crom" || suffix == "crp") {
+        if (suffix == "crom" && IsLikelyJsonFile(filename)) {
+            QString error;
+            m_imageStore->clear();
+            m_frameStore->clear();
+            m_spriteStore->clear();
+            m_frameDurations.clear();
+            m_spriteNames.clear();
+            m_sectionStarts.clear();
+            m_sectionNames.clear();
+            updateMetadataForFrame(-1);
+            updateMetadataForSprite(-1);
+            populateBookmarks({}, {});
+            if (LoadProjectJson(*m_state, filename, &error)) {
+                statusBar()->showMessage(QString("Open: %1").arg(filename), 5000);
+                persistRecentFiles();
+            } else {
+                statusBar()->showMessage(QString("Open failed: %1").arg(error), 5000);
+            }
+            return;
+        }
+        QString cromPath = filename;
+        QString rpPath;
+        if (suffix == "crp") {
+            const QString base = info.completeBaseName();
+            const QString dir = info.absolutePath();
+            const QString candidate = dir + "/" + base + ".crom";
+            if (QFileInfo::exists(candidate)) {
+                cromPath = candidate;
+            } else {
+                const QString candidateUpper = dir + "/" + base + ".cROM";
+                if (QFileInfo::exists(candidateUpper)) {
+                    cromPath = candidateUpper;
+                }
+            }
+            rpPath = filename;
+        } else {
+            const QString base = info.completeBaseName();
+            const QString dir = info.absolutePath();
+            const QString candidate = dir + "/" + base + ".cRP";
+            if (QFileInfo::exists(candidate)) {
+                rpPath = candidate;
+            }
+        }
+        LegacyProject legacy;
+        std::string error;
+        if (!LoadLegacyProject(cromPath.toStdString(), rpPath.toStdString(), legacy, &error)) {
+            statusBar()->showMessage(QString("Open failed: %1").arg(QString::fromStdString(error)), 5000);
+            return;
+        }
+
+        m_imageStore->clear();
+        m_frameStore->clear();
+        m_spriteStore->clear();
+        m_frameDurations.clear();
+        m_spriteNames.clear();
+        m_sectionStarts.clear();
+        m_sectionNames.clear();
+        updateMetadataForFrame(-1);
+        updateMetadataForSprite(-1);
+        for (const auto& frame : legacy.frames) {
+            m_frameStore->add(frame);
+        }
+        for (const auto& sprite : legacy.sprites) {
+            m_spriteStore->add(sprite);
+        }
+        m_frameDurations = legacy.frame_durations;
+        m_spriteNames = legacy.sprite_labels;
+        m_sectionStarts = legacy.section_firsts;
+        m_sectionNames = legacy.section_names;
+
+        QStringList frames;
+        for (int i = 0; i < static_cast<int>(legacy.frames.size()); ++i) {
+            frames.append(QString("Frame %1").arg(i));
+        }
+        QStringList sprites;
+        if (!legacy.sprite_labels.empty()) {
+            for (const auto& label : legacy.sprite_labels) {
+                sprites.append(QString::fromStdString(label));
+            }
+        } else {
+            for (int i = 0; i < static_cast<int>(legacy.sprites.size()); ++i) {
+                sprites.append(QString("Sprite %1").arg(i));
+            }
+        }
+
+        {
+            QSignalBlocker blocker(m_state);
+            m_state->newProject();
+            m_state->openProject(cromPath);
+            m_state->setFramesAndSprites(frames, sprites);
+        }
+        updateWindowTitle();
+        m_projectLabel->setText(cromPath);
+        refreshRecentMenu();
+        refreshImageList();
+        refreshCounts();
+        refreshFrameSpriteLists();
+        if (!legacy.frames.empty()) {
+            m_framesList->setCurrentRow(0);
+            QTimer::singleShot(0, this, [this]() {
+                m_framesCanvas->canvas()->requestFitOnResize(true);
+            });
+        }
+        populateBookmarks(legacy.section_firsts, legacy.section_names);
+        statusBar()->showMessage(QString("Open legacy: %1").arg(cromPath), 5000);
+        m_state->setRecentFiles(m_state->recentFiles());
+        persistRecentFiles();
+        return;
+    }
+
+    QString error;
+    m_imageStore->clear();
+    m_frameStore->clear();
+    m_spriteStore->clear();
+    m_frameDurations.clear();
+    m_spriteNames.clear();
+    m_sectionStarts.clear();
+    m_sectionNames.clear();
+    updateMetadataForFrame(-1);
+    updateMetadataForSprite(-1);
+    populateBookmarks({}, {});
+    if (LoadProjectJson(*m_state, filename, &error)) {
+        statusBar()->showMessage(QString("Open: %1").arg(filename), 5000);
+        persistRecentFiles();
+    } else {
+        statusBar()->showMessage(QString("Open failed: %1").arg(error), 5000);
+    }
+}
+
 void MainWindow::refreshRecentMenu()
 {
     m_recentMenu->clear();
     for (const auto& entry : m_state->recentFiles()) {
         auto* action = new QAction(entry, this);
         connect(action, &QAction::triggered, this, [this, entry]() {
-            m_state->openProject(entry);
-            statusBar()->showMessage(QString("Open: %1").arg(entry), 5000);
+            openProjectFile(entry);
         });
         m_recentMenu->addAction(action);
     }
@@ -617,6 +824,7 @@ void MainWindow::refreshFrameSpriteLists()
         m_framesCanvas->setStatusText("No frames loaded");
         m_framesCanvas->setImage(cv::Mat());
         m_frameStore->clear();
+        updateMetadataForFrame(-1);
     } else {
         while (m_frameStore->count() < m_state->frames().size()) {
             m_frameStore->add(MakePlaceholderImage(kDefaultFrameWidth, kDefaultFrameHeight,
@@ -640,6 +848,7 @@ void MainWindow::refreshFrameSpriteLists()
         m_spritesCanvas->setStatusText("No sprites loaded");
         m_spritesCanvas->setImage(cv::Mat());
         m_spriteStore->clear();
+        updateMetadataForSprite(-1);
     } else {
         while (m_spriteStore->count() < m_state->sprites().size()) {
             m_spriteStore->add(MakePlaceholderImage(kDefaultSpriteWidth, kDefaultSpriteHeight,
@@ -670,11 +879,13 @@ void MainWindow::updateSelectionFromLists()
     if (m_framesList->currentRow() >= 0) {
         setInspectorSelection(QString("Frame: %1").arg(m_framesList->currentItem()->text()));
         showFrameAtIndex(m_framesList->currentRow());
+        updateMetadataForFrame(m_framesList->currentRow());
         return;
     }
     if (m_spritesList->currentRow() >= 0) {
         setInspectorSelection(QString("Sprite: %1").arg(m_spritesList->currentItem()->text()));
         showSpriteAtIndex(m_spritesList->currentRow());
+        updateMetadataForSprite(m_spritesList->currentRow());
         return;
     }
     if (m_imagesList->currentRow() >= 0) {
@@ -683,6 +894,8 @@ void MainWindow::updateSelectionFromLists()
         return;
     }
     setInspectorSelection("None");
+    updateMetadataForFrame(-1);
+    updateMetadataForSprite(-1);
 }
 
 void MainWindow::showImageForPath(const QString& path)
@@ -709,7 +922,13 @@ void MainWindow::showFrameAtIndex(int index)
 {
     const cv::Mat* image = m_frameStore->at(index);
     if (image && !image->empty()) {
+        m_framesCanvas->canvas()->clearPreviewImage();
         m_framesCanvas->setImage(*image);
+        if (index == 0 && m_drawPointEnabled == false) {
+            QTimer::singleShot(0, this, [this]() {
+                m_framesCanvas->canvas()->requestFitOnResize(true);
+            });
+        }
     } else {
         m_framesCanvas->setImage(cv::Mat());
     }
@@ -719,6 +938,7 @@ void MainWindow::showSpriteAtIndex(int index)
 {
     const cv::Mat* image = m_spriteStore->at(index);
     if (image && !image->empty()) {
+        m_spritesCanvas->canvas()->clearPreviewImage();
         m_spritesCanvas->setImage(*image);
     } else {
         m_spritesCanvas->setImage(cv::Mat());
@@ -752,6 +972,268 @@ void MainWindow::populateBookmarks(const std::vector<uint32_t>& frameStarts,
     } else {
         m_bookmarksCombo->setEnabled(true);
         m_bookmarksCombo->setCurrentIndex(0);
+    }
+}
+
+void MainWindow::handleToolPress(bool isFrame, int x, int y, Qt::MouseButton button)
+{
+    if (!m_drawPointEnabled) {
+        return;
+    }
+    cv::Mat* image = isFrame ? m_frameStore->atMutable(m_framesList->currentRow())
+                             : m_spriteStore->atMutable(m_spritesList->currentRow());
+    if (!image || image->empty()) {
+        return;
+    }
+    if (m_drawTool == DrawTool::Point) {
+        applyToolToImage(*image, DrawTool::Point, QPoint(x, y), QPoint(x, y), button == Qt::RightButton);
+    } else if (m_drawTool == DrawTool::ColorPicker) {
+        pickColorFromImage(*image, x, y);
+    } else if (m_drawTool == DrawTool::MagicFill) {
+        applyMagicFill(*image, x, y);
+    } else {
+        if (isFrame) {
+            m_frameStart = QPoint(x, y);
+            m_frameHasStart = true;
+            m_frameStartButton = button;
+        } else {
+            m_spriteStart = QPoint(x, y);
+            m_spriteHasStart = true;
+            m_spriteStartButton = button;
+        }
+    }
+    if (isFrame) {
+        m_framesCanvas->setImage(*image);
+    } else {
+        m_spritesCanvas->setImage(*image);
+    }
+}
+
+void MainWindow::handleToolDrag(bool isFrame, int x, int y, Qt::MouseButtons buttons)
+{
+    if (!m_drawPointEnabled) {
+        return;
+    }
+    cv::Mat* image = isFrame ? m_frameStore->atMutable(m_framesList->currentRow())
+                             : m_spriteStore->atMutable(m_spritesList->currentRow());
+    if (!image || image->empty()) {
+        return;
+    }
+    if (m_drawTool == DrawTool::Point) {
+        const bool erase = buttons.testFlag(Qt::RightButton);
+        applyToolToImage(*image, DrawTool::Point, QPoint(x, y), QPoint(x, y), erase);
+        if (isFrame) {
+            m_framesCanvas->setImage(*image);
+        } else {
+            m_spritesCanvas->setImage(*image);
+        }
+        return;
+    }
+    const bool hasStart = isFrame ? m_frameHasStart : m_spriteHasStart;
+    if (!hasStart) {
+        return;
+    }
+    const QPoint start = isFrame ? m_frameStart : m_spriteStart;
+    const bool erase = buttons.testFlag(Qt::RightButton);
+    cv::Mat preview = image->clone();
+    applyToolToImage(preview, m_drawTool, start, QPoint(x, y), erase);
+    if (isFrame) {
+        m_framesCanvas->canvas()->setPreviewImage(preview);
+    } else {
+        m_spritesCanvas->canvas()->setPreviewImage(preview);
+    }
+}
+
+void MainWindow::handleToolRelease(bool isFrame, int x, int y, Qt::MouseButton button)
+{
+    if (!m_drawPointEnabled) {
+        return;
+    }
+    if (m_drawTool == DrawTool::Point ||
+        m_drawTool == DrawTool::ColorPicker ||
+        m_drawTool == DrawTool::MagicFill) {
+        return;
+    }
+    bool hasStart = isFrame ? m_frameHasStart : m_spriteHasStart;
+    if (!hasStart) {
+        return;
+    }
+    QPoint start = isFrame ? m_frameStart : m_spriteStart;
+    Qt::MouseButton startButton = isFrame ? m_frameStartButton : m_spriteStartButton;
+    if (isFrame) {
+        m_frameHasStart = false;
+    } else {
+        m_spriteHasStart = false;
+    }
+    cv::Mat* image = isFrame ? m_frameStore->atMutable(m_framesList->currentRow())
+                             : m_spriteStore->atMutable(m_spritesList->currentRow());
+    if (!image || image->empty()) {
+        return;
+    }
+    const bool erase = (startButton == Qt::RightButton || button == Qt::RightButton);
+    applyToolToImage(*image, m_drawTool, start, QPoint(x, y), erase);
+    if (isFrame) {
+        m_framesCanvas->canvas()->clearPreviewImage();
+        m_framesCanvas->setImage(*image);
+    } else {
+        m_spritesCanvas->canvas()->clearPreviewImage();
+        m_spritesCanvas->setImage(*image);
+    }
+}
+
+cv::Scalar MainWindow::currentDrawColor(bool erase) const
+{
+    if (erase) {
+        return cv::Scalar(0, 0, 0, 255);
+    }
+    return m_drawColor;
+}
+
+void MainWindow::applyToolToImage(cv::Mat& image,
+                                  DrawTool tool,
+                                  const QPoint& start,
+                                  const QPoint& end,
+                                  bool erase)
+{
+    const cv::Scalar color = currentDrawColor(erase);
+    const cv::Point p1(start.x(), start.y());
+    const cv::Point p2(end.x(), end.y());
+    if (tool == DrawTool::Point) {
+        if (image.type() == CV_8UC3) {
+            image.at<cv::Vec3b>(p1.y, p1.x) = cv::Vec3b(static_cast<uint8_t>(color[0]),
+                                                        static_cast<uint8_t>(color[1]),
+                                                        static_cast<uint8_t>(color[2]));
+        } else if (image.type() == CV_8UC4) {
+            image.at<cv::Vec4b>(p1.y, p1.x) = cv::Vec4b(static_cast<uint8_t>(color[0]),
+                                                        static_cast<uint8_t>(color[1]),
+                                                        static_cast<uint8_t>(color[2]),
+                                                        static_cast<uint8_t>(color[3]));
+        } else if (image.type() == CV_8UC1) {
+            image.at<uint8_t>(p1.y, p1.x) = static_cast<uint8_t>(erase ? 0 : 255);
+        }
+        return;
+    }
+
+    int thickness = 1;
+    if (tool == DrawTool::RectFill || tool == DrawTool::CircleFill || tool == DrawTool::EllipseFill) {
+        thickness = cv::FILLED;
+    }
+
+    const int dx = p2.x - p1.x;
+    const int dy = p2.y - p1.y;
+    const int radius = static_cast<int>(std::sqrt(static_cast<double>(dx * dx + dy * dy)));
+    const cv::Point center((p1.x + p2.x) / 2, (p1.y + p2.y) / 2);
+    const cv::Size axes(std::abs(dx) / 2, std::abs(dy) / 2);
+
+    switch (tool) {
+        case DrawTool::Line:
+            cv::line(image, p1, p2, color, 1);
+            break;
+        case DrawTool::Rect:
+        case DrawTool::RectFill:
+            cv::rectangle(image, p1, p2, color, thickness);
+            break;
+        case DrawTool::Circle:
+        case DrawTool::CircleFill:
+            cv::circle(image, p1, radius, color, thickness);
+            break;
+        case DrawTool::Ellipse:
+        case DrawTool::EllipseFill:
+            cv::ellipse(image, center, axes, 0.0, 0.0, 360.0, color, thickness);
+            break;
+        default:
+            break;
+    }
+}
+
+void MainWindow::applyMagicFill(cv::Mat& image, int x, int y)
+{
+    if (image.empty()) {
+        return;
+    }
+    cv::Scalar newColor = currentDrawColor(false);
+    cv::Rect bounds;
+    cv::Mat mask(image.rows + 2, image.cols + 2, CV_8UC1, cv::Scalar(0));
+    cv::floodFill(image,
+                  mask,
+                  cv::Point(x, y),
+                  newColor,
+                  &bounds,
+                  cv::Scalar(0, 0, 0, 0),
+                  cv::Scalar(0, 0, 0, 0),
+                  4);
+}
+
+void MainWindow::pickColorFromImage(const cv::Mat& image, int x, int y)
+{
+    if (image.empty()) {
+        return;
+    }
+    if (image.type() == CV_8UC3) {
+        const cv::Vec3b color = image.at<cv::Vec3b>(y, x);
+        m_drawColor = cv::Scalar(color[0], color[1], color[2], 255);
+    } else if (image.type() == CV_8UC4) {
+        const cv::Vec4b color = image.at<cv::Vec4b>(y, x);
+        m_drawColor = cv::Scalar(color[0], color[1], color[2], color[3]);
+    } else if (image.type() == CV_8UC1) {
+        const uint8_t value = image.at<uint8_t>(y, x);
+        m_drawColor = cv::Scalar(value, value, value, 255);
+    }
+    statusBar()->showMessage(QString("Picked color: %1, %2, %3")
+                                 .arg(m_drawColor[2])
+                                 .arg(m_drawColor[1])
+                                 .arg(m_drawColor[0]),
+                             2000);
+}
+
+void MainWindow::cancelCurrentDraw()
+{
+    m_frameHasStart = false;
+    m_spriteHasStart = false;
+    m_framesCanvas->canvas()->clearPreviewImage();
+    m_spritesCanvas->canvas()->clearPreviewImage();
+    statusBar()->showMessage("Draw canceled", 1500);
+}
+
+void MainWindow::updateMetadataForFrame(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_frameDurations.size())) {
+        m_frameMetaLabel->setText("-");
+        return;
+    }
+    QString section;
+    if (!m_sectionStarts.empty() && !m_sectionNames.empty()) {
+        const std::size_t count = std::min(m_sectionStarts.size(), m_sectionNames.size());
+        for (std::size_t i = 0; i < count; ++i) {
+            const uint32_t start = m_sectionStarts[i];
+            const uint32_t next = (i + 1 < count) ? m_sectionStarts[i + 1] : static_cast<uint32_t>(m_frameDurations.size());
+            if (index >= static_cast<int>(start) && index < static_cast<int>(next)) {
+                if (!m_sectionNames[i].empty()) {
+                    section = QString::fromStdString(m_sectionNames[i]);
+                }
+                break;
+            }
+        }
+    }
+    const QString duration = m_frameDurations[index] > 0 ? QString("%1 ms").arg(m_frameDurations[index]) : "n/a";
+    if (!section.isEmpty()) {
+        m_frameMetaLabel->setText(QString("%1, %2").arg(duration, section));
+    } else {
+        m_frameMetaLabel->setText(duration);
+    }
+}
+
+void MainWindow::updateMetadataForSprite(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_spriteNames.size())) {
+        m_spriteMetaLabel->setText("-");
+        return;
+    }
+    const std::string& name = m_spriteNames[index];
+    if (name.empty()) {
+        m_spriteMetaLabel->setText("-");
+    } else {
+        m_spriteMetaLabel->setText(QString::fromStdString(name));
     }
 }
 
