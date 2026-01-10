@@ -211,6 +211,12 @@ bool SaveLegacyProject(const std::string& crom_path,
             comp_mask_id[i] = project.frame_comp_mask_ids[i];
         }
     }
+    if (!project.frame_shape_comp_modes.empty()) {
+        for (std::size_t i = 0; i < std::min(project.frame_shape_comp_modes.size(),
+                                             static_cast<std::size_t>(shape_comp.size())); ++i) {
+            shape_comp[i] = project.frame_shape_comp_modes[i];
+        }
+    }
 
     for (uint32_t index = 0; index < n_frames; ++index) {
         cv::Mat frame = EnsureBgr(project.frames[index], cv::Size(frame_width, frame_height));

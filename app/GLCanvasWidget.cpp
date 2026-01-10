@@ -7,6 +7,11 @@
 #include <QPainter>
 #include <QResizeEvent>
 #include <QWheelEvent>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
+#include <QDataStream>
+#include <QMap>
 
 GLCanvasWidget::GLCanvasWidget(QWidget* parent)
     : QOpenGLWidget(parent)
@@ -19,6 +24,7 @@ GLCanvasWidget::GLCanvasWidget(QWidget* parent)
     , m_gridEnabled(true)
 {
     setFocusPolicy(Qt::StrongFocus);
+    setAcceptDrops(true);
 }
 
 void GLCanvasWidget::setOverlayText(const QString& text)
@@ -97,6 +103,14 @@ void GLCanvasWidget::setGridEnabled(bool enabled)
     update();
 }
 
+void GLCanvasWidget::setGridSegments(int topHeight, int gapHeight, int bottomHeight)
+{
+    m_gridTopHeight = topHeight;
+    m_gridGap = gapHeight;
+    m_gridBottomHeight = bottomHeight;
+    update();
+}
+
 void GLCanvasWidget::initializeGL()
 {
     initializeOpenGLFunctions();
@@ -110,6 +124,8 @@ void GLCanvasWidget::resizeGL(int w, int h)
 
 void GLCanvasWidget::paintGL()
 {
+    const QColor bg = palette().color(QPalette::Window);
+    glClearColor(bg.redF(), bg.greenF(), bg.blueF(), 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     QPainter painter(this);
@@ -161,21 +177,33 @@ void GLCanvasWidget::paintGL()
         const double gap = 0.5;
         const int w = m_image.cols;
         const int h = m_image.rows;
-        painter.setOpacity(0.25);
-        painter.setPen(QPen(QColor(40, 40, 40), 0));
-        for (int y = 0; y < h; ++y) {
-            for (int x = 0; x < w; ++x) {
-                painter.fillRect(QRectF(x - w / 2.0, y - h / 2.0, 1.0 - gap, 1.0 - gap),
-                                 QColor(20, 20, 20));
+        auto drawRegion = [&](int yStart, int yEnd) {
+            painter.setOpacity(0.25);
+            painter.setPen(QPen(QColor(40, 40, 40), 0));
+            for (int y = yStart; y < yEnd; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    painter.fillRect(QRectF(x - w / 2.0, y - h / 2.0, 1.0 - gap, 1.0 - gap),
+                                     QColor(20, 20, 20));
+                }
             }
-        }
-        painter.setOpacity(0.45);
-        painter.setPen(QPen(QColor(60, 60, 60), 0));
-        for (int x = 0; x <= w; ++x) {
-            painter.drawLine(QPointF(x - w / 2.0, -h / 2.0), QPointF(x - w / 2.0, h / 2.0));
-        }
-        for (int y = 0; y <= h; ++y) {
-            painter.drawLine(QPointF(-w / 2.0, y - h / 2.0), QPointF(w / 2.0, y - h / 2.0));
+            painter.setOpacity(0.45);
+            painter.setPen(QPen(QColor(60, 60, 60), 0));
+            for (int x = 0; x <= w; ++x) {
+                painter.drawLine(QPointF(x - w / 2.0, yStart - h / 2.0),
+                                 QPointF(x - w / 2.0, yEnd - h / 2.0));
+            }
+            for (int y = yStart; y <= yEnd; ++y) {
+                painter.drawLine(QPointF(-w / 2.0, y - h / 2.0),
+                                 QPointF(w / 2.0, y - h / 2.0));
+            }
+        };
+        if (m_gridTopHeight > 0 && m_gridBottomHeight > 0 &&
+            m_gridTopHeight + m_gridGap + m_gridBottomHeight <= h) {
+            drawRegion(0, m_gridTopHeight);
+            drawRegion(m_gridTopHeight + m_gridGap,
+                       m_gridTopHeight + m_gridGap + m_gridBottomHeight);
+        } else {
+            drawRegion(0, h);
         }
         painter.restore();
     }
@@ -211,6 +239,29 @@ bool MapToImage(const QPoint& pos,
     outX = x;
     outY = y;
     return true;
+}
+
+bool ExtractMaskDrop(const QMimeData* mimeData, QString& kind, int& index)
+{
+    if (!mimeData || !mimeData->hasFormat("application/x-qabstractitemmodeldatalist")) {
+        return false;
+    }
+    const QByteArray encoded = mimeData->data("application/x-qabstractitemmodeldatalist");
+    QDataStream stream(encoded);
+    while (!stream.atEnd()) {
+        int row = 0;
+        int col = 0;
+        QMap<int, QVariant> roleData;
+        stream >> row >> col >> roleData;
+        if (roleData.contains(Qt::UserRole + 1) && roleData.contains(Qt::UserRole)) {
+            kind = roleData.value(Qt::UserRole + 1).toString();
+            index = roleData.value(Qt::UserRole).toInt();
+            if (!kind.isEmpty() && index >= 0) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 }
 
@@ -274,4 +325,29 @@ void GLCanvasWidget::resizeEvent(QResizeEvent* event)
     if (m_fitOnResize) {
         fitToImage();
     }
+}
+
+void GLCanvasWidget::dragEnterEvent(QDragEnterEvent* event)
+{
+    QString kind;
+    int index = -1;
+    if (ExtractMaskDrop(event->mimeData(), kind, index)) {
+        event->setDropAction(Qt::CopyAction);
+        event->accept();
+        return;
+    }
+    QOpenGLWidget::dragEnterEvent(event);
+}
+
+void GLCanvasWidget::dropEvent(QDropEvent* event)
+{
+    QString kind;
+    int index = -1;
+    if (ExtractMaskDrop(event->mimeData(), kind, index)) {
+        emit maskDropped(kind, index);
+        event->setDropAction(Qt::CopyAction);
+        event->accept();
+        return;
+    }
+    QOpenGLWidget::dropEvent(event);
 }

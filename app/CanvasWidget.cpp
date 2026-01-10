@@ -13,6 +13,7 @@ CanvasWidget::CanvasWidget(const QString& title, QWidget* parent)
     , m_label(new QLabel(title, this))
     , m_fitButton(new QToolButton(m_canvas))
     , m_gridButton(new QToolButton(m_canvas))
+    , m_originalButton(new QToolButton(m_canvas))
 {
     auto* layout = new QVBoxLayout(this);
     m_canvas->setOverlayText(title);
@@ -34,6 +35,14 @@ CanvasWidget::CanvasWidget(const QString& title, QWidget* parent)
     m_gridButton->setToolTip("Toggle grid");
     m_gridButton->setCursor(Qt::PointingHandCursor);
     connect(m_gridButton, &QToolButton::toggled, this, &CanvasWidget::gridToggled);
+
+    m_originalButton->setText("Original");
+    m_originalButton->setCheckable(true);
+    m_originalButton->setChecked(true);
+    m_originalButton->setAutoRaise(true);
+    m_originalButton->setToolTip("Toggle original frame");
+    m_originalButton->setCursor(Qt::PointingHandCursor);
+    connect(m_originalButton, &QToolButton::toggled, this, &CanvasWidget::originalToggled);
 }
 
 void CanvasWidget::setTitle(const QString& title)
@@ -57,10 +66,19 @@ GLCanvasWidget* CanvasWidget::canvas() const
     return m_canvas;
 }
 
+void CanvasWidget::setOriginalVisible(bool enabled)
+{
+    if (!m_originalButton) {
+        return;
+    }
+    QSignalBlocker blocker(m_originalButton);
+    m_originalButton->setChecked(enabled);
+}
+
 void CanvasWidget::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
-    if (!m_fitButton || !m_gridButton) {
+    if (!m_fitButton || !m_gridButton || !m_originalButton) {
         return;
     }
     const int margin = 8;
@@ -74,4 +92,9 @@ void CanvasWidget::resizeEvent(QResizeEvent* event)
     const int gridX = x - gridSize.width() - 6;
     m_gridButton->move(gridX, y);
     m_gridButton->raise();
+
+    const QSize originalSize = m_originalButton->sizeHint();
+    const int originalX = gridX - originalSize.width() - 6;
+    m_originalButton->move(originalX, y);
+    m_originalButton->raise();
 }

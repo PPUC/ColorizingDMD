@@ -36,6 +36,7 @@
 #include <QSignalBlocker>
 #include <QStyledItemDelegate>
 #include <QPainter>
+#include <QPalette>
 
 #include <algorithm>
 #include <cmath>
@@ -60,10 +61,11 @@ constexpr int kDefaultFrameHeight = 32;
 constexpr int kDefaultSpriteWidth = 64;
 constexpr int kDefaultSpriteHeight = 64;
 constexpr int kPreviewIconWidth = 160;
-constexpr int kPreviewIconHeight = 60;
+constexpr int kPreviewIconHeight = 120;
 constexpr int kPreviewItemWidth = 180;
-constexpr int kPreviewItemHeight = 86;
+constexpr int kPreviewItemHeight = 150;
 constexpr int kMaxUndoDepth = 50;
+constexpr int kFrameGapPixels = 8;
 
 constexpr int kFrameIndexRole = Qt::UserRole + 1;
 constexpr int kFrameDurationRole = Qt::UserRole + 2;
@@ -354,6 +356,8 @@ MainWindow::MainWindow(QWidget* parent)
         m_dynamicMasks.clear();
         m_frameCompMaskIds.clear();
         m_frameDynamicMaskIds.clear();
+        m_frameShapeCompModes.clear();
+        m_noColors = 64;
         resetUndoStacks();
         updateMetadataForFrame(-1);
         updateMetadataForSprite(-1);
@@ -570,14 +574,14 @@ MainWindow::MainWindow(QWidget* parent)
     m_maskList->setViewMode(QListView::IconMode);
     m_maskList->setFlow(QListView::TopToBottom);
     m_maskList->setWrapping(false);
-    m_maskList->setMovement(QListView::Static);
+    m_maskList->setMovement(QListView::Snap);
     m_maskList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_maskList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
     m_maskList->setResizeMode(QListView::Adjust);
-    m_maskList->setDragDropMode(QAbstractItemView::InternalMove);
-    m_maskList->setDefaultDropAction(Qt::MoveAction);
+    m_maskList->setDragDropMode(QAbstractItemView::DragOnly);
+    m_maskList->setDragDropOverwriteMode(false);
     m_maskList->setDragEnabled(true);
-    m_maskList->setAcceptDrops(true);
+    m_maskList->setAcceptDrops(false);
     m_maskList->setDropIndicatorShown(true);
     m_maskList->setIconSize(QSize(kPreviewIconWidth, kPreviewIconHeight));
     m_maskList->setGridSize(QSize(kPreviewItemWidth, kPreviewItemHeight));
@@ -602,14 +606,14 @@ MainWindow::MainWindow(QWidget* parent)
     m_dynamicMaskList->setViewMode(QListView::IconMode);
     m_dynamicMaskList->setFlow(QListView::TopToBottom);
     m_dynamicMaskList->setWrapping(false);
-    m_dynamicMaskList->setMovement(QListView::Static);
+    m_dynamicMaskList->setMovement(QListView::Snap);
     m_dynamicMaskList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_dynamicMaskList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
     m_dynamicMaskList->setResizeMode(QListView::Adjust);
-    m_dynamicMaskList->setDragDropMode(QAbstractItemView::InternalMove);
-    m_dynamicMaskList->setDefaultDropAction(Qt::MoveAction);
+    m_dynamicMaskList->setDragDropMode(QAbstractItemView::DragOnly);
+    m_dynamicMaskList->setDragDropOverwriteMode(false);
     m_dynamicMaskList->setDragEnabled(true);
-    m_dynamicMaskList->setAcceptDrops(true);
+    m_dynamicMaskList->setAcceptDrops(false);
     m_dynamicMaskList->setDropIndicatorShown(true);
     m_dynamicMaskList->setIconSize(QSize(kPreviewIconWidth, kPreviewIconHeight));
     m_dynamicMaskList->setGridSize(QSize(kPreviewItemWidth, kPreviewItemHeight));
@@ -656,6 +660,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_compMaskPreviewToggle = new QCheckBox("Preview mask", inspectorWidget);
     m_dynMaskEditToggle = new QCheckBox("Edit dynamic", inspectorWidget);
     m_dynMaskPreviewToggle = new QCheckBox("Preview dynamic", inspectorWidget);
+    m_shapeCompToggle = new QCheckBox("Shape comparison", inspectorWidget);
     inspectorLayout->addRow("Project", m_projectLabel);
     inspectorLayout->addRow("Bookmarks", m_bookmarksCombo);
     inspectorLayout->addRow("Go to frame", m_frameJump);
@@ -669,6 +674,7 @@ MainWindow::MainWindow(QWidget* parent)
     inspectorLayout->addRow("Mask preview", m_compMaskPreviewToggle);
     inspectorLayout->addRow("Dynamic edit", m_dynMaskEditToggle);
     inspectorLayout->addRow("Dynamic preview", m_dynMaskPreviewToggle);
+    inspectorLayout->addRow("Shape compare", m_shapeCompToggle);
     inspectorWidget->setLayout(inspectorLayout);
     inspectorDock->setWidget(inspectorWidget);
     addDockWidget(Qt::RightDockWidgetArea, inspectorDock);
@@ -682,25 +688,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     auto* previewBar = new QHBoxLayout();
     auto* previewLabel = new QLabel("Preview", previewWidget);
-    m_previewModeButton = new QToolButton(previewWidget);
-    m_previewModeButton->setText("Colorized");
-    m_previewModeButton->setPopupMode(QToolButton::InstantPopup);
-    auto* previewMenu = new QMenu(m_previewModeButton);
-    auto* previewGroup = new QActionGroup(previewMenu);
-    previewGroup->setExclusive(true);
-    auto* previewColorAction = previewMenu->addAction("Colorized");
-    previewColorAction->setCheckable(true);
-    previewColorAction->setChecked(true);
-    auto* previewMono2Action = previewMenu->addAction("Mono 2-bit");
-    previewMono2Action->setCheckable(true);
-    auto* previewMono4Action = previewMenu->addAction("Mono 4-bit");
-    previewMono4Action->setCheckable(true);
-    previewGroup->addAction(previewColorAction);
-    previewGroup->addAction(previewMono2Action);
-    previewGroup->addAction(previewMono4Action);
-    m_previewModeButton->setMenu(previewMenu);
     previewBar->addWidget(previewLabel);
-    previewBar->addWidget(m_previewModeButton);
     previewBar->addStretch(1);
     previewLayout->addLayout(previewBar);
 
@@ -814,6 +802,13 @@ MainWindow::MainWindow(QWidget* parent)
             m_compMaskPreviewEnabled = false;
         }
         updateMaskPreviewForFrame(m_framesList->currentRow());
+    });
+    connect(m_shapeCompToggle, &QCheckBox::toggled, this, [this](bool enabled) {
+        const int row = m_framesList ? m_framesList->currentRow() : -1;
+        if (row < 0 || row >= static_cast<int>(m_frameShapeCompModes.size())) {
+            return;
+        }
+        m_frameShapeCompModes[static_cast<std::size_t>(row)] = enabled ? 1 : 0;
     });
     connect(m_frameMaskAssign, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         setCurrentFrameMaskId(m_frameMaskAssign->currentData().toInt());
@@ -933,31 +928,7 @@ MainWindow::MainWindow(QWidget* parent)
         updateUndoActions();
     });
 
-    connect(m_maskList->model(), &QAbstractItemModel::rowsMoved, this,
-            [this](const QModelIndex&, int, int, const QModelIndex&, int) {
-                applyMaskListOrder();
-            });
-
-    connect(m_dynamicMaskList->model(), &QAbstractItemModel::rowsMoved, this,
-            [this](const QModelIndex&, int, int, const QModelIndex&, int) {
-                applyDynamicMaskListOrder();
-            });
-
-    connect(previewColorAction, &QAction::triggered, this, [this]() {
-        m_previewMode = PreviewMode::Color;
-        m_previewModeButton->setText("Colorized");
-        refreshFramePreviews();
-    });
-    connect(previewMono2Action, &QAction::triggered, this, [this]() {
-        m_previewMode = PreviewMode::Mono2;
-        m_previewModeButton->setText("Mono 2-bit");
-        refreshFramePreviews();
-    });
-    connect(previewMono4Action, &QAction::triggered, this, [this]() {
-        m_previewMode = PreviewMode::Mono4;
-        m_previewModeButton->setText("Mono 4-bit");
-        refreshFramePreviews();
-    });
+    // Drag-reorder disabled; up/down buttons apply ordering changes.
 
     connect(m_framesList, &QListWidget::currentTextChanged, this, [this](const QString& text) {
         if (!text.isEmpty()) {
@@ -1013,6 +984,32 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_framesCanvas->canvas(), &GLCanvasWidget::imageReleased, this, [this](int x, int y, Qt::MouseButton button) {
         handleToolRelease(true, x, y, button);
     });
+    connect(m_framesCanvas->canvas(), &GLCanvasWidget::maskDropped, this, [this](const QString& kind, int index) {
+        if (m_framesList->currentRow() < 0) {
+            return;
+        }
+        ensureMaskDataSize();
+        if (kind == "mask") {
+            if (index < 0 || index >= MAX_MASKS) {
+                return;
+            }
+            m_frameMaskAssign->setCurrentIndex(index + 1);
+            if (m_maskList) {
+                m_maskList->setCurrentRow(index);
+            }
+            statusBar()->showMessage(QString("Assigned mask %1").arg(index), 2000);
+        } else if (kind == "dynamic") {
+            if (index < 0 || index >= MAX_DYNA_SETS_PER_FRAMEN) {
+                return;
+            }
+            m_frameDynamicMaskAssign->setCurrentIndex(index + 1);
+            if (m_dynamicMaskList) {
+                m_dynamicMaskList->setCurrentRow(index);
+            }
+            statusBar()->showMessage(QString("Assigned dynamic mask %1").arg(index), 2000);
+        }
+        updateMaskPreviewForFrame(m_framesList->currentRow());
+    });
     connect(m_spritesCanvas->canvas(), &GLCanvasWidget::imageClicked, this, [this](int x, int y, Qt::MouseButton button) {
         handleToolPress(false, x, y, button);
     });
@@ -1034,6 +1031,11 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(m_spritesCanvas, &CanvasWidget::gridToggled, this, [this](bool enabled) {
         m_spritesCanvas->canvas()->setGridEnabled(enabled);
+    });
+    connect(m_framesCanvas, &CanvasWidget::originalToggled, this, [this](bool enabled) {
+        m_showOriginalFrame = enabled;
+        updateFrameCanvasImage(m_framesList->currentRow());
+        updateMaskPreviewForFrame(m_framesList->currentRow());
     });
 
     connect(m_frameFilter, &QLineEdit::textChanged, this, [this](const QString& text) {
@@ -1100,6 +1102,8 @@ void MainWindow::openProjectFile(const QString& filename)
             m_dynamicMasks.clear();
             m_frameCompMaskIds.clear();
             m_frameDynamicMaskIds.clear();
+            m_frameShapeCompModes.clear();
+            m_noColors = 64;
             updateMetadataForFrame(-1);
             updateMetadataForSprite(-1);
             populateBookmarks({}, {});
@@ -1155,6 +1159,8 @@ void MainWindow::openProjectFile(const QString& filename)
         m_dynamicMasks.clear();
         m_frameCompMaskIds.clear();
         m_frameDynamicMaskIds.clear();
+        m_frameShapeCompModes.clear();
+        m_noColors = legacy.no_colors > 0 ? legacy.no_colors : 64;
         updateMetadataForFrame(-1);
         updateMetadataForSprite(-1);
         for (const auto& frame : legacy.frames) {
@@ -1173,6 +1179,7 @@ void MainWindow::openProjectFile(const QString& filename)
         m_dynamicMasks = legacy.dynamic_masks;
         m_frameCompMaskIds = legacy.frame_comp_mask_ids;
         m_frameDynamicMaskIds = legacy.frame_dynamic_mask_ids;
+        m_frameShapeCompModes = legacy.frame_shape_comp_modes;
 
         QStringList frames;
         for (int i = 0; i < static_cast<int>(legacy.frames.size()); ++i) {
@@ -1229,6 +1236,8 @@ void MainWindow::openProjectFile(const QString& filename)
     m_dynamicMasks.clear();
     m_frameCompMaskIds.clear();
     m_frameDynamicMaskIds.clear();
+    m_frameShapeCompModes.clear();
+    m_noColors = 64;
     updateMetadataForFrame(-1);
     updateMetadataForSprite(-1);
     populateBookmarks({}, {});
@@ -1320,9 +1329,10 @@ LegacyProject MainWindow::buildLegacyProject(const QString& baseName) const
     project.section_firsts = m_sectionStarts;
     project.section_names = m_sectionNames;
     project.frame_refs = m_frameRefs;
-    project.no_colors = 64;
+    project.no_colors = m_noColors > 0 ? m_noColors : 64;
     project.comp_masks = m_compMasks;
     project.frame_comp_mask_ids = m_frameCompMaskIds;
+    project.frame_shape_comp_modes = m_frameShapeCompModes;
     project.dynamic_masks = m_dynamicMasks;
     project.frame_dynamic_mask_ids = m_frameDynamicMaskIds;
     project.frame_dynamic_colors = m_frameDynamicColors;
@@ -1359,7 +1369,8 @@ void MainWindow::refreshFramePreviews()
             continue;
         }
 
-        cv::Mat previewMat = buildPreviewFrame(*image);
+        cv::Mat reference = buildOriginalPreviewForIndex(i);
+        cv::Mat previewMat = buildPreviewFrame(*image, reference);
         cv::Mat rgb;
         cv::cvtColor(previewMat, rgb, cv::COLOR_BGR2RGB);
         QImage previewImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888);
@@ -1398,7 +1409,10 @@ void MainWindow::updateFramePreviewAt(int index)
     if (!item) {
         return;
     }
-    cv::Mat previewMat = buildPreviewFrame(*image);
+    cv::Mat reference = buildOriginalPreviewForIndex(index);
+    const QColor gap = m_framesCanvas->palette().color(QPalette::Window);
+    const cv::Scalar gapColor(gap.blue(), gap.green(), gap.red());
+    cv::Mat previewMat = buildPreviewFrame(*image, reference);
     cv::Mat rgb;
     cv::cvtColor(previewMat, rgb, cv::COLOR_BGR2RGB);
     QImage previewImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888);
@@ -1407,24 +1421,45 @@ void MainWindow::updateFramePreviewAt(int index)
     item->setIcon(QIcon(pixmap));
 }
 
-cv::Mat MainWindow::buildPreviewFrame(const cv::Mat& source) const
+cv::Mat MainWindow::buildPreviewFrame(const cv::Mat& colorized, const cv::Mat& reference) const
 {
-    cv::Mat bgr = EnsureBgr(source);
-    if (bgr.empty()) {
-        return bgr;
+    cv::Mat color = EnsureBgr(colorized);
+    cv::Mat original = buildOriginalFrame(reference);
+    if (color.empty() && original.empty()) {
+        return cv::Mat();
     }
-    if (m_previewMode == PreviewMode::Color) {
-        return bgr;
+    if (color.empty()) {
+        return original;
     }
-    cv::Mat gray;
-    cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
-    cv::Mat output(bgr.rows, bgr.cols, CV_8UC3);
-    const int levels = (m_previewMode == PreviewMode::Mono2) ? 4 : 16;
-    for (int y = 0; y < gray.rows; ++y) {
-        const uint8_t* srcRow = gray.ptr<uint8_t>(y);
+    if (original.empty()) {
+        return color;
+    }
+    const QColor gap = m_framePreviewList
+        ? m_framePreviewList->palette().color(QPalette::Base)
+        : QApplication::palette().color(QPalette::Base);
+    return buildCombinedFrame(color, original, cv::Scalar(gap.blue(), gap.green(), gap.red()));
+}
+
+cv::Mat MainWindow::buildOriginalFrame(const cv::Mat& reference) const
+{
+    if (reference.empty()) {
+        return cv::Mat();
+    }
+    cv::Mat ref;
+    if (reference.type() == CV_8UC1) {
+        ref = reference;
+    } else {
+        cv::Mat gray;
+        cv::cvtColor(EnsureBgr(reference), gray, cv::COLOR_BGR2GRAY);
+        ref = gray;
+    }
+    const int levels = m_noColors > 0 ? static_cast<int>(m_noColors) : 64;
+    cv::Mat output(ref.rows, ref.cols, CV_8UC3);
+    for (int y = 0; y < ref.rows; ++y) {
+        const uint8_t* srcRow = ref.ptr<uint8_t>(y);
         cv::Vec3b* dstRow = output.ptr<cv::Vec3b>(y);
-        for (int x = 0; x < gray.cols; ++x) {
-            const int idx = static_cast<int>((srcRow[x] * (levels - 1) + 127) / 255);
+        for (int x = 0; x < ref.cols; ++x) {
+            const int idx = static_cast<int>(std::min<int>(srcRow[x], levels - 1));
             const double t = levels > 1 ? static_cast<double>(idx) / (levels - 1) : 0.0;
             const uint8_t r = static_cast<uint8_t>(255.0 * t);
             const uint8_t g = static_cast<uint8_t>(140.0 * t);
@@ -1432,6 +1467,82 @@ cv::Mat MainWindow::buildPreviewFrame(const cv::Mat& source) const
         }
     }
     return output;
+}
+
+cv::Mat MainWindow::buildCombinedFrame(const cv::Mat& colorized,
+                                       const cv::Mat& reference,
+                                       const cv::Scalar& gapColor) const
+{
+    if (colorized.empty() || reference.empty()) {
+        return cv::Mat();
+    }
+    cv::Mat top = EnsureBgr(colorized);
+    cv::Mat bottom = EnsureBgr(reference);
+    if (top.size() != bottom.size()) {
+        cv::resize(bottom, bottom, top.size(), 0.0, 0.0, cv::INTER_NEAREST);
+    }
+    cv::Mat combined(top.rows + bottom.rows + kFrameGapPixels, top.cols, CV_8UC3, gapColor);
+    top.copyTo(combined(cv::Rect(0, 0, top.cols, top.rows)));
+    bottom.copyTo(combined(cv::Rect(0, top.rows + kFrameGapPixels, bottom.cols, bottom.rows)));
+    return combined;
+}
+
+cv::Mat MainWindow::buildCombinedMaskPreview(const cv::Mat& colorized,
+                                             const cv::Mat& reference,
+                                             const cv::Mat& mask,
+                                             const cv::Vec3b& color,
+                                             const cv::Scalar& gapColor) const
+{
+    cv::Mat original = buildOriginalFrame(reference);
+    if (original.empty()) {
+        return buildMaskPreview(colorized, mask, color);
+    }
+    cv::Mat previewOriginal = buildMaskPreview(original, mask, color);
+    return buildCombinedFrame(colorized, previewOriginal, gapColor);
+}
+
+cv::Mat MainWindow::buildOriginalPreviewForIndex(int index) const
+{
+    if (index < 0) {
+        return cv::Mat();
+    }
+    if (index >= 0 && index < static_cast<int>(m_frameRefs.size())) {
+        const cv::Mat& ref = m_frameRefs[static_cast<std::size_t>(index)];
+        if (!ref.empty()) {
+            return ref;
+        }
+    }
+    if (const cv::Mat* frame = m_frameStore->at(index)) {
+        return buildReferenceFrame(*frame);
+    }
+    return cv::Mat();
+}
+
+void MainWindow::updateFrameCanvasImage(int index)
+{
+    if (!m_framesCanvas) {
+        return;
+    }
+    if (index < 0) {
+        m_framesCanvas->setImage(cv::Mat());
+        return;
+    }
+    const cv::Mat* image = m_frameStore->at(index);
+    if (!image || image->empty()) {
+        m_framesCanvas->setImage(cv::Mat());
+        return;
+    }
+    cv::Mat reference = buildOriginalPreviewForIndex(index);
+    cv::Mat original = buildOriginalFrame(reference);
+    if (original.empty() || !m_showOriginalFrame) {
+        m_framesCanvas->setImage(*image);
+        m_framesCanvas->canvas()->setGridSegments(0, 0, 0);
+        return;
+    }
+    const QColor gap = m_framesCanvas->palette().color(QPalette::Window);
+    cv::Mat combined = buildCombinedFrame(*image, original, cv::Scalar(gap.blue(), gap.green(), gap.red()));
+    m_framesCanvas->setImage(combined);
+    m_framesCanvas->canvas()->setGridSegments(image->rows, kFrameGapPixels, original.rows);
 }
 
 namespace {
@@ -1525,6 +1636,7 @@ void MainWindow::ensureMaskDataSize()
     m_frameDynamicColors.resize(static_cast<std::size_t>(frameCount));
     m_frameCompMaskIds.resize(static_cast<std::size_t>(frameCount), 255);
     m_frameDynamicMaskIds.resize(static_cast<std::size_t>(frameCount), 255);
+    m_frameShapeCompModes.resize(static_cast<std::size_t>(frameCount), 0);
 
     for (int i = 0; i < frameCount; ++i) {
         if (const cv::Mat* frame = m_frameStore->at(i)) {
@@ -1556,6 +1668,7 @@ void MainWindow::ensureMaskDataSize()
     m_compMaskPreviewToggle->setEnabled(hasFrames);
     m_dynMaskEditToggle->setEnabled(hasFrames);
     m_dynMaskPreviewToggle->setEnabled(hasFrames);
+    m_shapeCompToggle->setEnabled(hasFrames);
     m_maskList->setEnabled(hasFrames);
     m_maskMoveUp->setEnabled(hasFrames);
     m_maskMoveDown->setEnabled(hasFrames);
@@ -1622,11 +1735,18 @@ void MainWindow::updateMaskPreviewForFrame(int index)
         return;
     }
     ensureMaskDataSize();
+    cv::Mat reference = buildOriginalPreviewForIndex(index);
+    const QColor gap = m_framesCanvas->palette().color(QPalette::Window);
+    const cv::Scalar gapColor(gap.blue(), gap.green(), gap.red());
+    if (!m_showOriginalFrame && (m_dynMaskPreviewEnabled || m_compMaskPreviewEnabled)) {
+        m_framesCanvas->canvas()->clearPreviewImage();
+        return;
+    }
     if (m_dynMaskPreviewEnabled) {
         const int maskId = currentFrameDynamicMaskId();
         if (maskId >= 0 && maskId < static_cast<int>(m_dynamicMasks.size())) {
             const cv::Mat& mask = m_dynamicMasks[static_cast<std::size_t>(maskId)];
-            const cv::Mat preview = buildMaskPreview(*frame, mask, cv::Vec3b(0, 200, 255));
+            const cv::Mat preview = buildCombinedMaskPreview(*frame, reference, mask, cv::Vec3b(0, 200, 255), gapColor);
             m_framesCanvas->canvas()->setPreviewImage(preview);
             return;
         }
@@ -1635,7 +1755,7 @@ void MainWindow::updateMaskPreviewForFrame(int index)
         const int maskId = currentFrameMaskId();
         if (maskId >= 0 && maskId < static_cast<int>(m_compMasks.size())) {
             const cv::Mat& mask = m_compMasks[static_cast<std::size_t>(maskId)];
-            const cv::Mat preview = buildMaskPreview(*frame, mask, cv::Vec3b(200, 0, 200));
+            const cv::Mat preview = buildCombinedMaskPreview(*frame, reference, mask, cv::Vec3b(200, 0, 200), gapColor);
             m_framesCanvas->canvas()->setPreviewImage(preview);
             return;
         }
@@ -1656,6 +1776,7 @@ void MainWindow::refreshMaskCombos()
     for (int i = 0; i < MAX_MASKS; ++i) {
         auto* item = new QListWidgetItem(QString("Mask %1").arg(i));
         item->setData(Qt::UserRole, i);
+        item->setData(Qt::UserRole + 1, QStringLiteral("mask"));
         item->setSizeHint(QSize(kPreviewItemWidth, kPreviewItemHeight));
         m_maskList->addItem(item);
     }
@@ -1693,6 +1814,7 @@ void MainWindow::refreshDynamicMaskCombos()
     for (int i = 0; i < MAX_DYNA_SETS_PER_FRAMEN; ++i) {
         auto* item = new QListWidgetItem(QString("Dynamic %1").arg(i));
         item->setData(Qt::UserRole, i);
+        item->setData(Qt::UserRole + 1, QStringLiteral("dynamic"));
         item->setSizeHint(QSize(kPreviewItemWidth, kPreviewItemHeight));
         m_dynamicMaskList->addItem(item);
     }
@@ -1817,6 +1939,7 @@ void MainWindow::applyMaskListOrder()
         if (item) {
             item->setText(QString("Mask %1").arg(i));
             item->setData(Qt::UserRole, i);
+            item->setData(Qt::UserRole + 1, QStringLiteral("mask"));
             item->setSizeHint(QSize(kPreviewItemWidth, kPreviewItemHeight));
         }
     }
@@ -1861,6 +1984,7 @@ void MainWindow::applyDynamicMaskListOrder()
         if (item) {
             item->setText(QString("Dynamic %1").arg(i));
             item->setData(Qt::UserRole, i);
+            item->setData(Qt::UserRole + 1, QStringLiteral("dynamic"));
             item->setSizeHint(QSize(kPreviewItemWidth, kPreviewItemHeight));
         }
     }
@@ -2142,7 +2266,7 @@ bool MainWindow::undoEdit(bool isFrame)
         }
     }
     if (isFrame) {
-        m_framesCanvas->setImage(*image);
+        updateFrameCanvasImage(index);
         updateFramePreviewAt(index);
         updateMaskPreviewForFrame(index);
     } else {
@@ -2203,7 +2327,7 @@ bool MainWindow::redoEdit(bool isFrame)
         }
     }
     if (isFrame) {
-        m_framesCanvas->setImage(*image);
+        updateFrameCanvasImage(index);
         updateFramePreviewAt(index);
         updateMaskPreviewForFrame(index);
     } else {
@@ -2300,7 +2424,7 @@ void MainWindow::refreshFrameSpriteLists()
         m_framesList->addItem("No frames loaded");
         m_framesCanvas->setTitle("Frames canvas (placeholder)");
         m_framesCanvas->setStatusText("No frames loaded");
-        m_framesCanvas->setImage(cv::Mat());
+        updateFrameCanvasImage(-1);
         m_frameStore->clear();
         updateMetadataForFrame(-1);
     } else {
@@ -2408,7 +2532,7 @@ void MainWindow::showFrameAtIndex(int index)
     const cv::Mat* image = m_frameStore->at(index);
     if (image && !image->empty()) {
         m_framesCanvas->canvas()->clearPreviewImage();
-        m_framesCanvas->setImage(*image);
+        updateFrameCanvasImage(index);
         if (index == 0 && m_drawPointEnabled == false) {
             QTimer::singleShot(0, this, [this]() {
                 m_framesCanvas->canvas()->requestFitOnResize(true);
@@ -2424,9 +2548,14 @@ void MainWindow::showFrameAtIndex(int index)
             const int maskId = m_frameDynamicMaskIds[static_cast<std::size_t>(index)];
             m_frameDynamicMaskAssign->setCurrentIndex(maskId == 255 ? 0 : maskId + 1);
         }
+        if (m_shapeCompToggle && index >= 0 && index < static_cast<int>(m_frameShapeCompModes.size())) {
+            QSignalBlocker blockShape(m_shapeCompToggle);
+            const uint8_t value = m_frameShapeCompModes[static_cast<std::size_t>(index)];
+            m_shapeCompToggle->setChecked(value != 0);
+        }
         updateMaskPreviewForFrame(index);
     } else {
-        m_framesCanvas->setImage(cv::Mat());
+        updateFrameCanvasImage(-1);
     }
 }
 
@@ -2480,6 +2609,19 @@ void MainWindow::handleToolPress(bool isFrame, int x, int y, Qt::MouseButton but
         const int index = m_framesList->currentRow();
         if (index < 0) {
             return;
+        }
+        if (!m_showOriginalFrame) {
+            statusBar()->showMessage("Show the original frame to edit masks.", 2000);
+            return;
+        }
+        const cv::Mat* frameImage = m_frameStore->at(index);
+        const int frameHeight = frameImage ? frameImage->rows : 0;
+        if (frameHeight > 0) {
+            if (y < frameHeight) {
+                statusBar()->showMessage("Mask editing uses the original frame below.", 2000);
+                return;
+            }
+            y -= frameHeight;
         }
         ensureMaskDataSize();
         cv::Mat* mask = nullptr;
@@ -2541,6 +2683,13 @@ void MainWindow::handleToolPress(bool isFrame, int x, int y, Qt::MouseButton but
     if (!image || image->empty()) {
         return;
     }
+    if (isFrame) {
+        const int frameHeight = image->rows;
+        if (frameHeight > 0 && y >= frameHeight) {
+            statusBar()->showMessage("Color edits apply to the top frame only.", 2000);
+            return;
+        }
+    }
     const int currentIndex = isFrame ? m_framesList->currentRow() : m_spritesList->currentRow();
     bool& undoActive = isFrame ? m_frameUndoActive : m_spriteUndoActive;
     if (m_drawTool != DrawTool::ColorPicker) {
@@ -2567,7 +2716,7 @@ void MainWindow::handleToolPress(bool isFrame, int x, int y, Qt::MouseButton but
         }
     }
     if (isFrame) {
-        m_framesCanvas->setImage(*image);
+        updateFrameCanvasImage(m_framesList->currentRow());
         updateFramePreviewAt(m_framesList->currentRow());
         updateMaskPreviewForFrame(m_framesList->currentRow());
     } else {
@@ -2584,6 +2733,17 @@ void MainWindow::handleToolDrag(bool isFrame, int x, int y, Qt::MouseButtons but
         const int index = m_framesList->currentRow();
         if (index < 0) {
             return;
+        }
+        if (!m_showOriginalFrame) {
+            return;
+        }
+        const cv::Mat* frameImage = m_frameStore->at(index);
+        const int frameHeight = frameImage ? frameImage->rows : 0;
+        if (frameHeight > 0) {
+            if (y < frameHeight) {
+                return;
+            }
+            y -= frameHeight;
         }
         cv::Mat* mask = nullptr;
         cv::Vec3b color(200, 0, 200);
@@ -2625,7 +2785,10 @@ void MainWindow::handleToolDrag(bool isFrame, int x, int y, Qt::MouseButtons but
         const bool erase = buttons.testFlag(Qt::RightButton);
         applyToolToMask(previewMask, m_drawTool, m_frameStart, QPoint(x, y), erase);
         if (const cv::Mat* frame = m_frameStore->at(index)) {
-            cv::Mat preview = buildMaskPreview(*frame, previewMask, color);
+            cv::Mat reference = buildOriginalPreviewForIndex(index);
+            const QColor gap = m_framesCanvas->palette().color(QPalette::Window);
+            const cv::Scalar gapColor(gap.blue(), gap.green(), gap.red());
+            cv::Mat preview = buildCombinedMaskPreview(*frame, reference, previewMask, color, gapColor);
             m_framesCanvas->canvas()->setPreviewImage(preview);
         }
         return;
@@ -2635,11 +2798,17 @@ void MainWindow::handleToolDrag(bool isFrame, int x, int y, Qt::MouseButtons but
     if (!image || image->empty()) {
         return;
     }
+    if (isFrame) {
+        const int frameHeight = image->rows;
+        if (frameHeight > 0 && y >= frameHeight) {
+            return;
+        }
+    }
     if (m_drawTool == DrawTool::Point) {
         const bool erase = buttons.testFlag(Qt::RightButton);
         applyToolToImage(*image, DrawTool::Point, QPoint(x, y), QPoint(x, y), erase);
         if (isFrame) {
-            m_framesCanvas->setImage(*image);
+            updateFrameCanvasImage(m_framesList->currentRow());
             updateFramePreviewAt(m_framesList->currentRow());
             updateMaskPreviewForFrame(m_framesList->currentRow());
         } else {
@@ -2656,7 +2825,17 @@ void MainWindow::handleToolDrag(bool isFrame, int x, int y, Qt::MouseButtons but
     cv::Mat preview = image->clone();
     applyToolToImage(preview, m_drawTool, start, QPoint(x, y), erase);
     if (isFrame) {
-        m_framesCanvas->canvas()->setPreviewImage(preview);
+        cv::Mat reference = buildOriginalPreviewForIndex(m_framesList->currentRow());
+        cv::Mat original = m_showOriginalFrame ? buildOriginalFrame(reference) : cv::Mat();
+        if (original.empty()) {
+            m_framesCanvas->canvas()->setPreviewImage(preview);
+        } else {
+            const QColor gap = m_framesCanvas->palette().color(QPalette::Window);
+            cv::Mat combined = buildCombinedFrame(preview,
+                                                  original,
+                                                  cv::Scalar(gap.blue(), gap.green(), gap.red()));
+            m_framesCanvas->canvas()->setPreviewImage(combined);
+        }
     } else {
         m_spritesCanvas->canvas()->setPreviewImage(preview);
     }
@@ -2681,6 +2860,19 @@ void MainWindow::handleToolRelease(bool isFrame, int x, int y, Qt::MouseButton b
         if (index < 0) {
             m_frameHasStart = false;
             return;
+        }
+        if (!m_showOriginalFrame) {
+            m_frameHasStart = false;
+            return;
+        }
+        const cv::Mat* frameImage = m_frameStore->at(index);
+        const int frameHeight = frameImage ? frameImage->rows : 0;
+        if (frameHeight > 0) {
+            if (y < frameHeight) {
+                m_frameHasStart = false;
+                return;
+            }
+            y -= frameHeight;
         }
         cv::Mat* mask = nullptr;
         if (m_compMaskEditEnabled) {
@@ -2743,11 +2935,20 @@ void MainWindow::handleToolRelease(bool isFrame, int x, int y, Qt::MouseButton b
     if (!image || image->empty()) {
         return;
     }
+    if (isFrame) {
+        const int frameHeight = image->rows;
+        if (frameHeight > 0 && y >= frameHeight) {
+            if (isFrame) {
+                m_frameHasStart = false;
+            }
+            return;
+        }
+    }
     const bool erase = (startButton == Qt::RightButton || button == Qt::RightButton);
     applyToolToImage(*image, m_drawTool, start, QPoint(x, y), erase);
     if (isFrame) {
         m_framesCanvas->canvas()->clearPreviewImage();
-        m_framesCanvas->setImage(*image);
+        updateFrameCanvasImage(m_framesList->currentRow());
         updateFramePreviewAt(m_framesList->currentRow());
         updateMaskPreviewForFrame(m_framesList->currentRow());
         m_frameUndoActive = false;

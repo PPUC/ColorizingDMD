@@ -28,11 +28,6 @@ private:
         ColorPicker,
         MagicFill
     };
-    enum class PreviewMode {
-        Color,
-        Mono2,
-        Mono4
-    };
     enum class MaskKind {
         None,
         Comparison,
@@ -72,7 +67,7 @@ private:
     LegacyProject buildLegacyProject(const QString& baseName) const;
     void refreshFramePreviews();
     void updateFramePreviewAt(int index);
-    cv::Mat buildPreviewFrame(const cv::Mat& source) const;
+    cv::Mat buildPreviewFrame(const cv::Mat& colorized, const cv::Mat& reference) const;
     void resetUndoStacks();
     void ensureUndoStacksSize();
     void pushUndoSnapshot(bool isFrame, int index);
@@ -83,6 +78,16 @@ private:
     void ensureMaskDataSize();
     cv::Mat buildReferenceFrame(const cv::Mat& source) const;
     cv::Mat buildMaskPreview(const cv::Mat& frame, const cv::Mat& mask, const cv::Vec3b& color) const;
+    cv::Mat buildOriginalFrame(const cv::Mat& reference) const;
+    cv::Mat buildCombinedFrame(const cv::Mat& colorized,
+                               const cv::Mat& reference,
+                               const cv::Scalar& gapColor) const;
+    cv::Mat buildCombinedMaskPreview(const cv::Mat& colorized,
+                                     const cv::Mat& reference,
+                                     const cv::Mat& mask,
+                                     const cv::Vec3b& color,
+                                     const cv::Scalar& gapColor) const;
+    cv::Mat buildOriginalPreviewForIndex(int index) const;
     void updateMaskPreviewForFrame(int index);
     void applyToolToMask(cv::Mat& mask, DrawTool tool, const QPoint& start, const QPoint& end, bool erase);
     void applyMaskFill(cv::Mat& mask, int x, int y, bool erase);
@@ -93,6 +98,7 @@ private:
     cv::Mat buildMaskIconImage(const cv::Mat& mask, const cv::Vec3b& color) const;
     void applyMaskListOrder();
     void applyDynamicMaskListOrder();
+    void updateFrameCanvasImage(int index);
     int currentFrameMaskId() const;
     int currentFrameDynamicMaskId() const;
     void setCurrentFrameMaskId(int id);
@@ -123,7 +129,6 @@ private:
     class QLineEdit* m_frameFilter;
     class QLineEdit* m_spriteFilter;
     class QListWidget* m_framePreviewList;
-    class QToolButton* m_previewModeButton;
     class QListWidget* m_maskList;
     class QToolButton* m_maskMoveUp;
     class QToolButton* m_maskMoveDown;
@@ -138,6 +143,7 @@ private:
     class QCheckBox* m_compMaskPreviewToggle;
     class QCheckBox* m_dynMaskEditToggle;
     class QCheckBox* m_dynMaskPreviewToggle;
+    class QCheckBox* m_shapeCompToggle;
     class QTabWidget* m_canvasTabs;
     class QComboBox* m_bookmarksCombo;
     class QSpinBox* m_frameJump;
@@ -163,9 +169,9 @@ private:
     std::vector<cv::Mat> m_dynamicMasks;
     std::vector<uint8_t> m_frameCompMaskIds;
     std::vector<uint8_t> m_frameDynamicMaskIds;
+    std::vector<uint8_t> m_frameShapeCompModes;
 
     bool m_drawPointEnabled = false;
-    PreviewMode m_previewMode = PreviewMode::Color;
     bool m_compMaskEditEnabled = false;
     bool m_compMaskPreviewEnabled = false;
     bool m_dynMaskEditEnabled = false;
@@ -174,6 +180,7 @@ private:
     bool m_spriteUndoActive = false;
     bool m_maskReorderActive = false;
     bool m_dynamicMaskReorderActive = false;
+    bool m_showOriginalFrame = true;
     class QAction* m_undoAction;
     class QAction* m_redoAction;
     DrawTool m_drawTool = DrawTool::Point;
@@ -184,4 +191,5 @@ private:
     QPoint m_spriteStart;
     Qt::MouseButton m_frameStartButton = Qt::NoButton;
     Qt::MouseButton m_spriteStartButton = Qt::NoButton;
+    uint32_t m_noColors = 64;
 };

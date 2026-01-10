@@ -18,6 +18,7 @@ struct LegacyProject {
     std::vector<cv::Mat> sprites;
     std::vector<cv::Mat> comp_masks;
     std::vector<uint8_t> frame_comp_mask_ids;
+    std::vector<uint8_t> frame_shape_comp_modes;
     std::vector<cv::Mat> dynamic_masks;
     std::vector<uint8_t> frame_dynamic_mask_ids;
     std::vector<cv::Mat> frame_refs;

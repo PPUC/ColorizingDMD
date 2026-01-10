@@ -19,11 +19,13 @@ public:
     void fitToImage();
     void requestFitOnResize(bool enabled = true);
     void setGridEnabled(bool enabled);
+    void setGridSegments(int topHeight, int gapHeight, int bottomHeight);
 
 signals:
     void imageClicked(int x, int y, Qt::MouseButton button);
     void imageDragged(int x, int y, Qt::MouseButtons buttons);
     void imageReleased(int x, int y, Qt::MouseButton button);
+    void maskDropped(const QString& kind, int index);
 
 protected:
     void initializeGL() override;
@@ -34,6 +36,8 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
 
 private:
     QString m_overlayText;
@@ -44,6 +48,9 @@ private:
     bool m_panningEnabled;
     bool m_fitOnResize;
     bool m_gridEnabled;
+    int m_gridTopHeight = 0;
+    int m_gridBottomHeight = 0;
+    int m_gridGap = 0;
     cv::Mat m_image;
     cv::Mat m_preview;
 };

@@ -18,10 +18,12 @@ public:
     void setStatusText(const QString& text);
     void setImage(const cv::Mat& image);
     GLCanvasWidget* canvas() const;
+    void setOriginalVisible(bool enabled);
 
 signals:
     void fitRequested();
     void gridToggled(bool enabled);
+    void originalToggled(bool enabled);
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
@@ -31,4 +33,5 @@ private:
     QLabel* m_label;
     QToolButton* m_fitButton;
     QToolButton* m_gridButton;
+    QToolButton* m_originalButton;
 };

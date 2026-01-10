@@ -625,6 +625,7 @@ bool LoadLegacyProject(const std::string& path,
     out.no_colors = no_colors;
 
     out.frame_comp_mask_ids = comp_mask_id;
+    out.frame_shape_comp_modes = shape_comp;
     out.comp_masks.resize(MAX_MASKS);
     if (n_comp_masks > 0 && !comp_masks.empty()) {
         const std::size_t mask_pixels = static_cast<std::size_t>(frame_width) * frame_height;
