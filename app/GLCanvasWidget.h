@@ -26,6 +26,7 @@ signals:
     void imageDragged(int x, int y, Qt::MouseButtons buttons);
     void imageReleased(int x, int y, Qt::MouseButton button);
     void maskDropped(const QString& kind, int index);
+    void imageHovered(int x, int y, bool onImage);
 
 protected:
     void initializeGL() override;
@@ -38,6 +39,7 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
+    void leaveEvent(QEvent* event) override;
 
 private:
     QString m_overlayText;
@@ -51,6 +53,9 @@ private:
     int m_gridTopHeight = 0;
     int m_gridBottomHeight = 0;
     int m_gridGap = 0;
+    bool m_hoverValid = false;
+    int m_hoverX = -1;
+    int m_hoverY = -1;
     cv::Mat m_image;
     cv::Mat m_preview;
 };

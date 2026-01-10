@@ -5,6 +5,7 @@
 
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPen>
 #include <QResizeEvent>
 #include <QWheelEvent>
 #include <QDragEnterEvent>
@@ -12,6 +13,7 @@
 #include <QMimeData>
 #include <QDataStream>
 #include <QMap>
+#include <QEvent>
 
 GLCanvasWidget::GLCanvasWidget(QWidget* parent)
     : QOpenGLWidget(parent)
@@ -25,6 +27,7 @@ GLCanvasWidget::GLCanvasWidget(QWidget* parent)
 {
     setFocusPolicy(Qt::StrongFocus);
     setAcceptDrops(true);
+    setMouseTracking(true);
 }
 
 void GLCanvasWidget::setOverlayText(const QString& text)
@@ -208,6 +211,39 @@ void GLCanvasWidget::paintGL()
         painter.restore();
     }
 
+    if (m_hoverValid && !m_image.empty()) {
+        painter.save();
+        painter.translate(width() / 2.0 + m_pan.x(), height() / 2.0 + m_pan.y());
+        painter.scale(m_zoom, m_zoom);
+        const int w = m_image.cols;
+        const int h = m_image.rows;
+        QRectF highlight(-w / 2.0, -h / 2.0, w, h);
+        bool drawHighlight = true;
+        if (m_gridTopHeight > 0 && m_gridBottomHeight > 0 &&
+            m_gridTopHeight + m_gridGap + m_gridBottomHeight <= h) {
+            if (m_hoverY < m_gridTopHeight) {
+                highlight = QRectF(-w / 2.0, -h / 2.0, w, m_gridTopHeight);
+            } else if (m_hoverY >= m_gridTopHeight + m_gridGap &&
+                       m_hoverY < m_gridTopHeight + m_gridGap + m_gridBottomHeight) {
+                highlight = QRectF(-w / 2.0,
+                                   -h / 2.0 + m_gridTopHeight + m_gridGap,
+                                   w,
+                                   m_gridBottomHeight);
+            } else {
+                drawHighlight = false;
+            }
+        }
+        if (drawHighlight) {
+            QPen pen(QColor(255, 220, 80, 220));
+            const double width = 1.0 / std::max(1.0, m_zoom);
+            pen.setWidthF(width);
+            painter.setPen(pen);
+            painter.setBrush(Qt::NoBrush);
+            painter.drawRect(highlight);
+        }
+        painter.restore();
+    }
+
     painter.setPen(QColor(150, 150, 150));
     painter.drawText(QRect(10, 10, width() - 20, 20),
                      Qt::AlignLeft,
@@ -281,7 +317,13 @@ void GLCanvasWidget::mousePressEvent(QMouseEvent* event)
     }
     int x = 0;
     int y = 0;
-    if (MapToImage(event->pos(), m_image, m_zoom, m_pan, size(), x, y)) {
+    const bool onImage = MapToImage(event->pos(), m_image, m_zoom, m_pan, size(), x, y);
+    m_hoverValid = onImage;
+    m_hoverX = x;
+    m_hoverY = y;
+    emit imageHovered(x, y, onImage);
+    update();
+    if (onImage) {
         emit imageClicked(x, y, event->button());
     }
     QOpenGLWidget::mousePressEvent(event);
@@ -289,6 +331,14 @@ void GLCanvasWidget::mousePressEvent(QMouseEvent* event)
 
 void GLCanvasWidget::mouseMoveEvent(QMouseEvent* event)
 {
+    int hoverX = -1;
+    int hoverY = -1;
+    const bool onImage = MapToImage(event->pos(), m_image, m_zoom, m_pan, size(), hoverX, hoverY);
+    m_hoverValid = onImage;
+    m_hoverX = hoverX;
+    m_hoverY = hoverY;
+    emit imageHovered(hoverX, hoverY, onImage);
+    update();
     if (m_panning) {
         const QPoint delta = event->pos() - m_lastPos;
         m_pan += QPointF(delta.x(), delta.y());
@@ -313,7 +363,13 @@ void GLCanvasWidget::mouseReleaseEvent(QMouseEvent* event)
     }
     int x = 0;
     int y = 0;
-    if (MapToImage(event->pos(), m_image, m_zoom, m_pan, size(), x, y)) {
+    const bool onImage = MapToImage(event->pos(), m_image, m_zoom, m_pan, size(), x, y);
+    m_hoverValid = onImage;
+    m_hoverX = x;
+    m_hoverY = y;
+    emit imageHovered(x, y, onImage);
+    update();
+    if (onImage) {
         emit imageReleased(x, y, event->button());
     }
     QOpenGLWidget::mouseReleaseEvent(event);
@@ -325,6 +381,13 @@ void GLCanvasWidget::resizeEvent(QResizeEvent* event)
     if (m_fitOnResize) {
         fitToImage();
     }
+}
+
+void GLCanvasWidget::leaveEvent(QEvent* event)
+{
+    m_hoverValid = false;
+    update();
+    QOpenGLWidget::leaveEvent(event);
 }
 
 void GLCanvasWidget::dragEnterEvent(QDragEnterEvent* event)

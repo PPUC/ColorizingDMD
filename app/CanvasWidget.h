@@ -19,11 +19,16 @@ public:
     void setImage(const cv::Mat& image);
     GLCanvasWidget* canvas() const;
     void setOriginalVisible(bool enabled);
+    void setMaskButtonsChecked(bool maskEnabled, bool dynamicEnabled);
+    void setMaskButtonsVisible(bool visible);
+    void setMaskButtonsEnabled(bool enabled);
 
 signals:
     void fitRequested();
     void gridToggled(bool enabled);
     void originalToggled(bool enabled);
+    void maskToggled(bool enabled);
+    void dynamicToggled(bool enabled);
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
@@ -34,4 +39,6 @@ private:
     QToolButton* m_fitButton;
     QToolButton* m_gridButton;
     QToolButton* m_originalButton;
+    QToolButton* m_maskButton;
+    QToolButton* m_dynamicButton;
 };

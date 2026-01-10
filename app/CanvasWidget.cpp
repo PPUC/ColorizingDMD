@@ -2,6 +2,7 @@
 
 #include <QLabel>
 #include <QResizeEvent>
+#include <QSignalBlocker>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -14,6 +15,8 @@ CanvasWidget::CanvasWidget(const QString& title, QWidget* parent)
     , m_fitButton(new QToolButton(m_canvas))
     , m_gridButton(new QToolButton(m_canvas))
     , m_originalButton(new QToolButton(m_canvas))
+    , m_maskButton(new QToolButton(m_canvas))
+    , m_dynamicButton(new QToolButton(m_canvas))
 {
     auto* layout = new QVBoxLayout(this);
     m_canvas->setOverlayText(title);
@@ -43,6 +46,20 @@ CanvasWidget::CanvasWidget(const QString& title, QWidget* parent)
     m_originalButton->setToolTip("Toggle original frame");
     m_originalButton->setCursor(Qt::PointingHandCursor);
     connect(m_originalButton, &QToolButton::toggled, this, &CanvasWidget::originalToggled);
+
+    m_maskButton->setText("Mask");
+    m_maskButton->setCheckable(true);
+    m_maskButton->setAutoRaise(true);
+    m_maskButton->setToolTip("Edit comparison mask");
+    m_maskButton->setCursor(Qt::PointingHandCursor);
+    connect(m_maskButton, &QToolButton::toggled, this, &CanvasWidget::maskToggled);
+
+    m_dynamicButton->setText("Dynamic");
+    m_dynamicButton->setCheckable(true);
+    m_dynamicButton->setAutoRaise(true);
+    m_dynamicButton->setToolTip("Edit dynamic mask");
+    m_dynamicButton->setCursor(Qt::PointingHandCursor);
+    connect(m_dynamicButton, &QToolButton::toggled, this, &CanvasWidget::dynamicToggled);
 }
 
 void CanvasWidget::setTitle(const QString& title)
@@ -75,10 +92,39 @@ void CanvasWidget::setOriginalVisible(bool enabled)
     m_originalButton->setChecked(enabled);
 }
 
+void CanvasWidget::setMaskButtonsChecked(bool maskEnabled, bool dynamicEnabled)
+{
+    if (!m_maskButton || !m_dynamicButton) {
+        return;
+    }
+    QSignalBlocker maskBlocker(m_maskButton);
+    QSignalBlocker dynamicBlocker(m_dynamicButton);
+    m_maskButton->setChecked(maskEnabled);
+    m_dynamicButton->setChecked(dynamicEnabled);
+}
+
+void CanvasWidget::setMaskButtonsVisible(bool visible)
+{
+    if (!m_maskButton || !m_dynamicButton) {
+        return;
+    }
+    m_maskButton->setVisible(visible);
+    m_dynamicButton->setVisible(visible);
+}
+
+void CanvasWidget::setMaskButtonsEnabled(bool enabled)
+{
+    if (!m_maskButton || !m_dynamicButton) {
+        return;
+    }
+    m_maskButton->setEnabled(enabled);
+    m_dynamicButton->setEnabled(enabled);
+}
+
 void CanvasWidget::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
-    if (!m_fitButton || !m_gridButton || !m_originalButton) {
+    if (!m_fitButton || !m_gridButton || !m_originalButton || !m_maskButton || !m_dynamicButton) {
         return;
     }
     const int margin = 8;
@@ -97,4 +143,14 @@ void CanvasWidget::resizeEvent(QResizeEvent* event)
     const int originalX = gridX - originalSize.width() - 6;
     m_originalButton->move(originalX, y);
     m_originalButton->raise();
+
+    const QSize dynamicSize = m_dynamicButton->sizeHint();
+    const int dynamicX = originalX - dynamicSize.width() - 6;
+    m_dynamicButton->move(dynamicX, y);
+    m_dynamicButton->raise();
+
+    const QSize maskSize = m_maskButton->sizeHint();
+    const int maskX = dynamicX - maskSize.width() - 6;
+    m_maskButton->move(maskX, y);
+    m_maskButton->raise();
 }

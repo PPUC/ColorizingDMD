@@ -33,6 +33,11 @@ private:
         Comparison,
         Dynamic
     };
+    enum class MaskMode {
+        None,
+        Comparison,
+        Dynamic
+    };
     struct UndoState {
         cv::Mat image;
         cv::Mat mask;
@@ -42,6 +47,17 @@ private:
     struct UndoStack {
         std::vector<UndoState> undo;
         std::vector<UndoState> redo;
+    };
+    enum class FrameHoverArea {
+        None,
+        Top,
+        Bottom
+    };
+    enum class UndoTarget {
+        Frame,
+        Sprite,
+        CompMask,
+        DynMask
     };
 
     void updateWindowTitle();
@@ -71,10 +87,14 @@ private:
     void resetUndoStacks();
     void ensureUndoStacksSize();
     void pushUndoSnapshot(bool isFrame, int index);
+    void pushMaskUndoSnapshot(MaskMode mode, int index);
     bool undoEdit(bool isFrame);
     bool redoEdit(bool isFrame);
+    bool undoMaskEdit(MaskMode mode);
+    bool redoMaskEdit(MaskMode mode);
     void updateUndoActions();
     bool isFrameContext() const;
+    UndoTarget currentUndoTarget() const;
     void ensureMaskDataSize();
     cv::Mat buildReferenceFrame(const cv::Mat& source) const;
     cv::Mat buildMaskPreview(const cv::Mat& frame, const cv::Mat& mask, const cv::Vec3b& color) const;
@@ -89,6 +109,7 @@ private:
                                      const cv::Scalar& gapColor) const;
     cv::Mat buildOriginalPreviewForIndex(int index) const;
     void updateMaskPreviewForFrame(int index);
+    void setMaskMode(MaskMode mode);
     void applyToolToMask(cv::Mat& mask, DrawTool tool, const QPoint& start, const QPoint& end, bool erase);
     void applyMaskFill(cv::Mat& mask, int x, int y, bool erase);
     void refreshMaskCombos();
@@ -139,10 +160,6 @@ private:
     class QPushButton* m_dynamicMaskClearButton;
     class QComboBox* m_frameMaskAssign;
     class QComboBox* m_frameDynamicMaskAssign;
-    class QCheckBox* m_compMaskEditToggle;
-    class QCheckBox* m_compMaskPreviewToggle;
-    class QCheckBox* m_dynMaskEditToggle;
-    class QCheckBox* m_dynMaskPreviewToggle;
     class QCheckBox* m_shapeCompToggle;
     class QTabWidget* m_canvasTabs;
     class QComboBox* m_bookmarksCombo;
@@ -163,6 +180,8 @@ private:
     std::vector<std::string> m_sectionNames;
     std::vector<UndoStack> m_frameUndoStacks;
     std::vector<UndoStack> m_spriteUndoStacks;
+    std::vector<UndoStack> m_compMaskUndoStacks;
+    std::vector<UndoStack> m_dynMaskUndoStacks;
     std::vector<cv::Mat> m_frameRefs;
     std::vector<std::vector<uint16_t>> m_frameDynamicColors;
     std::vector<cv::Mat> m_compMasks;
@@ -172,15 +191,14 @@ private:
     std::vector<uint8_t> m_frameShapeCompModes;
 
     bool m_drawPointEnabled = false;
-    bool m_compMaskEditEnabled = false;
-    bool m_compMaskPreviewEnabled = false;
-    bool m_dynMaskEditEnabled = false;
-    bool m_dynMaskPreviewEnabled = false;
+    MaskMode m_maskMode = MaskMode::None;
     bool m_frameUndoActive = false;
     bool m_spriteUndoActive = false;
     bool m_maskReorderActive = false;
     bool m_dynamicMaskReorderActive = false;
     bool m_showOriginalFrame = true;
+    bool m_frameDrawOnMask = false;
+    FrameHoverArea m_frameHoverArea = FrameHoverArea::None;
     class QAction* m_undoAction;
     class QAction* m_redoAction;
     DrawTool m_drawTool = DrawTool::Point;
