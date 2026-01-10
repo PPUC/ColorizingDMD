@@ -116,8 +116,8 @@ bool SaveLegacyProject(const std::string& crom_path,
         return false;
     }
 
-    const uint32_t frame_width_x = frame_width;
-    const uint32_t frame_height_x = frame_height;
+    uint32_t frame_width_x = frame_width;
+    uint32_t frame_height_x = frame_height;
     const uint32_t n_frames = static_cast<uint32_t>(project.frames.size());
     const uint32_t n_sprites = static_cast<uint32_t>(project.sprites.size());
     const uint32_t no_colors = project.no_colors > 0 ? project.no_colors : 64;
@@ -147,6 +147,16 @@ bool SaveLegacyProject(const std::string& crom_path,
             if (project.frame_comp_mask_ids[i] != 255) {
                 n_comp_masks = static_cast<uint32_t>(std::max<std::size_t>(n_comp_masks,
                     static_cast<std::size_t>(project.frame_comp_mask_ids[i]) + 1));
+            }
+        }
+    }
+
+    if (!project.frames_x.empty()) {
+        for (const auto& frame_x : project.frames_x) {
+            if (!frame_x.empty()) {
+                frame_width_x = static_cast<uint32_t>(frame_x.cols);
+                frame_height_x = static_cast<uint32_t>(frame_x.rows);
+                break;
             }
         }
     }
@@ -225,6 +235,20 @@ bool SaveLegacyProject(const std::string& crom_path,
             const cv::Vec3b* row = frame.ptr<cv::Vec3b>(static_cast<int>(y));
             for (uint32_t x = 0; x < frame_width; ++x) {
                 frames_565[offset + y * frame_width + x] = BgrToRgb565(row[x]);
+            }
+        }
+        if (index < project.frames_x.size()) {
+            const cv::Mat& frame_x = project.frames_x[index];
+            if (!frame_x.empty()) {
+                extra_frame[index] = 1;
+                cv::Mat frameX = EnsureBgr(frame_x, cv::Size(frame_width_x, frame_height_x));
+                const std::size_t offset_x = static_cast<std::size_t>(index) * frame_width_x * frame_height_x;
+                for (uint32_t y = 0; y < frame_height_x; ++y) {
+                    const cv::Vec3b* row = frameX.ptr<cv::Vec3b>(static_cast<int>(y));
+                    for (uint32_t x = 0; x < frame_width_x; ++x) {
+                        frames_x_565[offset_x + y * frame_width_x + x] = BgrToRgb565(row[x]);
+                    }
+                }
             }
         }
         if (index < project.frame_dynamic_mask_ids.size()) {

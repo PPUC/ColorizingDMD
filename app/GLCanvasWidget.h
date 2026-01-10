@@ -20,6 +20,8 @@ public:
     void requestFitOnResize(bool enabled = true);
     void setGridEnabled(bool enabled);
     void setGridSegments(int topHeight, int gapHeight, int bottomHeight);
+    void setGridScales(int topScale, int bottomScale);
+    void scaleZoom(double factor);
 
 signals:
     void imageClicked(int x, int y, Qt::MouseButton button);
@@ -53,6 +55,8 @@ private:
     int m_gridTopHeight = 0;
     int m_gridBottomHeight = 0;
     int m_gridGap = 0;
+    int m_gridTopScale = 1;
+    int m_gridBottomScale = 1;
     bool m_hoverValid = false;
     int m_hoverX = -1;
     int m_hoverY = -1;

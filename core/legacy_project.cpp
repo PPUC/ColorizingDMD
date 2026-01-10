@@ -246,6 +246,26 @@ cv::Mat BuildFrameImage(uint32_t width,
     return image;
 }
 
+cv::Mat ScaleReferenceFrame(const uint8_t* ref_data,
+                            uint32_t width,
+                            uint32_t height,
+                            uint32_t target_width,
+                            uint32_t target_height)
+{
+    if (!ref_data || width == 0 || height == 0 || target_width == 0 || target_height == 0) {
+        return cv::Mat();
+    }
+    cv::Mat source(static_cast<int>(height), static_cast<int>(width), CV_8UC1,
+                   const_cast<uint8_t*>(ref_data));
+    if (source.cols == static_cast<int>(target_width) && source.rows == static_cast<int>(target_height)) {
+        return source.clone();
+    }
+    cv::Mat resized;
+    cv::resize(source, resized, cv::Size(static_cast<int>(target_width), static_cast<int>(target_height)),
+               0.0, 0.0, cv::INTER_NEAREST);
+    return resized;
+}
+
 cv::Mat BuildSpriteImage(uint32_t width,
                          uint32_t height,
                          const uint16_t* sprite_colored,
@@ -372,7 +392,8 @@ bool LoadLegacyProject(const std::string& path,
         }
     }
 
-    if (!SkipExact(file, static_cast<std::size_t>(n_frames))) {
+    std::vector<uint8_t> extra_frame(n_frames, 0);
+    if (!ReadExact(file, extra_frame.data(), extra_frame.size())) {
         if (error) {
             *error = "Unexpected end of file (extra frame flags)";
         }
@@ -391,18 +412,23 @@ bool LoadLegacyProject(const std::string& path,
     }
 
     const std::size_t frame_pixels_x = static_cast<std::size_t>(n_frames) * frame_width_x * frame_height_x;
-    if (!SkipExact(file, frame_pixels_x * sizeof(uint16_t))) {
-        if (error) {
-            *error = "Unexpected end of file (extra frame data)";
+    std::vector<uint16_t> frames_x_565(frame_pixels_x);
+    if (frame_pixels_x > 0) {
+        if (!ReadExact(file, frames_x_565.data(), frame_pixels_x * sizeof(uint16_t))) {
+            if (error) {
+                *error = "Unexpected end of file (extra frame data)";
+            }
+            return false;
         }
-        return false;
     }
 
     const std::size_t dyna_masks_count = static_cast<std::size_t>(n_frames) * frame_width * frame_height;
     const std::size_t dyna_masks_x_count = static_cast<std::size_t>(n_frames) * frame_width_x * frame_height_x;
     const std::size_t dyna_cols_count = static_cast<std::size_t>(n_frames) * MAX_DYNA_SETS_PER_FRAMEN * no_colors;
     std::vector<uint8_t> dyna_masks(dyna_masks_count);
+    std::vector<uint8_t> dyna_masks_x(dyna_masks_x_count);
     std::vector<uint16_t> dyna_cols(dyna_cols_count);
+    std::vector<uint16_t> dyna_cols_x(dyna_cols_count);
     if (dyna_masks_count > 0) {
         if (!ReadExact(file, dyna_masks.data(), dyna_masks_count)) {
             if (error) {
@@ -411,11 +437,13 @@ bool LoadLegacyProject(const std::string& path,
             return false;
         }
     }
-    if (!SkipExact(file, dyna_masks_x_count)) {
-        if (error) {
-            *error = "Unexpected end of file (dynamic masks extra)";
+    if (dyna_masks_x_count > 0) {
+        if (!ReadExact(file, dyna_masks_x.data(), dyna_masks_x_count)) {
+            if (error) {
+                *error = "Unexpected end of file (dynamic masks extra)";
+            }
+            return false;
         }
-        return false;
     }
     if (dyna_cols_count > 0) {
         if (!ReadExact(file, dyna_cols.data(), dyna_cols_count * sizeof(uint16_t))) {
@@ -424,11 +452,13 @@ bool LoadLegacyProject(const std::string& path,
             }
             return false;
         }
-        if (!SkipExact(file, dyna_cols_count * sizeof(uint16_t))) {
-            if (error) {
-                *error = "Unexpected end of file (dynamic colors extra)";
+        if (dyna_cols_count > 0) {
+            if (!ReadExact(file, dyna_cols_x.data(), dyna_cols_count * sizeof(uint16_t))) {
+                if (error) {
+                    *error = "Unexpected end of file (dynamic colors extra)";
+                }
+                return false;
             }
-            return false;
         }
     }
 
@@ -639,6 +669,8 @@ bool LoadLegacyProject(const std::string& path,
     }
 
     out.frames.reserve(n_frames);
+    out.frames_x.reserve(n_frames);
+    out.frame_extra_flags = extra_frame;
     out.frame_refs.reserve(n_frames);
     out.frame_dynamic_colors.reserve(n_frames);
     out.frame_dynamic_mask_ids.assign(n_frames, 255);
@@ -657,6 +689,35 @@ bool LoadLegacyProject(const std::string& path,
                                              cols_data,
                                              ref_data,
                                              no_colors));
+        if (!frames_x_565.empty() && frame_width_x > 0 && frame_height_x > 0 && index < extra_frame.size() &&
+            extra_frame[index] != 0) {
+            const std::size_t offset_x = static_cast<std::size_t>(index) * frame_width_x * frame_height_x;
+            const uint16_t* frame_data_x = frames_x_565.data() + offset_x;
+            const uint8_t* mask_data_x = dyna_masks_x.empty() ? nullptr : dyna_masks_x.data() + offset_x;
+            const uint16_t* cols_data_x = dyna_cols_x.empty() ? nullptr :
+                dyna_cols_x.data() + static_cast<std::size_t>(index) * MAX_DYNA_SETS_PER_FRAMEN * no_colors;
+            const uint8_t* ref_data_x = nullptr;
+            cv::Mat scaled_ref_x;
+            if (ref_data) {
+                scaled_ref_x = ScaleReferenceFrame(ref_data,
+                                                   frame_width,
+                                                   frame_height,
+                                                   frame_width_x,
+                                                   frame_height_x);
+                if (!scaled_ref_x.empty()) {
+                    ref_data_x = scaled_ref_x.data;
+                }
+            }
+            out.frames_x.push_back(BuildFrameImage(frame_width_x,
+                                                   frame_height_x,
+                                                   frame_data_x,
+                                                   mask_data_x,
+                                                   cols_data_x,
+                                                   ref_data_x,
+                                                   no_colors));
+        } else {
+            out.frames_x.emplace_back();
+        }
 
         if (mask_data) {
             uint8_t selected_set = 255;

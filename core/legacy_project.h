@@ -15,6 +15,8 @@ struct LegacyProject {
     uint32_t sprite_width = 0;
     uint32_t sprite_height = 0;
     std::vector<cv::Mat> frames;
+    std::vector<cv::Mat> frames_x;
+    std::vector<uint8_t> frame_extra_flags;
     std::vector<cv::Mat> sprites;
     std::vector<cv::Mat> comp_masks;
     std::vector<uint8_t> frame_comp_mask_ids;

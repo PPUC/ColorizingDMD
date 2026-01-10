@@ -22,6 +22,8 @@ public:
     void setMaskButtonsChecked(bool maskEnabled, bool dynamicEnabled);
     void setMaskButtonsVisible(bool visible);
     void setMaskButtonsEnabled(bool enabled);
+    void setHdButtonChecked(bool enabled);
+    void setHdButtonEnabled(bool enabled);
 
 signals:
     void fitRequested();
@@ -29,6 +31,7 @@ signals:
     void originalToggled(bool enabled);
     void maskToggled(bool enabled);
     void dynamicToggled(bool enabled);
+    void hdToggled(bool enabled);
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
@@ -41,4 +44,5 @@ private:
     QToolButton* m_originalButton;
     QToolButton* m_maskButton;
     QToolButton* m_dynamicButton;
+    QToolButton* m_hdButton;
 };

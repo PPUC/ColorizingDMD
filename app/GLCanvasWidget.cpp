@@ -114,6 +114,23 @@ void GLCanvasWidget::setGridSegments(int topHeight, int gapHeight, int bottomHei
     update();
 }
 
+void GLCanvasWidget::setGridScales(int topScale, int bottomScale)
+{
+    m_gridTopScale = std::max(1, topScale);
+    m_gridBottomScale = std::max(1, bottomScale);
+    update();
+}
+
+void GLCanvasWidget::scaleZoom(double factor)
+{
+    if (factor <= 0.0) {
+        return;
+    }
+    m_zoom = std::max(0.1, std::min(8.0, m_zoom * factor));
+    m_fitOnResize = false;
+    update();
+}
+
 void GLCanvasWidget::initializeGL()
 {
     initializeOpenGLFunctions();
@@ -177,36 +194,39 @@ void GLCanvasWidget::paintGL()
         painter.save();
         painter.translate(width() / 2.0 + m_pan.x(), height() / 2.0 + m_pan.y());
         painter.scale(m_zoom, m_zoom);
-        const double gap = 0.5;
         const int w = m_image.cols;
         const int h = m_image.rows;
-        auto drawRegion = [&](int yStart, int yEnd) {
+        auto drawRegion = [&](int yStart, int yEnd, int scale) {
+            const double gapRatio = 0.5;
+            const double cell = std::max(1, scale);
+            const double fillSize = cell * (1.0 - gapRatio);
             painter.setOpacity(0.25);
             painter.setPen(QPen(QColor(40, 40, 40), 0));
-            for (int y = yStart; y < yEnd; ++y) {
-                for (int x = 0; x < w; ++x) {
-                    painter.fillRect(QRectF(x - w / 2.0, y - h / 2.0, 1.0 - gap, 1.0 - gap),
+            for (int y = yStart; y < yEnd; y += scale) {
+                for (int x = 0; x < w; x += scale) {
+                    painter.fillRect(QRectF(x - w / 2.0, y - h / 2.0, fillSize, fillSize),
                                      QColor(20, 20, 20));
                 }
             }
             painter.setOpacity(0.45);
             painter.setPen(QPen(QColor(60, 60, 60), 0));
-            for (int x = 0; x <= w; ++x) {
+            for (int x = 0; x <= w; x += scale) {
                 painter.drawLine(QPointF(x - w / 2.0, yStart - h / 2.0),
                                  QPointF(x - w / 2.0, yEnd - h / 2.0));
             }
-            for (int y = yStart; y <= yEnd; ++y) {
+            for (int y = yStart; y <= yEnd; y += scale) {
                 painter.drawLine(QPointF(-w / 2.0, y - h / 2.0),
                                  QPointF(w / 2.0, y - h / 2.0));
             }
         };
         if (m_gridTopHeight > 0 && m_gridBottomHeight > 0 &&
             m_gridTopHeight + m_gridGap + m_gridBottomHeight <= h) {
-            drawRegion(0, m_gridTopHeight);
+            drawRegion(0, m_gridTopHeight, m_gridTopScale);
             drawRegion(m_gridTopHeight + m_gridGap,
-                       m_gridTopHeight + m_gridGap + m_gridBottomHeight);
+                       m_gridTopHeight + m_gridGap + m_gridBottomHeight,
+                       m_gridBottomScale);
         } else {
-            drawRegion(0, h);
+            drawRegion(0, h, 1);
         }
         painter.restore();
     }

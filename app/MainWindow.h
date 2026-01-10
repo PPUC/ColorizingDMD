@@ -83,7 +83,9 @@ private:
     LegacyProject buildLegacyProject(const QString& baseName) const;
     void refreshFramePreviews();
     void updateFramePreviewAt(int index);
-    cv::Mat buildPreviewFrame(const cv::Mat& colorized, const cv::Mat& reference) const;
+    cv::Mat buildPreviewFrame(const cv::Mat& colorized,
+                              const cv::Mat& reference,
+                              const cv::Mat& hdFrame) const;
     void resetUndoStacks();
     void ensureUndoStacksSize();
     void pushUndoSnapshot(bool isFrame, int index);
@@ -95,6 +97,9 @@ private:
     void updateUndoActions();
     bool isFrameContext() const;
     UndoTarget currentUndoTarget() const;
+    void setHdMode(bool enabled);
+    bool hasHdFrame(int index) const;
+    cv::Mat* activeFrameImage(int index, bool forEdit);
     void ensureMaskDataSize();
     cv::Mat buildReferenceFrame(const cv::Mat& source) const;
     cv::Mat buildMaskPreview(const cv::Mat& frame, const cv::Mat& mask, const cv::Vec3b& color) const;
@@ -161,6 +166,10 @@ private:
     class QComboBox* m_frameMaskAssign;
     class QComboBox* m_frameDynamicMaskAssign;
     class QCheckBox* m_shapeCompToggle;
+    class QComboBox* m_hdSourceCombo;
+    class QComboBox* m_hdScaleCombo;
+    class QPushButton* m_hdCreateButton;
+    class QPushButton* m_hdDeleteButton;
     class QTabWidget* m_canvasTabs;
     class QComboBox* m_bookmarksCombo;
     class QSpinBox* m_frameJump;
@@ -179,6 +188,7 @@ private:
     std::vector<uint32_t> m_sectionStarts;
     std::vector<std::string> m_sectionNames;
     std::vector<UndoStack> m_frameUndoStacks;
+    std::vector<UndoStack> m_frameHdUndoStacks;
     std::vector<UndoStack> m_spriteUndoStacks;
     std::vector<UndoStack> m_compMaskUndoStacks;
     std::vector<UndoStack> m_dynMaskUndoStacks;
@@ -186,6 +196,8 @@ private:
     std::vector<std::vector<uint16_t>> m_frameDynamicColors;
     std::vector<cv::Mat> m_compMasks;
     std::vector<cv::Mat> m_dynamicMasks;
+    std::vector<cv::Mat> m_frameExtraFrames;
+    std::vector<uint8_t> m_frameExtraFlags;
     std::vector<uint8_t> m_frameCompMaskIds;
     std::vector<uint8_t> m_frameDynamicMaskIds;
     std::vector<uint8_t> m_frameShapeCompModes;
@@ -199,6 +211,7 @@ private:
     bool m_showOriginalFrame = true;
     bool m_frameDrawOnMask = false;
     FrameHoverArea m_frameHoverArea = FrameHoverArea::None;
+    bool m_useHdFrame = false;
     class QAction* m_undoAction;
     class QAction* m_redoAction;
     DrawTool m_drawTool = DrawTool::Point;

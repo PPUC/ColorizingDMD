@@ -17,6 +17,7 @@ CanvasWidget::CanvasWidget(const QString& title, QWidget* parent)
     , m_originalButton(new QToolButton(m_canvas))
     , m_maskButton(new QToolButton(m_canvas))
     , m_dynamicButton(new QToolButton(m_canvas))
+    , m_hdButton(new QToolButton(m_canvas))
 {
     auto* layout = new QVBoxLayout(this);
     m_canvas->setOverlayText(title);
@@ -60,6 +61,13 @@ CanvasWidget::CanvasWidget(const QString& title, QWidget* parent)
     m_dynamicButton->setToolTip("Edit dynamic mask");
     m_dynamicButton->setCursor(Qt::PointingHandCursor);
     connect(m_dynamicButton, &QToolButton::toggled, this, &CanvasWidget::dynamicToggled);
+
+    m_hdButton->setText("HD");
+    m_hdButton->setCheckable(true);
+    m_hdButton->setAutoRaise(true);
+    m_hdButton->setToolTip("Toggle HD frame");
+    m_hdButton->setCursor(Qt::PointingHandCursor);
+    connect(m_hdButton, &QToolButton::toggled, this, &CanvasWidget::hdToggled);
 }
 
 void CanvasWidget::setTitle(const QString& title)
@@ -121,10 +129,27 @@ void CanvasWidget::setMaskButtonsEnabled(bool enabled)
     m_dynamicButton->setEnabled(enabled);
 }
 
+void CanvasWidget::setHdButtonChecked(bool enabled)
+{
+    if (!m_hdButton) {
+        return;
+    }
+    QSignalBlocker blocker(m_hdButton);
+    m_hdButton->setChecked(enabled);
+}
+
+void CanvasWidget::setHdButtonEnabled(bool enabled)
+{
+    if (!m_hdButton) {
+        return;
+    }
+    m_hdButton->setEnabled(enabled);
+}
+
 void CanvasWidget::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
-    if (!m_fitButton || !m_gridButton || !m_originalButton || !m_maskButton || !m_dynamicButton) {
+    if (!m_fitButton || !m_gridButton || !m_originalButton || !m_maskButton || !m_dynamicButton || !m_hdButton) {
         return;
     }
     const int margin = 8;
@@ -153,4 +178,9 @@ void CanvasWidget::resizeEvent(QResizeEvent* event)
     const int maskX = dynamicX - maskSize.width() - 6;
     m_maskButton->move(maskX, y);
     m_maskButton->raise();
+
+    const QSize hdSize = m_hdButton->sizeHint();
+    const int hdX = maskX - hdSize.width() - 6;
+    m_hdButton->move(hdX, y);
+    m_hdButton->raise();
 }
