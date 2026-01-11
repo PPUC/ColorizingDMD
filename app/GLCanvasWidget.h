@@ -25,6 +25,7 @@ public:
     void setSecondaryMaskOutline(const cv::Mat& mask, const QColor& color, const QRect& region = QRect());
     void clearPrimaryOutline();
     void clearMaskOutline();
+    void setHoverPixelEnabled(bool enabled);
     void scaleZoom(double factor);
 
 signals:
@@ -74,6 +75,7 @@ private:
     bool m_hoverValid = false;
     int m_hoverX = -1;
     int m_hoverY = -1;
+    bool m_hoverPixelEnabled = false;
     cv::Mat m_image;
     cv::Mat m_preview;
 };

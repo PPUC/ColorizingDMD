@@ -64,11 +64,16 @@ constexpr int kPreviewIconWidth = 160;
 constexpr int kPreviewIconHeight = 120;
 constexpr int kPreviewItemWidth = 180;
 constexpr int kPreviewItemHeight = 150;
+constexpr int kPreviewIconWidthHd = kPreviewIconWidth * 2;
+constexpr int kPreviewIconHeightHd = kPreviewIconHeight * 2;
+constexpr int kPreviewItemWidthHd = kPreviewIconWidthHd + 12;
+constexpr int kPreviewItemHeightHd = kPreviewIconHeightHd + 28;
 constexpr int kMaxUndoDepth = 50;
 constexpr int kFrameGapPixels = 8;
 
 constexpr int kFrameIndexRole = Qt::UserRole + 1;
 constexpr int kFrameDurationRole = Qt::UserRole + 2;
+constexpr int kPreviewIconSizeRole = Qt::UserRole + 3;
 
 cv::Mat EnsureBgr(const cv::Mat& source);
 
@@ -236,11 +241,25 @@ public:
         const int padding = 6;
         const int textHeight = metrics.height() + 4;
         QRect contentRect = opt.rect.adjusted(padding, padding, -padding, -padding);
-        QRect textRect(contentRect.left(), contentRect.top(), contentRect.width(), textHeight);
-        QRect iconRect(contentRect.left(),
+        const QSize iconSize = index.data(kPreviewIconSizeRole).toSize().isValid()
+            ? index.data(kPreviewIconSizeRole).toSize()
+            : opt.decorationSize.isValid() ? opt.decorationSize : QSize(kPreviewIconWidth, kPreviewIconHeight);
+        const int iconX = contentRect.left() + (contentRect.width() - iconSize.width()) / 2;
+        QRect iconRect(iconX,
                        contentRect.top() + textHeight + 2,
-                       contentRect.width(),
+                       iconSize.width(),
                        contentRect.height() - textHeight - 2);
+        QRect previewRect = iconRect;
+
+        const QIcon icon = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
+        if (!icon.isNull()) {
+            const QPixmap pixmap = icon.pixmap(iconSize);
+            const QSize targetSize = pixmap.size().scaled(iconRect.size(), Qt::KeepAspectRatio);
+            const QPoint topLeft(iconRect.center().x() - targetSize.width() / 2,
+                                 iconRect.center().y() - targetSize.height() / 2);
+            previewRect = QRect(topLeft, targetSize);
+            painter->drawPixmap(previewRect, pixmap);
+        }
 
         const QVariant frameValue = index.data(kFrameIndexRole);
         if (frameValue.isValid()) {
@@ -248,22 +267,26 @@ public:
             const int duration = index.data(kFrameDurationRole).toInt();
             const QString leftText = QString("F%1").arg(frameIndex);
             const QString rightText = duration > 0 ? QString("%1 ms").arg(duration) : "n/a";
-
             painter->setPen(opt.palette.text().color());
+            const QRect textRect(previewRect.left(), contentRect.top(), previewRect.width(), textHeight);
             painter->drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, leftText);
             painter->drawText(textRect, Qt::AlignRight | Qt::AlignVCenter, rightText);
         }
 
-        const QIcon icon = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
-        if (!icon.isNull()) {
-            const QPixmap pixmap = icon.pixmap(opt.decorationSize);
-            const QSize targetSize = pixmap.size().scaled(iconRect.size(), Qt::KeepAspectRatio);
-            const QPoint topLeft(iconRect.center().x() - targetSize.width() / 2,
-                                 iconRect.center().y() - targetSize.height() / 2);
-            painter->drawPixmap(QRect(topLeft, targetSize), pixmap);
-        }
-
         painter->restore();
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
+        const QFontMetrics metrics(option.font);
+        const int padding = 6;
+        const int textHeight = metrics.height() + 4;
+        const QSize iconSize = index.data(kPreviewIconSizeRole).toSize().isValid()
+            ? index.data(kPreviewIconSizeRole).toSize()
+            : option.decorationSize.isValid() ? option.decorationSize : QSize(kPreviewIconWidth, kPreviewIconHeight);
+        const int height = iconSize.height() + textHeight + padding * 2;
+        const int width = std::max(iconSize.width() + padding * 2, kPreviewItemWidth);
+        return QSize(width, height);
     }
 };
 
@@ -286,18 +309,22 @@ public:
         const int padding = 6;
         const int textHeight = metrics.height() + 4;
         QRect contentRect = opt.rect.adjusted(padding, padding, -padding, -padding);
-        QRect iconRect(contentRect.left(),
+        const QSize iconSize = index.data(kPreviewIconSizeRole).toSize().isValid()
+            ? index.data(kPreviewIconSizeRole).toSize()
+            : opt.decorationSize.isValid() ? opt.decorationSize : QSize(kPreviewIconWidth, kPreviewIconHeight);
+        const int iconX = contentRect.left() + (contentRect.width() - iconSize.width()) / 2;
+        QRect iconRect(iconX,
                        contentRect.top(),
-                       contentRect.width(),
+                       iconSize.width(),
                        std::max(0, contentRect.height() - textHeight - 2));
-        QRect textRect(contentRect.left(),
+        QRect textRect(iconRect.left(),
                        contentRect.bottom() - textHeight + 1,
-                       contentRect.width(),
+                       iconRect.width(),
                        textHeight);
 
         const QIcon icon = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
         if (!icon.isNull()) {
-            const QPixmap pixmap = icon.pixmap(opt.decorationSize);
+            const QPixmap pixmap = icon.pixmap(iconSize);
             const QSize targetSize = pixmap.size().scaled(iconRect.size(), Qt::KeepAspectRatio);
             const QPoint topLeft(iconRect.center().x() - targetSize.width() / 2,
                                  iconRect.center().y() - targetSize.height() / 2);
@@ -313,12 +340,15 @@ public:
 
     QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
     {
-        Q_UNUSED(index);
         const QFontMetrics metrics(option.font);
         const int padding = 6;
         const int textHeight = metrics.height() + 4;
-        const int height = kPreviewIconHeight + textHeight + padding * 2;
-        return QSize(kPreviewItemWidth, height);
+        const QSize iconSize = index.data(kPreviewIconSizeRole).toSize().isValid()
+            ? index.data(kPreviewIconSizeRole).toSize()
+            : option.decorationSize.isValid() ? option.decorationSize : QSize(kPreviewIconWidth, kPreviewIconHeight);
+        const int height = iconSize.height() + textHeight + padding * 2;
+        const int width = std::max(iconSize.width() + padding * 2, kPreviewItemWidth);
+        return QSize(width, height);
     }
 };
 
@@ -336,6 +366,25 @@ cv::Mat EnsureBgr(const cv::Mat& source)
         result = source.clone();
     }
     return result;
+}
+
+bool MaskHasContent(const cv::Mat& mask)
+{
+    return !mask.empty() && cv::countNonZero(mask) > 0;
+}
+
+bool IsAllBlackFrame(const cv::Mat& frame)
+{
+    if (frame.empty()) {
+        return true;
+    }
+    cv::Mat bgr = EnsureBgr(frame);
+    if (bgr.empty()) {
+        return true;
+    }
+    cv::Mat gray;
+    cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
+    return cv::countNonZero(gray) == 0;
 }
 
 cv::Mat MakePlaceholderImage(int width, int height, const cv::Scalar& baseColor, const cv::Scalar& gridColor)
@@ -385,6 +434,16 @@ cv::Mat MakeFittedImage(const cv::Mat& source, int width, int height)
     const int offsetY = (height - targetH) / 2;
     resized.copyTo(output(cv::Rect(offsetX, offsetY, targetW, targetH)));
     return output;
+}
+
+cv::Mat BuildBackgroundPreview(const cv::Mat& sdFrame, const cv::Mat& hdFrame, const cv::Scalar& gapColor)
+{
+    cv::Mat sd = EnsureBgr(sdFrame);
+    cv::Mat hd = EnsureBgr(hdFrame);
+    if (sd.empty() && hd.empty()) {
+        return cv::Mat();
+    }
+    return BuildStackedFrames({sd, hd}, gapColor);
 }
 
 bool IsLikelyJsonFile(const QString& path)
@@ -711,6 +770,9 @@ MainWindow::MainWindow(QWidget* parent)
         m_framesCanvas->canvas()->setPanningEnabled(!checked);
         m_spritesCanvas->canvas()->setPanningEnabled(!checked);
         m_backgroundsCanvas->canvas()->setPanningEnabled(!checked);
+        m_framesCanvas->canvas()->setHoverPixelEnabled(checked);
+        m_spritesCanvas->canvas()->setHoverPixelEnabled(checked);
+        m_backgroundsCanvas->canvas()->setHoverPixelEnabled(checked);
         if (!checked) {
             m_framesCanvas->canvas()->clearPreviewImage();
             m_spritesCanvas->canvas()->clearPreviewImage();
@@ -792,6 +854,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_spritesCanvas->setBackgroundVisible(false);
     m_imagesCanvas->setBackgroundVisible(false);
     m_backgroundsCanvas->setBackgroundVisible(false);
+    m_backgroundsCanvas->setHdButtonEnabled(true);
     tabs->addTab(m_framesCanvas, "Frames");
     tabs->addTab(m_spritesCanvas, "Sprites");
     tabs->addTab(m_imagesCanvas, "Images");
@@ -799,6 +862,7 @@ MainWindow::MainWindow(QWidget* parent)
     setCentralWidget(tabs);
     connect(tabs, &QTabWidget::currentChanged, this, [this](int) {
         updateUndoActions();
+        updateHdControlsForContext();
     });
 
     auto* toolDock = new QDockWidget("Tools", this);
@@ -846,14 +910,15 @@ MainWindow::MainWindow(QWidget* parent)
     m_backgroundList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_backgroundList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
     m_backgroundList->setResizeMode(QListView::Adjust);
+    m_backgroundList->setUniformItemSizes(false);
     m_backgroundList->setDragDropMode(QAbstractItemView::DragOnly);
     m_backgroundList->setDragDropOverwriteMode(false);
     m_backgroundList->setDragEnabled(true);
     m_backgroundList->setAcceptDrops(false);
     m_backgroundList->setDropIndicatorShown(false);
-    m_backgroundList->setIconSize(QSize(kPreviewIconWidth, kPreviewIconHeight));
-    m_backgroundList->setGridSize(QSize(kPreviewItemWidth, kPreviewItemHeight));
-    m_backgroundList->setSpacing(6);
+    m_backgroundList->setIconSize(QSize(kPreviewIconWidthHd, kPreviewIconHeightHd));
+    m_backgroundList->setGridSize(QSize());
+    m_backgroundList->setSpacing(4);
     m_backgroundList->setItemDelegate(new ToolPreviewDelegate(m_backgroundList));
     auto* backgroundsLayout = new QVBoxLayout(backgroundsTab);
     backgroundsLayout->addWidget(m_backgroundList, 1);
@@ -939,6 +1004,7 @@ MainWindow::MainWindow(QWidget* parent)
     auto* inspectorWidget = new QWidget(inspectorDock);
     auto* inspectorLayout = new QFormLayout(inspectorWidget);
     m_projectLabel = new QLabel("None", inspectorWidget);
+    m_projectLabel->setWordWrap(true);
     m_bookmarksCombo = new QComboBox(inspectorWidget);
     m_bookmarksCombo->setEnabled(false);
     m_frameJump = new QSpinBox(inspectorWidget);
@@ -951,6 +1017,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_frameMaskAssign = new QComboBox(inspectorWidget);
     m_frameDynamicMaskAssign = new QComboBox(inspectorWidget);
     m_frameBackgroundAssign = new QComboBox(inspectorWidget);
+    m_backgroundAssignLabel = new QLabel("Background", inspectorWidget);
     m_shapeCompToggle = new QCheckBox("Shape comparison", inspectorWidget);
     m_hdSourceCombo = new QComboBox(inspectorWidget);
     m_hdScaleCombo = new QComboBox(inspectorWidget);
@@ -971,7 +1038,7 @@ MainWindow::MainWindow(QWidget* parent)
     inspectorLayout->addRow("Sprite info", m_spriteMetaLabel);
     inspectorLayout->addRow("Mask", m_frameMaskAssign);
     inspectorLayout->addRow("Dynamic mask", m_frameDynamicMaskAssign);
-    inspectorLayout->addRow("Background", m_frameBackgroundAssign);
+    inspectorLayout->addRow(m_backgroundAssignLabel, m_frameBackgroundAssign);
     inspectorLayout->addRow("Shape compare", m_shapeCompToggle);
     inspectorLayout->addRow("HD source", m_hdSourceCombo);
     inspectorLayout->addRow("HD scale", m_hdScaleCombo);
@@ -1001,6 +1068,11 @@ MainWindow::MainWindow(QWidget* parent)
     m_previewFilterClearButton->setText("All");
     m_previewFilterClearButton->setToolTip("Show all frames in preview");
     previewBar->addWidget(m_previewFilterClearButton);
+    m_previewHdButton = new QToolButton(previewWidget);
+    m_previewHdButton->setText("HD");
+    m_previewHdButton->setCheckable(true);
+    m_previewHdButton->setToolTip("Show only frames with HD data");
+    previewBar->addWidget(m_previewHdButton);
     m_previewRefreshButton = new QToolButton(previewWidget);
     m_previewRefreshButton->setText("Refresh");
     m_previewRefreshButton->setToolTip("Refresh preview thumbnails");
@@ -1016,9 +1088,10 @@ MainWindow::MainWindow(QWidget* parent)
     m_framePreviewList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
     m_framePreviewList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_framePreviewList->setResizeMode(QListView::Adjust);
-    m_framePreviewList->setIconSize(QSize(kPreviewIconWidth, kPreviewIconHeight));
-    m_framePreviewList->setGridSize(QSize(kPreviewItemWidth, kPreviewItemHeight));
-    m_framePreviewList->setSpacing(6);
+    m_framePreviewList->setUniformItemSizes(false);
+    m_framePreviewList->setIconSize(QSize(kPreviewIconWidthHd, kPreviewIconHeightHd));
+    m_framePreviewList->setGridSize(QSize());
+    m_framePreviewList->setSpacing(1);
     m_framePreviewList->setItemDelegate(new FramePreviewDelegate(m_framePreviewList));
     previewLayout->addWidget(m_framePreviewList);
 
@@ -1070,6 +1143,47 @@ MainWindow::MainWindow(QWidget* parent)
         m_frameShapeCompModes[static_cast<std::size_t>(row)] = enabled ? 1 : 0;
     });
     connect(m_hdCreateButton, &QPushButton::clicked, this, [this]() {
+        if (m_canvasTabs && m_canvasTabs->currentWidget() == m_backgroundsCanvas) {
+            const int index = m_backgroundList ? m_backgroundList->currentRow() : -1;
+            if (index < 0 || !m_backgroundStore) {
+                return;
+            }
+            if (hasHdBackground(index)) {
+                statusBar()->showMessage("HD background already exists.", 2000);
+                return;
+            }
+            const cv::Mat* src = m_backgroundStore->at(index);
+            if (!src || src->empty()) {
+                statusBar()->showMessage("No background image to upscale.", 2000);
+                return;
+            }
+            if (m_backgroundFramesX.size() <= static_cast<std::size_t>(index)) {
+                m_backgroundFramesX.resize(static_cast<std::size_t>(index + 1));
+            }
+            if (m_backgroundExtraFlags.size() <= static_cast<std::size_t>(index)) {
+                m_backgroundExtraFlags.resize(static_cast<std::size_t>(index + 1), 0);
+            }
+            const int interpolation = m_hdScaleCombo ? m_hdScaleCombo->currentData().toInt() : cv::INTER_NEAREST;
+            cv::Mat hd;
+            if (interpolation == -1) {
+                hd = Scale2xBgr(EnsureBgr(*src));
+            } else {
+                cv::resize(EnsureBgr(*src), hd, cv::Size(src->cols * 2, src->rows * 2), 0.0, 0.0, interpolation);
+            }
+            if (hd.empty()) {
+                statusBar()->showMessage("HD background create failed.", 2000);
+                return;
+            }
+            m_backgroundFramesX[static_cast<std::size_t>(index)] = hd;
+            m_backgroundExtraFlags[static_cast<std::size_t>(index)] = 1;
+            updateHdControlsForContext();
+            refreshBackgroundList();
+            updateBackgroundCanvasImage(index);
+            refreshFramePreviews();
+            updateFrameCanvasImage(m_framesList ? m_framesList->currentRow() : -1);
+            statusBar()->showMessage("HD background created.", 2000);
+            return;
+        }
         const int index = m_framesList ? m_framesList->currentRow() : -1;
         if (index < 0 || index >= m_frameStore->count()) {
             return;
@@ -1117,6 +1231,15 @@ MainWindow::MainWindow(QWidget* parent)
         }
         m_frameExtraFrames[static_cast<std::size_t>(index)] = resized;
         m_frameExtraFlags[static_cast<std::size_t>(index)] = 1;
+        ensureBackgroundDataSize();
+        if (index >= 0 && index < static_cast<int>(m_frameBackgroundMasks.size()) &&
+            index < static_cast<int>(m_frameBackgroundMasksX.size())) {
+            const cv::Mat& sdMask = m_frameBackgroundMasks[static_cast<std::size_t>(index)];
+            cv::Mat& hdMask = m_frameBackgroundMasksX[static_cast<std::size_t>(index)];
+            if (!sdMask.empty() && (hdMask.empty() || hdMask.size() != resized.size())) {
+                cv::resize(sdMask, hdMask, resized.size(), 0.0, 0.0, cv::INTER_NEAREST);
+            }
+        }
         if (index < static_cast<int>(m_frameHdUndoStacks.size())) {
             m_frameHdUndoStacks[static_cast<std::size_t>(index)] = UndoStack{};
         }
@@ -1125,6 +1248,29 @@ MainWindow::MainWindow(QWidget* parent)
         statusBar()->showMessage("HD frame created.", 2000);
     });
     connect(m_hdDeleteButton, &QPushButton::clicked, this, [this]() {
+        if (m_canvasTabs && m_canvasTabs->currentWidget() == m_backgroundsCanvas) {
+            const int index = m_backgroundList ? m_backgroundList->currentRow() : -1;
+            if (index < 0 || index >= static_cast<int>(m_backgroundFramesX.size())) {
+                return;
+            }
+            m_backgroundFramesX[static_cast<std::size_t>(index)] = cv::Mat();
+            if (index < static_cast<int>(m_backgroundExtraFlags.size())) {
+                m_backgroundExtraFlags[static_cast<std::size_t>(index)] = 0;
+            }
+            updateHdControlsForContext();
+            if (m_useHdBackground) {
+                m_useHdBackground = false;
+                if (m_backgroundsCanvas) {
+                    m_backgroundsCanvas->setHdButtonChecked(false);
+                }
+            }
+            refreshBackgroundList();
+            updateBackgroundCanvasImage(index);
+            refreshFramePreviews();
+            updateFrameCanvasImage(m_framesList ? m_framesList->currentRow() : -1);
+            statusBar()->showMessage("HD background deleted.", 2000);
+            return;
+        }
         const int index = m_framesList ? m_framesList->currentRow() : -1;
         if (index < 0 || index >= static_cast<int>(m_frameExtraFrames.size())) {
             return;
@@ -1196,6 +1342,7 @@ MainWindow::MainWindow(QWidget* parent)
         if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::Background) {
             updatePreviewFilterState();
         }
+        updateHdControlsForContext();
     });
     connect(m_maskMoveUp, &QToolButton::clicked, this, [this]() {
         const int index = m_maskList->currentRow();
@@ -1439,6 +1586,42 @@ MainWindow::MainWindow(QWidget* parent)
         }
         m_coordLabel->setText(QString());
     });
+    connect(m_spritesCanvas->canvas(), &GLCanvasWidget::imageHovered, this, [this](int x, int y, bool onImage) {
+        if (!m_coordLabel) {
+            return;
+        }
+        if (!onImage) {
+            m_coordLabel->setText(QString());
+            return;
+        }
+        const int index = m_spritesList ? m_spritesList->currentRow() : -1;
+        const cv::Mat* sprite = (index >= 0) ? m_spriteStore->at(index) : nullptr;
+        if (!sprite || sprite->empty()) {
+            m_coordLabel->setText(QString());
+            return;
+        }
+        const int spriteX = std::clamp(x, 0, sprite->cols - 1) + 1;
+        const int spriteY = std::clamp(y, 0, sprite->rows - 1) + 1;
+        m_coordLabel->setText(QString("Sprite %1,%2").arg(spriteX).arg(spriteY));
+    });
+    connect(m_backgroundsCanvas->canvas(), &GLCanvasWidget::imageHovered, this, [this](int x, int y, bool onImage) {
+        if (!m_coordLabel) {
+            return;
+        }
+        if (!onImage) {
+            m_coordLabel->setText(QString());
+            return;
+        }
+        const int index = m_backgroundList ? m_backgroundList->currentRow() : -1;
+        const cv::Mat* bg = activeBackgroundImage(index, false);
+        if (!bg || bg->empty()) {
+            m_coordLabel->setText(QString());
+            return;
+        }
+        const int bgX = std::clamp(x, 0, bg->cols - 1) + 1;
+        const int bgY = std::clamp(y, 0, bg->rows - 1) + 1;
+        m_coordLabel->setText(QString("Background %1,%2").arg(bgX).arg(bgY));
+    });
     connect(m_framesCanvas->canvas(), &GLCanvasWidget::maskDropped, this, [this](const QString& kind, int index) {
         if (m_framesList->currentRow() < 0) {
             return;
@@ -1551,6 +1734,11 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_framesCanvas, &CanvasWidget::hdToggled, this, [this](bool enabled) {
         setHdMode(enabled);
     });
+    connect(m_backgroundsCanvas, &CanvasWidget::hdToggled, this, [this](bool enabled) {
+        m_useHdBackground = enabled;
+        updateBackgroundCanvasImage(m_backgroundList ? m_backgroundList->currentRow() : -1);
+        updateHdControlsForContext();
+    });
 
     connect(m_frameFilter, &QLineEdit::textChanged, this, [this](const QString& text) {
         applyFrameFilter(text);
@@ -1569,6 +1757,10 @@ MainWindow::MainWindow(QWidget* parent)
             m_previewFilterButton->setChecked(false);
         }
         updatePreviewFilterState();
+    });
+    connect(m_previewHdButton, &QToolButton::toggled, this, [this](bool enabled) {
+        m_previewHdOnly = enabled;
+        refreshFramePreviews();
     });
     connect(m_previewRefreshButton, &QToolButton::clicked, this, [this]() {
         refreshAllPreviews();
@@ -2062,6 +2254,16 @@ std::vector<int> MainWindow::buildPreviewFrameIndices() const
         for (int i = 0; i < count; ++i) {
             indices.push_back(i);
         }
+        if (m_previewHdOnly) {
+            std::vector<int> filtered;
+            filtered.reserve(indices.size());
+            for (int index : indices) {
+                if (hasHdFrame(index)) {
+                    filtered.push_back(index);
+                }
+            }
+            indices.swap(filtered);
+        }
         return indices;
     }
     switch (m_previewFilterKind) {
@@ -2108,6 +2310,16 @@ std::vector<int> MainWindow::buildPreviewFrameIndices() const
             break;
         case PreviewFilterKind::None:
             break;
+    }
+    if (m_previewHdOnly && !indices.empty()) {
+        std::vector<int> filtered;
+        filtered.reserve(indices.size());
+        for (int index : indices) {
+            if (hasHdFrame(index)) {
+                filtered.push_back(index);
+            }
+        }
+        indices.swap(filtered);
     }
     return indices;
 }
@@ -2173,13 +2385,16 @@ void MainWindow::refreshFramePreviews()
         cv::Mat rgb;
         cv::cvtColor(previewMat, rgb, cv::COLOR_BGR2RGB);
         QImage previewImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888);
+        const QSize iconSize = hasHdFrame(i)
+            ? QSize(kPreviewIconWidthHd, kPreviewIconHeightHd)
+            : QSize(kPreviewIconWidth, kPreviewIconHeight);
         QPixmap pixmap = QPixmap::fromImage(previewImage.copy());
-        pixmap = pixmap.scaled(kPreviewIconWidth, kPreviewIconHeight, Qt::KeepAspectRatio, Qt::FastTransformation);
+        pixmap = pixmap.scaled(iconSize, Qt::KeepAspectRatio, Qt::FastTransformation);
 
         auto* item = new QListWidgetItem();
         item->setIcon(QIcon(pixmap));
         item->setText(QString());
-        item->setSizeHint(QSize(kPreviewItemWidth, kPreviewItemHeight));
+        item->setData(kPreviewIconSizeRole, iconSize);
         item->setData(kFrameIndexRole, i);
         int duration = 30;
         if (i < static_cast<int>(m_frameDurations.size()) && m_frameDurations[i] > 0) {
@@ -2191,6 +2406,7 @@ void MainWindow::refreshFramePreviews()
     }
 
     refreshFramePreviewSelection();
+    m_framePreviewList->doItemsLayout();
 }
 
 void MainWindow::updateFramePreviewAt(int index)
@@ -2221,9 +2437,14 @@ void MainWindow::updateFramePreviewAt(int index)
     cv::Mat rgb;
     cv::cvtColor(previewMat, rgb, cv::COLOR_BGR2RGB);
     QImage previewImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888);
+    const QSize iconSize = hasHdFrame(index)
+        ? QSize(kPreviewIconWidthHd, kPreviewIconHeightHd)
+        : QSize(kPreviewIconWidth, kPreviewIconHeight);
     QPixmap pixmap = QPixmap::fromImage(previewImage.copy());
-    pixmap = pixmap.scaled(kPreviewIconWidth, kPreviewIconHeight, Qt::KeepAspectRatio, Qt::FastTransformation);
+    pixmap = pixmap.scaled(iconSize, Qt::KeepAspectRatio, Qt::FastTransformation);
     item->setIcon(QIcon(pixmap));
+    item->setData(kPreviewIconSizeRole, iconSize);
+    m_framePreviewList->doItemsLayout();
 }
 
 cv::Mat MainWindow::buildPreviewFrame(const cv::Mat& colorized,
@@ -2235,20 +2456,6 @@ cv::Mat MainWindow::buildPreviewFrame(const cv::Mat& colorized,
     cv::Mat original = buildOriginalFrame(reference);
     if (color.empty() && hd.empty() && original.empty()) {
         return cv::Mat();
-    }
-    cv::Size baseSize;
-    if (!color.empty()) {
-        baseSize = color.size();
-    } else if (!original.empty()) {
-        baseSize = original.size();
-    } else if (!hd.empty()) {
-        baseSize = hd.size();
-    }
-    if (!original.empty() && baseSize.area() > 0 && original.size() != baseSize) {
-        cv::resize(original, original, baseSize, 0.0, 0.0, cv::INTER_NEAREST);
-    }
-    if (!hd.empty() && baseSize.area() > 0 && hd.size() != baseSize) {
-        cv::resize(hd, hd, baseSize, 0.0, 0.0, cv::INTER_AREA);
     }
     const QColor gap = m_framePreviewList
         ? m_framePreviewList->palette().color(QPalette::Window)
@@ -2362,6 +2569,9 @@ cv::Mat MainWindow::applyBackgroundComposite(int index, const cv::Mat& frame, bo
         if (bgId < m_backgroundFramesX.size()) {
             bg = &m_backgroundFramesX[bgId];
         }
+        if ((!bg || bg->empty()) && m_backgroundStore && bgId < m_backgroundStore->count()) {
+            bg = m_backgroundStore->at(static_cast<int>(bgId));
+        }
     } else if (m_backgroundStore && bgId < m_backgroundStore->count()) {
         bg = m_backgroundStore->at(static_cast<int>(bgId));
     }
@@ -2370,12 +2580,16 @@ cv::Mat MainWindow::applyBackgroundComposite(int index, const cv::Mat& frame, bo
     }
 
     const cv::Mat* mask = nullptr;
+    const cv::Mat* sdMask = nullptr;
     if (useHd) {
         if (index < static_cast<int>(m_frameBackgroundMasksX.size())) {
             mask = &m_frameBackgroundMasksX[static_cast<std::size_t>(index)];
         }
-        if ((!mask || mask->empty()) && index < static_cast<int>(m_frameBackgroundMasks.size())) {
-            mask = &m_frameBackgroundMasks[static_cast<std::size_t>(index)];
+        if (index < static_cast<int>(m_frameBackgroundMasks.size())) {
+            sdMask = &m_frameBackgroundMasks[static_cast<std::size_t>(index)];
+        }
+        if ((!mask || mask->empty() || !MaskHasContent(*mask)) && sdMask && MaskHasContent(*sdMask)) {
+            mask = sdMask;
         }
     } else if (index < static_cast<int>(m_frameBackgroundMasks.size())) {
         mask = &m_frameBackgroundMasks[static_cast<std::size_t>(index)];
@@ -2404,7 +2618,9 @@ cv::Mat MainWindow::applyBackgroundComposite(int index, const cv::Mat& frame, bo
         const uint8_t* mrow = maskScaled.ptr<uint8_t>(y);
         const uint8_t* rrow = ref.ptr<uint8_t>(y);
         for (int x = 0; x < output.cols; ++x) {
-            if (mrow[x] && rrow[x] == 0) {
+            const cv::Vec3b current = row[x];
+            const bool hasColor = current[0] != 0 || current[1] != 0 || current[2] != 0;
+            if (mrow[x] && rrow[x] == 0 && !hasColor) {
                 row[x] = brow[x];
             }
         }
@@ -2457,9 +2673,11 @@ cv::Mat MainWindow::applyBackgroundCompositeWithMask(int index,
         const uint8_t* mrow = maskScaled.ptr<uint8_t>(y);
         const uint8_t* rrow = ref.ptr<uint8_t>(y);
         for (int x = 0; x < output.cols; ++x) {
-            if (mrow[x] && rrow[x] == 0) {
-                row[x] = brow[x];
-            }
+        const cv::Vec3b current = row[x];
+        const bool hasColor = current[0] != 0 || current[1] != 0 || current[2] != 0;
+        if (mrow[x] && rrow[x] == 0 && !hasColor) {
+            row[x] = brow[x];
+        }
         }
     }
     return output;
@@ -2508,12 +2726,45 @@ void MainWindow::updateBackgroundCanvasImage(int index)
     if (!m_backgroundsCanvas || !m_backgroundStore) {
         return;
     }
-    const cv::Mat* image = m_backgroundStore->at(index);
+    const cv::Mat* image = activeBackgroundImage(index, false);
     if (!image || image->empty()) {
         m_backgroundsCanvas->setImage(cv::Mat());
         return;
     }
     m_backgroundsCanvas->setImage(*image);
+}
+
+bool MainWindow::hasHdBackground(int index) const
+{
+    if (index < 0 || index >= static_cast<int>(m_backgroundFramesX.size())) {
+        return false;
+    }
+    return !IsAllBlackFrame(m_backgroundFramesX[static_cast<std::size_t>(index)]);
+}
+
+void MainWindow::updateHdControlsForContext()
+{
+    if (!m_hdCreateButton || !m_hdDeleteButton || !m_hdScaleCombo || !m_hdSourceCombo) {
+        return;
+    }
+    const bool inBackgrounds = m_canvasTabs && m_canvasTabs->currentWidget() == m_backgroundsCanvas;
+    if (inBackgrounds) {
+        const int bgIndex = m_backgroundList ? m_backgroundList->currentRow() : -1;
+        m_hdSourceCombo->setEnabled(false);
+        m_hdScaleCombo->setEnabled(bgIndex >= 0);
+        m_hdCreateButton->setEnabled(bgIndex >= 0 && !hasHdBackground(bgIndex));
+        m_hdDeleteButton->setEnabled(bgIndex >= 0 && hasHdBackground(bgIndex));
+    } else {
+        const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
+        const bool hasHd = hasHdFrame(frameIndex);
+        m_hdSourceCombo->setEnabled(frameIndex >= 0);
+        m_hdScaleCombo->setEnabled(frameIndex >= 0);
+        m_hdCreateButton->setEnabled(frameIndex >= 0 && !hasHd);
+        m_hdDeleteButton->setEnabled(hasHd);
+    }
+    if (m_backgroundAssignLabel) {
+        m_backgroundAssignLabel->setText(m_useHdFrame ? "Background (HD)" : "Background");
+    }
 }
 
 namespace {
@@ -2694,7 +2945,11 @@ void MainWindow::ensureBackgroundDataSize()
         cv::Mat& maskX = m_frameBackgroundMasksX[static_cast<std::size_t>(i)];
         if (hdSize.width > 0 && hdSize.height > 0 &&
             (maskX.empty() || maskX.cols != hdSize.width || maskX.rows != hdSize.height)) {
-            maskX = cv::Mat(hdSize.height, hdSize.width, CV_8UC1, cv::Scalar(0));
+            if (!mask.empty()) {
+                cv::resize(mask, maskX, hdSize, 0.0, 0.0, cv::INTER_NEAREST);
+            } else {
+                maskX = cv::Mat(hdSize.height, hdSize.width, CV_8UC1, cv::Scalar(0));
+            }
         }
     }
 
@@ -2783,7 +3038,16 @@ void MainWindow::updateMaskPreviewForFrame(int index)
             m_frameBackgroundIds[static_cast<std::size_t>(index)] == 0xffff) {
             m_backgroundMaskMode = false;
         } else if (cv::Mat* bgMask = activeBackgroundMask(index)) {
-            if (!bgMask->empty()) {
+            cv::Mat fallbackMask;
+            if ((!bgMask || bgMask->empty() || !MaskHasContent(*bgMask)) && m_useHdFrame &&
+                index < static_cast<int>(m_frameBackgroundMasks.size())) {
+                const cv::Mat& sdMask = m_frameBackgroundMasks[static_cast<std::size_t>(index)];
+                if (MaskHasContent(sdMask)) {
+                    fallbackMask = sdMask;
+                    bgMask = &fallbackMask;
+                }
+            }
+            if (bgMask && MaskHasContent(*bgMask)) {
                 topPreview = buildMaskPreview(base, *bgMask, cv::Vec3b(60, 200, 120));
                 hasTopMask = true;
                 if (m_showOriginalFrame) {
@@ -2854,7 +3118,17 @@ void MainWindow::updateMaskPreviewForFrame(int index)
         m_framesCanvas->canvas()->clearPrimaryOutline();
     }
     if (hasTopMask && m_backgroundMaskMode) {
-        if (cv::Mat* bgMask = activeBackgroundMask(index)) {
+        cv::Mat* bgMask = activeBackgroundMask(index);
+        cv::Mat fallbackMask;
+        if ((!bgMask || bgMask->empty() || !MaskHasContent(*bgMask)) && m_useHdFrame &&
+            index < static_cast<int>(m_frameBackgroundMasks.size())) {
+            const cv::Mat& sdMask = m_frameBackgroundMasks[static_cast<std::size_t>(index)];
+            if (MaskHasContent(sdMask)) {
+                fallbackMask = sdMask;
+                bgMask = &fallbackMask;
+            }
+        }
+        if (bgMask && MaskHasContent(*bgMask)) {
             m_framesCanvas->canvas()->setSecondaryMaskOutline(*bgMask, QColor(120, 200, 60), topRegion);
         }
     }
@@ -3007,7 +3281,7 @@ void MainWindow::updateMaskPreviewIcons()
         cv::cvtColor(iconMat, rgb, cv::COLOR_BGR2RGB);
         QImage iconImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888);
         QPixmap pixmap = QPixmap::fromImage(iconImage.copy());
-        pixmap = pixmap.scaled(kPreviewIconWidth, kPreviewIconHeight, Qt::KeepAspectRatio, Qt::FastTransformation);
+        pixmap = pixmap.scaled(kPreviewIconWidthHd, kPreviewIconHeightHd, Qt::KeepAspectRatio, Qt::FastTransformation);
         if (QListWidgetItem* item = m_maskList->item(i)) {
             item->setIcon(QIcon(pixmap));
         }
@@ -3308,6 +3582,7 @@ void MainWindow::resetUndoStacks()
     m_frameHdUndoStacks.clear();
     m_spriteUndoStacks.clear();
     m_backgroundUndoStacks.clear();
+    m_backgroundHdUndoStacks.clear();
     m_compMaskUndoStacks.clear();
     m_dynMaskUndoStacks.clear();
     m_backgroundMaskUndoStacks.clear();
@@ -3334,6 +3609,7 @@ void MainWindow::ensureUndoStacksSize()
     }
     if (backgroundCount >= 0) {
         m_backgroundUndoStacks.resize(static_cast<std::size_t>(backgroundCount));
+        m_backgroundHdUndoStacks.resize(static_cast<std::size_t>(backgroundCount));
     }
     updateUndoActions();
 }
@@ -3423,14 +3699,20 @@ void MainWindow::pushBackgroundUndoSnapshot(int index)
     if (index < 0 || !m_backgroundStore) {
         return;
     }
-    if (index >= static_cast<int>(m_backgroundUndoStacks.size())) {
+    std::vector<UndoStack>* stacks = nullptr;
+    if (m_useHdBackground && hasHdBackground(index)) {
+        stacks = &m_backgroundHdUndoStacks;
+    } else {
+        stacks = &m_backgroundUndoStacks;
+    }
+    if (!stacks || index >= static_cast<int>(stacks->size())) {
         return;
     }
-    cv::Mat* image = m_backgroundStore->atMutable(index);
+    cv::Mat* image = activeBackgroundImage(index, true);
     if (!image || image->empty()) {
         return;
     }
-    UndoStack& stack = m_backgroundUndoStacks[static_cast<std::size_t>(index)];
+    UndoStack& stack = (*stacks)[static_cast<std::size_t>(index)];
     UndoState state;
     state.image = image->clone();
     stack.undo.push_back(std::move(state));
@@ -3550,17 +3832,20 @@ bool MainWindow::redoEdit(bool isFrame)
 bool MainWindow::undoBackgroundEdit()
 {
     const int index = m_backgroundList ? m_backgroundList->currentRow() : -1;
-    if (index < 0 || index >= static_cast<int>(m_backgroundUndoStacks.size())) {
+    std::vector<UndoStack>* stacks = nullptr;
+    if (m_useHdBackground && hasHdBackground(index)) {
+        stacks = &m_backgroundHdUndoStacks;
+    } else {
+        stacks = &m_backgroundUndoStacks;
+    }
+    if (!stacks || index < 0 || index >= static_cast<int>(stacks->size())) {
         return false;
     }
-    if (!m_backgroundStore) {
-        return false;
-    }
-    UndoStack& stack = m_backgroundUndoStacks[static_cast<std::size_t>(index)];
+    UndoStack& stack = (*stacks)[static_cast<std::size_t>(index)];
     if (stack.undo.empty()) {
         return false;
     }
-    cv::Mat* image = m_backgroundStore->atMutable(index);
+    cv::Mat* image = activeBackgroundImage(index, true);
     if (!image || image->empty()) {
         return false;
     }
@@ -3578,17 +3863,20 @@ bool MainWindow::undoBackgroundEdit()
 bool MainWindow::redoBackgroundEdit()
 {
     const int index = m_backgroundList ? m_backgroundList->currentRow() : -1;
-    if (index < 0 || index >= static_cast<int>(m_backgroundUndoStacks.size())) {
+    std::vector<UndoStack>* stacks = nullptr;
+    if (m_useHdBackground && hasHdBackground(index)) {
+        stacks = &m_backgroundHdUndoStacks;
+    } else {
+        stacks = &m_backgroundUndoStacks;
+    }
+    if (!stacks || index < 0 || index >= static_cast<int>(stacks->size())) {
         return false;
     }
-    if (!m_backgroundStore) {
-        return false;
-    }
-    UndoStack& stack = m_backgroundUndoStacks[static_cast<std::size_t>(index)];
+    UndoStack& stack = (*stacks)[static_cast<std::size_t>(index)];
     if (stack.redo.empty()) {
         return false;
     }
-    cv::Mat* image = m_backgroundStore->atMutable(index);
+    cv::Mat* image = activeBackgroundImage(index, true);
     if (!image || image->empty()) {
         return false;
     }
@@ -3790,7 +4078,11 @@ void MainWindow::updateUndoActions()
             break;
         case UndoTarget::Background:
             index = m_backgroundList ? m_backgroundList->currentRow() : -1;
-            stacks = &m_backgroundUndoStacks;
+            if (m_useHdBackground && hasHdBackground(index)) {
+                stacks = &m_backgroundHdUndoStacks;
+            } else {
+                stacks = &m_backgroundUndoStacks;
+            }
             break;
         case UndoTarget::CompMask:
             index = m_framesList ? m_framesList->currentRow() : -1;
@@ -3867,13 +4159,20 @@ void MainWindow::setHdMode(bool enabled)
         m_framesCanvas->setHdButtonChecked(m_useHdFrame);
         m_framesCanvas->setHdButtonEnabled(hasHdFrame(index));
     }
-    if (m_hdDeleteButton) {
-        m_hdDeleteButton->setEnabled(hasHdFrame(index));
-    }
-    if (m_hdCreateButton) {
-        m_hdCreateButton->setEnabled(index >= 0 && !hasHdFrame(index));
-    }
+    updateHdControlsForContext();
     ensureBackgroundDataSize();
+    if (m_useHdFrame && index >= 0 &&
+        index < static_cast<int>(m_frameBackgroundMasks.size()) &&
+        index < static_cast<int>(m_frameBackgroundMasksX.size())) {
+        const cv::Mat& sdMask = m_frameBackgroundMasks[static_cast<std::size_t>(index)];
+        cv::Mat& hdMask = m_frameBackgroundMasksX[static_cast<std::size_t>(index)];
+        if (MaskHasContent(sdMask) && (hdMask.empty() || !MaskHasContent(hdMask))) {
+            const cv::Mat* hdFrame = activeFrameImage(index, false);
+            if (hdFrame && !hdFrame->empty()) {
+                cv::resize(sdMask, hdMask, hdFrame->size(), 0.0, 0.0, cv::INTER_NEAREST);
+            }
+        }
+    }
     const cv::Mat* afterImage = activeFrameImage(index, false);
     const cv::Size afterSize = afterImage ? afterImage->size() : cv::Size();
     if (m_framesCanvas && beforeSize.width > 0 && afterSize.width > 0 &&
@@ -3907,6 +4206,23 @@ cv::Mat* MainWindow::activeFrameImage(int index, bool forEdit)
         return m_frameStore->atMutable(index);
     }
     return m_frameStore->atMutable(index);
+}
+
+cv::Mat* MainWindow::activeBackgroundImage(int index, bool forEdit)
+{
+    if (index < 0) {
+        return nullptr;
+    }
+    if (m_useHdBackground && hasHdBackground(index)) {
+        return &m_backgroundFramesX[static_cast<std::size_t>(index)];
+    }
+    if (!m_backgroundStore) {
+        return nullptr;
+    }
+    if (forEdit) {
+        return m_backgroundStore->atMutable(index);
+    }
+    return m_backgroundStore->atMutable(index);
 }
 
 void MainWindow::refreshRecentMenu()
@@ -3973,7 +4289,10 @@ void MainWindow::refreshBackgroundList()
             m_backgroundsCanvas->setTitle("Backgrounds canvas (placeholder)");
             m_backgroundsCanvas->setStatusText("No backgrounds loaded");
             m_backgroundsCanvas->setImage(cv::Mat());
+            m_backgroundsCanvas->setHdButtonEnabled(false);
+            m_backgroundsCanvas->setHdButtonChecked(false);
         }
+        m_useHdBackground = false;
         if (m_frameBackgroundAssign) {
             QSignalBlocker blockAssign(m_frameBackgroundAssign);
             m_frameBackgroundAssign->clear();
@@ -3989,16 +4308,27 @@ void MainWindow::refreshBackgroundList()
             continue;
         }
         cv::Mat rgb;
-        cv::Mat previewMat = EnsureBgr(*image);
+        const bool hasHd = hasHdBackground(i);
+        cv::Mat hd;
+        if (hasHd) {
+            hd = m_backgroundFramesX[static_cast<std::size_t>(i)];
+        }
+        const QColor gap = m_backgroundList->palette().color(QPalette::Window);
+        cv::Mat previewMat = BuildBackgroundPreview(*image,
+                                                    hd,
+                                                    cv::Scalar(gap.blue(), gap.green(), gap.red()));
         cv::cvtColor(previewMat, rgb, cv::COLOR_BGR2RGB);
         QImage previewImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888);
+        const QSize iconSize = hasHd
+            ? QSize(kPreviewIconWidthHd, kPreviewIconHeightHd)
+            : QSize(kPreviewIconWidth, kPreviewIconHeight);
         QPixmap pixmap = QPixmap::fromImage(previewImage.copy());
-        pixmap = pixmap.scaled(kPreviewIconWidth, kPreviewIconHeight, Qt::KeepAspectRatio, Qt::FastTransformation);
+        pixmap = pixmap.scaled(iconSize, Qt::KeepAspectRatio, Qt::FastTransformation);
 
         auto* item = new QListWidgetItem();
         item->setIcon(QIcon(pixmap));
         item->setText(QString("BG %1").arg(i));
-        item->setSizeHint(QSize(kPreviewItemWidth, kPreviewItemHeight));
+        item->setData(kPreviewIconSizeRole, iconSize);
         item->setData(Qt::UserRole, i);
         item->setData(Qt::UserRole + 1, QStringLiteral("background"));
         m_backgroundList->addItem(item);
@@ -4013,7 +4343,6 @@ void MainWindow::refreshBackgroundList()
     } else if (m_backgroundList->count() > 0 && m_lastBackgroundIndex < 0) {
         m_backgroundList->setCurrentRow(0);
     }
-
     if (m_frameBackgroundAssign) {
         QSignalBlocker blockAssign(m_frameBackgroundAssign);
         m_frameBackgroundAssign->clear();
@@ -4061,6 +4390,7 @@ void MainWindow::refreshFrameSpriteLists()
         if (m_hdScaleCombo) {
             m_hdScaleCombo->setEnabled(false);
         }
+        updateHdControlsForContext();
     } else {
         while (m_frameStore->count() < m_state->frames().size()) {
             m_frameStore->add(MakePlaceholderImage(kDefaultFrameWidth, kDefaultFrameHeight,
@@ -4218,18 +4548,7 @@ void MainWindow::showFrameAtIndex(int index)
             m_framesCanvas->setHdButtonChecked(m_useHdFrame);
             m_framesCanvas->setBackgroundChecked(m_showBackgroundLayer);
         }
-        if (m_hdCreateButton) {
-            m_hdCreateButton->setEnabled(index >= 0 && !hasHd);
-        }
-        if (m_hdDeleteButton) {
-            m_hdDeleteButton->setEnabled(hasHd);
-        }
-        if (m_hdSourceCombo) {
-            m_hdSourceCombo->setEnabled(index >= 0);
-        }
-        if (m_hdScaleCombo) {
-            m_hdScaleCombo->setEnabled(index >= 0);
-        }
+        updateHdControlsForContext();
         updateMaskPreviewForFrame(index);
     } else {
         updateFrameCanvasImage(-1);
@@ -4249,13 +4568,17 @@ void MainWindow::showSpriteAtIndex(int index)
 
 void MainWindow::showBackgroundAtIndex(int index)
 {
-    const cv::Mat* image = m_backgroundStore ? m_backgroundStore->at(index) : nullptr;
-    if (image && !image->empty()) {
-        m_backgroundsCanvas->canvas()->clearPreviewImage();
-        m_backgroundsCanvas->setImage(*image);
-    } else {
-        m_backgroundsCanvas->setImage(cv::Mat());
+    if (!m_backgroundsCanvas) {
+        return;
     }
+    const bool hasHd = hasHdBackground(index);
+    if (!hasHd && m_useHdBackground) {
+        m_useHdBackground = false;
+    }
+    m_backgroundsCanvas->setHdButtonEnabled(hasHd);
+    m_backgroundsCanvas->setHdButtonChecked(m_useHdBackground && hasHd);
+    m_backgroundsCanvas->canvas()->clearPreviewImage();
+    updateBackgroundCanvasImage(index);
 }
 
 void MainWindow::populateBookmarks(const std::vector<uint32_t>& frameStarts,
@@ -4891,7 +5214,7 @@ void MainWindow::handleBackgroundToolPress(int x, int y, Qt::MouseButton button)
     if (index < 0) {
         return;
     }
-    cv::Mat* image = m_backgroundStore->atMutable(index);
+    cv::Mat* image = activeBackgroundImage(index, true);
     if (!image || image->empty()) {
         return;
     }
@@ -4924,7 +5247,7 @@ void MainWindow::handleBackgroundToolDrag(int x, int y, Qt::MouseButtons buttons
     if (index < 0) {
         return;
     }
-    cv::Mat* image = m_backgroundStore->atMutable(index);
+    cv::Mat* image = activeBackgroundImage(index, true);
     if (!image || image->empty()) {
         return;
     }
@@ -4953,7 +5276,7 @@ void MainWindow::handleBackgroundToolRelease(int x, int y, Qt::MouseButton butto
     if (index < 0) {
         return;
     }
-    cv::Mat* image = m_backgroundStore->atMutable(index);
+    cv::Mat* image = activeBackgroundImage(index, true);
     if (!image || image->empty()) {
         return;
     }

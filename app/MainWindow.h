@@ -129,6 +129,7 @@ private:
     void setHdMode(bool enabled);
     bool hasHdFrame(int index) const;
     cv::Mat* activeFrameImage(int index, bool forEdit);
+    cv::Mat* activeBackgroundImage(int index, bool forEdit);
     void ensureMaskDataSize();
     void ensureBackgroundDataSize();
     cv::Mat buildReferenceFrame(const cv::Mat& source) const;
@@ -156,6 +157,8 @@ private:
     void applyDynamicMaskListOrder();
     void updateFrameCanvasImage(int index);
     void updateBackgroundCanvasImage(int index);
+    bool hasHdBackground(int index) const;
+    void updateHdControlsForContext();
     int currentFrameMaskId() const;
     int currentFrameDynamicMaskId() const;
     void setCurrentFrameMaskId(int id);
@@ -194,6 +197,7 @@ private:
     class QListWidget* m_framePreviewList;
     class QToolButton* m_previewFilterButton;
     class QToolButton* m_previewFilterClearButton;
+    class QToolButton* m_previewHdButton;
     class QToolButton* m_previewRefreshButton;
     class QListWidget* m_maskList;
     class QToolButton* m_maskMoveUp;
@@ -203,6 +207,7 @@ private:
     class QToolButton* m_dynamicMaskMoveUp;
     class QToolButton* m_dynamicMaskMoveDown;
     class QPushButton* m_dynamicMaskClearButton;
+    class QLabel* m_backgroundAssignLabel;
     class QComboBox* m_frameMaskAssign;
     class QComboBox* m_frameDynamicMaskAssign;
     class QComboBox* m_frameBackgroundAssign;
@@ -239,6 +244,7 @@ private:
     std::vector<UndoStack> m_frameHdUndoStacks;
     std::vector<UndoStack> m_spriteUndoStacks;
     std::vector<UndoStack> m_backgroundUndoStacks;
+    std::vector<UndoStack> m_backgroundHdUndoStacks;
     std::vector<UndoStack> m_compMaskUndoStacks;
     std::vector<UndoStack> m_dynMaskUndoStacks;
     std::vector<UndoStack> m_backgroundMaskUndoStacks;
@@ -271,8 +277,10 @@ private:
     bool m_useHdFrame = false;
     bool m_showBackgroundLayer = true;
     int m_lastBackgroundIndex = -1;
+    bool m_useHdBackground = false;
     bool m_previewFilterEnabled = false;
     PreviewFilterKind m_previewFilterKind = PreviewFilterKind::None;
+    bool m_previewHdOnly = false;
     class QAction* m_undoAction;
     class QAction* m_redoAction;
     DrawTool m_drawTool = DrawTool::Point;

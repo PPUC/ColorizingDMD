@@ -171,6 +171,12 @@ void GLCanvasWidget::clearMaskOutline()
     update();
 }
 
+void GLCanvasWidget::setHoverPixelEnabled(bool enabled)
+{
+    m_hoverPixelEnabled = enabled;
+    update();
+}
+
 void GLCanvasWidget::scaleZoom(double factor)
 {
     if (factor <= 0.0) {
@@ -391,6 +397,39 @@ void GLCanvasWidget::paintGL()
             painter.setBrush(Qt::NoBrush);
             painter.drawRect(highlight);
         }
+        painter.restore();
+    }
+
+    if (m_hoverPixelEnabled && m_hoverValid && !m_image.empty()) {
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing, false);
+        painter.translate(width() / 2.0 + m_pan.x(), height() / 2.0 + m_pan.y());
+        painter.scale(m_zoom, m_zoom);
+        const int w = m_image.cols;
+        const int h = m_image.rows;
+        int scale = 1;
+        int regionStart = 0;
+        if (m_gridTopHeight > 0 && m_gridBottomHeight > 0 &&
+            m_gridTopHeight + m_gridGap + m_gridBottomHeight <= h) {
+            if (m_hoverY < m_gridTopHeight) {
+                scale = m_gridTopScale;
+                regionStart = 0;
+            } else if (m_hoverY >= m_gridTopHeight + m_gridGap &&
+                       m_hoverY < m_gridTopHeight + m_gridGap + m_gridBottomHeight) {
+                scale = m_gridBottomScale;
+                regionStart = m_gridTopHeight + m_gridGap;
+            }
+        }
+        const int cellX = (m_hoverX / scale) * scale;
+        const int cellY = regionStart + ((m_hoverY - regionStart) / scale) * scale;
+        const double left = cellX - w / 2.0;
+        const double top = cellY - h / 2.0;
+        QPen pen(QColor(255, 220, 80));
+        pen.setWidthF(1.0 / 3.0);
+        pen.setCapStyle(Qt::SquareCap);
+        painter.setPen(pen);
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(QRectF(left, top, scale, scale));
         painter.restore();
     }
 
