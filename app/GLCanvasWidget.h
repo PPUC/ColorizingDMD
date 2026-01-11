@@ -21,6 +21,10 @@ public:
     void setGridEnabled(bool enabled);
     void setGridSegments(int topHeight, int gapHeight, int bottomHeight);
     void setGridScales(int topScale, int bottomScale);
+    void setMaskOutline(const cv::Mat& mask, const QColor& color, const QRect& region = QRect());
+    void setSecondaryMaskOutline(const cv::Mat& mask, const QColor& color, const QRect& region = QRect());
+    void clearPrimaryOutline();
+    void clearMaskOutline();
     void scaleZoom(double factor);
 
 signals:
@@ -57,6 +61,16 @@ private:
     int m_gridGap = 0;
     int m_gridTopScale = 1;
     int m_gridBottomScale = 1;
+    cv::Mat m_outlineMask;
+    QColor m_outlineColor = QColor(200, 0, 200);
+    bool m_outlineEnabled = false;
+    QRect m_outlineRegion;
+    bool m_outlineHasRegion = false;
+    cv::Mat m_outlineMaskSecondary;
+    QColor m_outlineColorSecondary = QColor(120, 200, 60);
+    bool m_outlineSecondaryEnabled = false;
+    QRect m_outlineRegionSecondary;
+    bool m_outlineSecondaryHasRegion = false;
     bool m_hoverValid = false;
     int m_hoverX = -1;
     int m_hoverY = -1;

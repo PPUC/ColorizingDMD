@@ -267,6 +267,61 @@ public:
     }
 };
 
+class ToolPreviewDelegate : public QStyledItemDelegate
+{
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
+        painter->save();
+
+        QStyleOptionViewItem opt = option;
+        initStyleOption(&opt, index);
+        QStyle* style = opt.widget ? opt.widget->style() : QApplication::style();
+
+        style->drawPrimitive(QStyle::PE_PanelItemViewItem, &opt, painter, opt.widget);
+
+        const QFontMetrics metrics(opt.font);
+        const int padding = 6;
+        const int textHeight = metrics.height() + 4;
+        QRect contentRect = opt.rect.adjusted(padding, padding, -padding, -padding);
+        QRect iconRect(contentRect.left(),
+                       contentRect.top(),
+                       contentRect.width(),
+                       std::max(0, contentRect.height() - textHeight - 2));
+        QRect textRect(contentRect.left(),
+                       contentRect.bottom() - textHeight + 1,
+                       contentRect.width(),
+                       textHeight);
+
+        const QIcon icon = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
+        if (!icon.isNull()) {
+            const QPixmap pixmap = icon.pixmap(opt.decorationSize);
+            const QSize targetSize = pixmap.size().scaled(iconRect.size(), Qt::KeepAspectRatio);
+            const QPoint topLeft(iconRect.center().x() - targetSize.width() / 2,
+                                 iconRect.center().y() - targetSize.height() / 2);
+            painter->drawPixmap(QRect(topLeft, targetSize), pixmap);
+        }
+
+        const QString text = index.data(Qt::DisplayRole).toString();
+        painter->setPen(opt.palette.text().color());
+        painter->drawText(textRect, Qt::AlignHCenter | Qt::AlignVCenter, text);
+
+        painter->restore();
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
+        Q_UNUSED(index);
+        const QFontMetrics metrics(option.font);
+        const int padding = 6;
+        const int textHeight = metrics.height() + 4;
+        const int height = kPreviewIconHeight + textHeight + padding * 2;
+        return QSize(kPreviewItemWidth, height);
+    }
+};
+
 cv::Mat EnsureBgr(const cv::Mat& source)
 {
     if (source.empty()) {
@@ -354,6 +409,7 @@ MainWindow::MainWindow(QWidget* parent)
     , m_imageStore(new ImageStore())
     , m_frameStore(new IndexedImageStore())
     , m_spriteStore(new IndexedImageStore())
+    , m_backgroundStore(new IndexedImageStore())
 {
     setWindowTitle("ColorizingDMD");
     setWindowIcon(QIcon(":/app/app.ico"));
@@ -486,11 +542,17 @@ MainWindow::MainWindow(QWidget* parent)
             case UndoTarget::Sprite:
                 handled = undoEdit(false);
                 break;
+            case UndoTarget::Background:
+                handled = undoBackgroundEdit();
+                break;
             case UndoTarget::CompMask:
                 handled = undoMaskEdit(MaskMode::Comparison);
                 break;
             case UndoTarget::DynMask:
                 handled = undoMaskEdit(MaskMode::Dynamic);
+                break;
+            case UndoTarget::BackgroundMask:
+                handled = undoBackgroundMaskEdit();
                 break;
         }
         if (handled) {
@@ -507,11 +569,17 @@ MainWindow::MainWindow(QWidget* parent)
             case UndoTarget::Sprite:
                 handled = redoEdit(false);
                 break;
+            case UndoTarget::Background:
+                handled = redoBackgroundEdit();
+                break;
             case UndoTarget::CompMask:
                 handled = redoMaskEdit(MaskMode::Comparison);
                 break;
             case UndoTarget::DynMask:
                 handled = redoMaskEdit(MaskMode::Dynamic);
+                break;
+            case UndoTarget::BackgroundMask:
+                handled = redoBackgroundMaskEdit();
                 break;
         }
         if (handled) {
@@ -642,13 +710,16 @@ MainWindow::MainWindow(QWidget* parent)
         m_drawPointEnabled = checked;
         m_framesCanvas->canvas()->setPanningEnabled(!checked);
         m_spritesCanvas->canvas()->setPanningEnabled(!checked);
+        m_backgroundsCanvas->canvas()->setPanningEnabled(!checked);
         if (!checked) {
             m_framesCanvas->canvas()->clearPreviewImage();
             m_spritesCanvas->canvas()->clearPreviewImage();
+            m_backgroundsCanvas->canvas()->clearPreviewImage();
             m_frameHasStart = false;
             m_spriteHasStart = false;
             m_frameUndoActive = false;
             m_spriteUndoActive = false;
+            m_backgroundUndoActive = false;
         }
         statusBar()->showMessage(checked ? "Drawing: enabled" : "Drawing: disabled", 2000);
     });
@@ -666,6 +737,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(fitToViewAction, &QAction::triggered, this, [this]() {
         m_framesCanvas->canvas()->requestFitOnResize(true);
         m_spritesCanvas->canvas()->requestFitOnResize(true);
+        m_backgroundsCanvas->canvas()->requestFitOnResize(true);
         statusBar()->showMessage("Fit to view", 1500);
     });
     connect(removeSelectedAction, &QAction::triggered, this, [this]() {
@@ -707,12 +779,23 @@ MainWindow::MainWindow(QWidget* parent)
     m_framesCanvas = new CanvasWidget("Frames canvas (placeholder)", tabs);
     m_spritesCanvas = new CanvasWidget("Sprites canvas (placeholder)", tabs);
     m_imagesCanvas = new CanvasWidget("Images canvas (placeholder)", tabs);
+    m_backgroundsCanvas = new CanvasWidget("Backgrounds canvas (placeholder)", tabs);
     m_framesCanvas->setMaskButtonsVisible(true);
     m_spritesCanvas->setMaskButtonsVisible(false);
     m_imagesCanvas->setMaskButtonsVisible(false);
+    m_backgroundsCanvas->setMaskButtonsVisible(false);
+    m_framesCanvas->setBackgroundMaskVisible(true);
+    m_spritesCanvas->setBackgroundMaskVisible(false);
+    m_imagesCanvas->setBackgroundMaskVisible(false);
+    m_backgroundsCanvas->setBackgroundMaskVisible(false);
+    m_framesCanvas->setBackgroundVisible(true);
+    m_spritesCanvas->setBackgroundVisible(false);
+    m_imagesCanvas->setBackgroundVisible(false);
+    m_backgroundsCanvas->setBackgroundVisible(false);
     tabs->addTab(m_framesCanvas, "Frames");
     tabs->addTab(m_spritesCanvas, "Sprites");
     tabs->addTab(m_imagesCanvas, "Images");
+    tabs->addTab(m_backgroundsCanvas, "Backgrounds");
     setCentralWidget(tabs);
     connect(tabs, &QTabWidget::currentChanged, this, [this](int) {
         updateUndoActions();
@@ -721,11 +804,17 @@ MainWindow::MainWindow(QWidget* parent)
     auto* toolDock = new QDockWidget("Tools", this);
     toolDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
     auto* toolsTabs = new QTabWidget(toolDock);
+    m_toolsTabs = toolsTabs;
     auto* framesTab = new QWidget(toolsTabs);
     auto* spritesTab = new QWidget(toolsTabs);
     auto* imagesTab = new QWidget(toolsTabs);
     auto* masksTab = new QWidget(toolsTabs);
     auto* dynamicMasksTab = new QWidget(toolsTabs);
+    auto* backgroundsTab = new QWidget(toolsTabs);
+    m_masksTab = masksTab;
+    m_dynamicMasksTab = dynamicMasksTab;
+    m_backgroundsTab = backgroundsTab;
+    m_spritesTab = spritesTab;
 
     m_frameFilter = new QLineEdit(framesTab);
     m_frameFilter->setPlaceholderText("Filter frames...");
@@ -748,6 +837,28 @@ MainWindow::MainWindow(QWidget* parent)
     imagesLayout->addWidget(m_imagesList, 1);
     imagesTab->setLayout(imagesLayout);
 
+    m_backgroundList = new QListWidget(backgroundsTab);
+    m_backgroundList->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_backgroundList->setViewMode(QListView::IconMode);
+    m_backgroundList->setFlow(QListView::TopToBottom);
+    m_backgroundList->setWrapping(false);
+    m_backgroundList->setMovement(QListView::Snap);
+    m_backgroundList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_backgroundList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+    m_backgroundList->setResizeMode(QListView::Adjust);
+    m_backgroundList->setDragDropMode(QAbstractItemView::DragOnly);
+    m_backgroundList->setDragDropOverwriteMode(false);
+    m_backgroundList->setDragEnabled(true);
+    m_backgroundList->setAcceptDrops(false);
+    m_backgroundList->setDropIndicatorShown(false);
+    m_backgroundList->setIconSize(QSize(kPreviewIconWidth, kPreviewIconHeight));
+    m_backgroundList->setGridSize(QSize(kPreviewItemWidth, kPreviewItemHeight));
+    m_backgroundList->setSpacing(6);
+    m_backgroundList->setItemDelegate(new ToolPreviewDelegate(m_backgroundList));
+    auto* backgroundsLayout = new QVBoxLayout(backgroundsTab);
+    backgroundsLayout->addWidget(m_backgroundList, 1);
+    backgroundsTab->setLayout(backgroundsLayout);
+
     auto* masksLayout = new QVBoxLayout(masksTab);
     m_maskList = new QListWidget(masksTab);
     m_maskList->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -762,10 +873,11 @@ MainWindow::MainWindow(QWidget* parent)
     m_maskList->setDragDropOverwriteMode(false);
     m_maskList->setDragEnabled(true);
     m_maskList->setAcceptDrops(false);
-    m_maskList->setDropIndicatorShown(true);
+    m_maskList->setDropIndicatorShown(false);
     m_maskList->setIconSize(QSize(kPreviewIconWidth, kPreviewIconHeight));
     m_maskList->setGridSize(QSize(kPreviewItemWidth, kPreviewItemHeight));
     m_maskList->setSpacing(6);
+    m_maskList->setItemDelegate(new ToolPreviewDelegate(m_maskList));
     m_maskMoveUp = new QToolButton(masksTab);
     m_maskMoveUp->setText("Up");
     m_maskMoveDown = new QToolButton(masksTab);
@@ -794,10 +906,11 @@ MainWindow::MainWindow(QWidget* parent)
     m_dynamicMaskList->setDragDropOverwriteMode(false);
     m_dynamicMaskList->setDragEnabled(true);
     m_dynamicMaskList->setAcceptDrops(false);
-    m_dynamicMaskList->setDropIndicatorShown(true);
+    m_dynamicMaskList->setDropIndicatorShown(false);
     m_dynamicMaskList->setIconSize(QSize(kPreviewIconWidth, kPreviewIconHeight));
     m_dynamicMaskList->setGridSize(QSize(kPreviewItemWidth, kPreviewItemHeight));
     m_dynamicMaskList->setSpacing(6);
+    m_dynamicMaskList->setItemDelegate(new ToolPreviewDelegate(m_dynamicMaskList));
     m_dynamicMaskMoveUp = new QToolButton(dynamicMasksTab);
     m_dynamicMaskMoveUp->setText("Up");
     m_dynamicMaskMoveDown = new QToolButton(dynamicMasksTab);
@@ -817,6 +930,7 @@ MainWindow::MainWindow(QWidget* parent)
     toolsTabs->addTab(imagesTab, "Images");
     toolsTabs->addTab(masksTab, "Masks");
     toolsTabs->addTab(dynamicMasksTab, "Dynamic Masks");
+    toolsTabs->addTab(backgroundsTab, "Backgrounds");
     toolDock->setWidget(toolsTabs);
     addDockWidget(Qt::LeftDockWidgetArea, toolDock);
 
@@ -836,6 +950,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_spriteMetaLabel = new QLabel("-", inspectorWidget);
     m_frameMaskAssign = new QComboBox(inspectorWidget);
     m_frameDynamicMaskAssign = new QComboBox(inspectorWidget);
+    m_frameBackgroundAssign = new QComboBox(inspectorWidget);
     m_shapeCompToggle = new QCheckBox("Shape comparison", inspectorWidget);
     m_hdSourceCombo = new QComboBox(inspectorWidget);
     m_hdScaleCombo = new QComboBox(inspectorWidget);
@@ -856,6 +971,7 @@ MainWindow::MainWindow(QWidget* parent)
     inspectorLayout->addRow("Sprite info", m_spriteMetaLabel);
     inspectorLayout->addRow("Mask", m_frameMaskAssign);
     inspectorLayout->addRow("Dynamic mask", m_frameDynamicMaskAssign);
+    inspectorLayout->addRow("Background", m_frameBackgroundAssign);
     inspectorLayout->addRow("Shape compare", m_shapeCompToggle);
     inspectorLayout->addRow("HD source", m_hdSourceCombo);
     inspectorLayout->addRow("HD scale", m_hdScaleCombo);
@@ -876,6 +992,19 @@ MainWindow::MainWindow(QWidget* parent)
     auto* previewLabel = new QLabel("Preview", previewWidget);
     previewBar->addWidget(previewLabel);
     previewBar->addStretch(1);
+    m_previewFilterButton = new QToolButton(previewWidget);
+    m_previewFilterButton->setText("Filter");
+    m_previewFilterButton->setCheckable(true);
+    m_previewFilterButton->setToolTip("Filter preview frames by current tool selection");
+    previewBar->addWidget(m_previewFilterButton);
+    m_previewFilterClearButton = new QToolButton(previewWidget);
+    m_previewFilterClearButton->setText("All");
+    m_previewFilterClearButton->setToolTip("Show all frames in preview");
+    previewBar->addWidget(m_previewFilterClearButton);
+    m_previewRefreshButton = new QToolButton(previewWidget);
+    m_previewRefreshButton->setText("Refresh");
+    m_previewRefreshButton->setToolTip("Refresh preview thumbnails");
+    previewBar->addWidget(m_previewRefreshButton);
     previewLayout->addLayout(previewBar);
 
     m_framePreviewList = new QListWidget(previewWidget);
@@ -896,6 +1025,10 @@ MainWindow::MainWindow(QWidget* parent)
     previewWidget->setLayout(previewLayout);
     previewDock->setWidget(previewWidget);
     addDockWidget(Qt::BottomDockWidgetArea, previewDock);
+
+    m_coordLabel = new QLabel(this);
+    m_coordLabel->setMinimumWidth(140);
+    statusBar()->addPermanentWidget(m_coordLabel);
 
     viewMenu->addAction(toolDock->toggleViewAction());
     viewMenu->addAction(inspectorDock->toggleViewAction());
@@ -1013,16 +1146,56 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_frameMaskAssign, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         setCurrentFrameMaskId(m_frameMaskAssign->currentData().toInt());
         updateMaskPreviewForFrame(m_framesList->currentRow());
+        if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::Mask) {
+            updatePreviewFilterState();
+        }
     });
     connect(m_frameDynamicMaskAssign, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         setCurrentFrameDynamicMaskId(m_frameDynamicMaskAssign->currentData().toInt());
         updateMaskPreviewForFrame(m_framesList->currentRow());
+        if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::DynamicMask) {
+            updatePreviewFilterState();
+        }
+    });
+    connect(m_frameBackgroundAssign, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+        const int row = m_framesList ? m_framesList->currentRow() : -1;
+        if (row < 0) {
+            return;
+        }
+        if (row >= static_cast<int>(m_frameBackgroundIds.size())) {
+            m_frameBackgroundIds.resize(static_cast<std::size_t>(m_frameStore->count()), 0xffff);
+        }
+        const int id = m_frameBackgroundAssign->currentData().toInt();
+        m_frameBackgroundIds[static_cast<std::size_t>(row)] = id >= 0 ? static_cast<uint16_t>(id) : 0xffff;
+        updateFrameCanvasImage(row);
+        updateFramePreviewAt(row);
+        if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::Background) {
+            updatePreviewFilterState();
+        }
     });
     connect(m_maskList, &QListWidget::currentRowChanged, this, [this](int) {
         updateMaskPreviewForFrame(m_framesList->currentRow());
+        if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::Mask) {
+            updatePreviewFilterState();
+        }
     });
     connect(m_dynamicMaskList, &QListWidget::currentRowChanged, this, [this](int) {
         updateMaskPreviewForFrame(m_framesList->currentRow());
+        if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::DynamicMask) {
+            updatePreviewFilterState();
+        }
+    });
+    connect(m_backgroundList, &QListWidget::currentRowChanged, this, [this](int) {
+        const int row = m_backgroundList->currentRow();
+        if (row >= 0) {
+            m_lastBackgroundIndex = row;
+            m_backgroundsCanvas->setTitle(QString("Background canvas - BG %1").arg(row));
+        }
+        showBackgroundAtIndex(row);
+        updateUndoActions();
+        if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::Background) {
+            updatePreviewFilterState();
+        }
     });
     connect(m_maskMoveUp, &QToolButton::clicked, this, [this]() {
         const int index = m_maskList->currentRow();
@@ -1096,13 +1269,25 @@ MainWindow::MainWindow(QWidget* parent)
     });
 
     connect(m_framePreviewList, &QListWidget::currentRowChanged, this, [this](int row) {
-        if (row < 0 || row >= m_framesList->count()) {
+        if (row < 0 || row >= m_framePreviewList->count()) {
+            return;
+        }
+        const QListWidgetItem* item = m_framePreviewList->item(row);
+        if (!item) {
+            return;
+        }
+        const QVariant frameData = item->data(kFrameIndexRole);
+        if (!frameData.isValid()) {
+            return;
+        }
+        const int frameIndex = frameData.toInt();
+        if (frameIndex < 0 || frameIndex >= m_framesList->count()) {
             return;
         }
         QSignalBlocker blocker(m_framesList);
-        m_framesList->setCurrentRow(row);
-        showFrameAtIndex(row);
-        updateMetadataForFrame(row);
+        m_framesList->setCurrentRow(frameIndex);
+        showFrameAtIndex(frameIndex);
+        updateMetadataForFrame(frameIndex);
         updateUndoActions();
     });
 
@@ -1116,7 +1301,7 @@ MainWindow::MainWindow(QWidget* parent)
             showFrameAtIndex(m_framesList->currentRow());
             {
                 QSignalBlocker blocker(m_framePreviewList);
-                m_framePreviewList->setCurrentRow(m_framesList->currentRow());
+                refreshFramePreviewSelection();
             }
             updateUndoActions();
             if (m_framesList->currentRow() >= 0) {
@@ -1136,6 +1321,9 @@ MainWindow::MainWindow(QWidget* parent)
             showSpriteAtIndex(m_spritesList->currentRow());
             updateUndoActions();
             updateMetadataForSprite(m_spritesList->currentRow());
+            if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::Sprite) {
+                updatePreviewFilterState();
+            }
         } else {
             updateSelectionFromLists();
         }
@@ -1200,6 +1388,57 @@ MainWindow::MainWindow(QWidget* parent)
         }
         updateUndoActions();
     });
+    connect(m_framesCanvas->canvas(), &GLCanvasWidget::imageHovered, this, [this](int x, int y, bool onImage) {
+        if (!m_coordLabel) {
+            return;
+        }
+        if (!onImage) {
+            m_coordLabel->setText(QString());
+            return;
+        }
+        const int index = m_framesList ? m_framesList->currentRow() : -1;
+        const cv::Mat* frame = activeFrameImage(index, false);
+        if (!frame || frame->empty()) {
+            m_coordLabel->setText(QString());
+            return;
+        }
+        cv::Mat reference = buildOriginalPreviewForIndex(index);
+        cv::Mat original = buildOriginalFrame(reference);
+        cv::Mat displayOriginal;
+        if (m_showOriginalFrame && !original.empty()) {
+            displayOriginal = BuildDisplayOriginal(original, frame->size());
+        }
+        FrameLayout layout = BuildFrameLayout(*frame,
+                                              displayOriginal.empty() ? cv::Mat(frame->rows, frame->cols, CV_8UC3)
+                                                                      : displayOriginal);
+        if (y >= 0 && y < layout.topHeight &&
+            x >= layout.topX && x < layout.topX + layout.topWidth) {
+            const int localX = x - layout.topX;
+            const int localY = y;
+            const int frameX = std::clamp(localX, 0, frame->cols - 1) + 1;
+            const int frameY = std::clamp(localY, 0, frame->rows - 1) + 1;
+            m_coordLabel->setText(QString("Frame %1,%2").arg(frameX).arg(frameY));
+            return;
+        }
+        if (m_showOriginalFrame && !displayOriginal.empty()) {
+            const int gap = kFrameGapPixels;
+            if (y >= layout.topHeight + gap &&
+                y < layout.topHeight + gap + layout.bottomHeight &&
+                x >= layout.bottomX && x < layout.bottomX + layout.bottomWidth) {
+                const int localX = x - layout.bottomX;
+                const int localY = y - (layout.topHeight + gap);
+                const int scaleX = (reference.cols > 0) ? (layout.bottomWidth / reference.cols) : 1;
+                const int scaleY = (reference.rows > 0) ? (layout.bottomHeight / reference.rows) : 1;
+                const int mappedX = (scaleX > 1) ? localX / scaleX : localX;
+                const int mappedY = (scaleY > 1) ? localY / scaleY : localY;
+                const int refX = std::clamp(mappedX, 0, std::max(0, reference.cols - 1)) + 1;
+                const int refY = std::clamp(mappedY, 0, std::max(0, reference.rows - 1)) + 1;
+                m_coordLabel->setText(QString("Original %1,%2").arg(refX).arg(refY));
+                return;
+            }
+        }
+        m_coordLabel->setText(QString());
+    });
     connect(m_framesCanvas->canvas(), &GLCanvasWidget::maskDropped, this, [this](const QString& kind, int index) {
         if (m_framesList->currentRow() < 0) {
             return;
@@ -1224,6 +1463,22 @@ MainWindow::MainWindow(QWidget* parent)
             }
             statusBar()->showMessage(QString("Assigned dynamic mask %1").arg(index), 2000);
         }
+        if (kind == "background") {
+            const int row = m_framesList->currentRow();
+            if (index < 0 || index >= m_backgroundList->count()) {
+                return;
+            }
+            if (row >= static_cast<int>(m_frameBackgroundIds.size())) {
+                m_frameBackgroundIds.resize(static_cast<std::size_t>(m_frameStore->count()), 0xffff);
+            }
+            m_frameBackgroundIds[static_cast<std::size_t>(row)] = static_cast<uint16_t>(index);
+            if (m_frameBackgroundAssign) {
+                m_frameBackgroundAssign->setCurrentIndex(index + 1);
+            }
+            statusBar()->showMessage(QString("Assigned background %1").arg(index), 2000);
+            updateFrameCanvasImage(row);
+            updateFramePreviewAt(row);
+        }
         updateMaskPreviewForFrame(m_framesList->currentRow());
     });
     connect(m_spritesCanvas->canvas(), &GLCanvasWidget::imageClicked, this, [this](int x, int y, Qt::MouseButton button) {
@@ -1235,6 +1490,15 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_spritesCanvas->canvas(), &GLCanvasWidget::imageReleased, this, [this](int x, int y, Qt::MouseButton button) {
         handleToolRelease(false, x, y, button);
     });
+    connect(m_backgroundsCanvas->canvas(), &GLCanvasWidget::imageClicked, this, [this](int x, int y, Qt::MouseButton button) {
+        handleBackgroundToolPress(x, y, button);
+    });
+    connect(m_backgroundsCanvas->canvas(), &GLCanvasWidget::imageDragged, this, [this](int x, int y, Qt::MouseButtons buttons) {
+        handleBackgroundToolDrag(x, y, buttons);
+    });
+    connect(m_backgroundsCanvas->canvas(), &GLCanvasWidget::imageReleased, this, [this](int x, int y, Qt::MouseButton button) {
+        handleBackgroundToolRelease(x, y, button);
+    });
 
     connect(m_framesCanvas, &CanvasWidget::fitRequested, this, [this]() {
         m_framesCanvas->canvas()->requestFitOnResize(true);
@@ -1242,11 +1506,17 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_spritesCanvas, &CanvasWidget::fitRequested, this, [this]() {
         m_spritesCanvas->canvas()->requestFitOnResize(true);
     });
+    connect(m_backgroundsCanvas, &CanvasWidget::fitRequested, this, [this]() {
+        m_backgroundsCanvas->canvas()->requestFitOnResize(true);
+    });
     connect(m_framesCanvas, &CanvasWidget::gridToggled, this, [this](bool enabled) {
         m_framesCanvas->canvas()->setGridEnabled(enabled);
     });
     connect(m_spritesCanvas, &CanvasWidget::gridToggled, this, [this](bool enabled) {
         m_spritesCanvas->canvas()->setGridEnabled(enabled);
+    });
+    connect(m_backgroundsCanvas, &CanvasWidget::gridToggled, this, [this](bool enabled) {
+        m_backgroundsCanvas->canvas()->setGridEnabled(enabled);
     });
     connect(m_framesCanvas, &CanvasWidget::maskToggled, this, [this](bool enabled) {
         if (enabled) {
@@ -1262,6 +1532,17 @@ MainWindow::MainWindow(QWidget* parent)
             setMaskMode(MaskMode::None);
         }
     });
+    connect(m_framesCanvas, &CanvasWidget::backgroundMaskToggled, this, [this](bool enabled) {
+        m_backgroundMaskMode = enabled;
+        updateFrameCanvasImage(m_framesList->currentRow());
+        updateMaskPreviewForFrame(m_framesList->currentRow());
+        updateUndoActions();
+    });
+    connect(m_framesCanvas, &CanvasWidget::backgroundToggled, this, [this](bool enabled) {
+        m_showBackgroundLayer = enabled;
+        updateFrameCanvasImage(m_framesList->currentRow());
+        updateMaskPreviewForFrame(m_framesList->currentRow());
+    });
     connect(m_framesCanvas, &CanvasWidget::originalToggled, this, [this](bool enabled) {
         m_showOriginalFrame = enabled;
         updateFrameCanvasImage(m_framesList->currentRow());
@@ -1276,6 +1557,26 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(m_spriteFilter, &QLineEdit::textChanged, this, [this](const QString& text) {
         applySpriteFilter(text);
+    });
+
+    connect(m_previewFilterButton, &QToolButton::toggled, this, [this](bool enabled) {
+        m_previewFilterEnabled = enabled;
+        updatePreviewFilterState();
+    });
+    connect(m_previewFilterClearButton, &QToolButton::clicked, this, [this]() {
+        m_previewFilterEnabled = false;
+        if (m_previewFilterButton) {
+            m_previewFilterButton->setChecked(false);
+        }
+        updatePreviewFilterState();
+    });
+    connect(m_previewRefreshButton, &QToolButton::clicked, this, [this]() {
+        refreshAllPreviews();
+    });
+    connect(m_toolsTabs, &QTabWidget::currentChanged, this, [this](int) {
+        if (m_previewFilterEnabled) {
+            updatePreviewFilterState();
+        }
     });
     connect(m_frameJump, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
         if (value >= 0 && value < m_framesList->count()) {
@@ -1325,6 +1626,7 @@ void MainWindow::openProjectFile(const QString& filename)
             m_imageStore->clear();
             m_frameStore->clear();
             m_spriteStore->clear();
+            m_backgroundStore->clear();
             m_frameDurations.clear();
             m_spriteNames.clear();
             m_sectionStarts.clear();
@@ -1338,6 +1640,11 @@ void MainWindow::openProjectFile(const QString& filename)
             m_frameShapeCompModes.clear();
             m_frameExtraFrames.clear();
             m_frameExtraFlags.clear();
+            m_backgroundFramesX.clear();
+            m_backgroundExtraFlags.clear();
+            m_frameBackgroundIds.clear();
+            m_frameBackgroundMasks.clear();
+            m_frameBackgroundMasksX.clear();
             m_useHdFrame = false;
             m_noColors = 64;
             updateMetadataForFrame(-1);
@@ -1385,6 +1692,7 @@ void MainWindow::openProjectFile(const QString& filename)
         m_imageStore->clear();
         m_frameStore->clear();
         m_spriteStore->clear();
+        m_backgroundStore->clear();
         m_frameDurations.clear();
         m_spriteNames.clear();
         m_sectionStarts.clear();
@@ -1398,6 +1706,11 @@ void MainWindow::openProjectFile(const QString& filename)
         m_frameShapeCompModes.clear();
         m_frameExtraFrames.clear();
         m_frameExtraFlags.clear();
+        m_backgroundFramesX.clear();
+        m_backgroundExtraFlags.clear();
+        m_frameBackgroundIds.clear();
+        m_frameBackgroundMasks.clear();
+        m_frameBackgroundMasksX.clear();
         m_useHdFrame = false;
         m_noColors = legacy.no_colors > 0 ? legacy.no_colors : 64;
         updateMetadataForFrame(-1);
@@ -1421,11 +1734,25 @@ void MainWindow::openProjectFile(const QString& filename)
         m_frameShapeCompModes = legacy.frame_shape_comp_modes;
         m_frameExtraFrames = legacy.frames_x;
         m_frameExtraFlags = legacy.frame_extra_flags;
+        m_backgroundExtraFlags = legacy.background_extra_flags;
+        m_frameBackgroundIds = legacy.background_ids;
+        m_frameBackgroundMasks = legacy.background_masks;
+        m_frameBackgroundMasksX = legacy.background_masks_x;
+        m_backgroundFramesX = legacy.background_frames_x;
+        for (const auto& bg : legacy.background_frames) {
+            m_backgroundStore->add(bg);
+        }
+        if (m_backgroundFramesX.size() < static_cast<std::size_t>(m_backgroundStore->count())) {
+            m_backgroundFramesX.resize(static_cast<std::size_t>(m_backgroundStore->count()));
+        }
         if (m_frameExtraFrames.size() < legacy.frames.size()) {
             m_frameExtraFrames.resize(legacy.frames.size());
         }
         if (m_frameExtraFlags.size() < legacy.frames.size()) {
             m_frameExtraFlags.resize(legacy.frames.size(), 0);
+        }
+        if (m_frameBackgroundIds.size() < legacy.frames.size()) {
+            m_frameBackgroundIds.resize(legacy.frames.size(), 0xffff);
         }
 
         QStringList frames;
@@ -1473,6 +1800,7 @@ void MainWindow::openProjectFile(const QString& filename)
     m_imageStore->clear();
     m_frameStore->clear();
     m_spriteStore->clear();
+    m_backgroundStore->clear();
     m_frameDurations.clear();
     m_spriteNames.clear();
     m_sectionStarts.clear();
@@ -1486,6 +1814,11 @@ void MainWindow::openProjectFile(const QString& filename)
     m_frameShapeCompModes.clear();
     m_frameExtraFrames.clear();
     m_frameExtraFlags.clear();
+    m_backgroundFramesX.clear();
+    m_backgroundExtraFlags.clear();
+    m_frameBackgroundIds.clear();
+    m_frameBackgroundMasks.clear();
+    m_frameBackgroundMasksX.clear();
     m_useHdFrame = false;
     m_noColors = 64;
     updateMetadataForFrame(-1);
@@ -1596,6 +1929,19 @@ LegacyProject MainWindow::buildLegacyProject(const QString& baseName) const
             project.frame_extra_flags[idx] = m_frameExtraFlags[idx];
         }
     }
+    project.background_frames.reserve(static_cast<std::size_t>(m_backgroundStore ? m_backgroundStore->count() : 0));
+    if (m_backgroundStore) {
+        for (int i = 0; i < m_backgroundStore->count(); ++i) {
+            if (const cv::Mat* bg = m_backgroundStore->at(i)) {
+                project.background_frames.push_back(bg->clone());
+            }
+        }
+    }
+    project.background_frames_x = m_backgroundFramesX;
+    project.background_extra_flags = m_backgroundExtraFlags;
+    project.background_ids = m_frameBackgroundIds;
+    project.background_masks = m_frameBackgroundMasks;
+    project.background_masks_x = m_frameBackgroundMasksX;
 
     const QStringList spriteLabels = m_state->sprites();
     project.sprite_labels.reserve(static_cast<std::size_t>(spriteCount));
@@ -1608,6 +1954,182 @@ LegacyProject MainWindow::buildLegacyProject(const QString& baseName) const
     }
 
     return project;
+}
+
+void MainWindow::refreshFramePreviewSelection()
+{
+    if (!m_framePreviewList || !m_framesList) {
+        return;
+    }
+    const int row = previewRowForFrame(m_framesList->currentRow());
+    if (row >= 0) {
+        m_framePreviewList->setCurrentRow(row);
+    } else {
+        m_framePreviewList->setCurrentRow(-1);
+    }
+}
+
+int MainWindow::previewRowForFrame(int index) const
+{
+    if (!m_framePreviewList || index < 0) {
+        return -1;
+    }
+    for (int row = 0; row < m_framePreviewList->count(); ++row) {
+        const QListWidgetItem* item = m_framePreviewList->item(row);
+        if (!item) {
+            continue;
+        }
+        if (item->data(kFrameIndexRole).toInt() == index) {
+            return row;
+        }
+    }
+    return -1;
+}
+
+MainWindow::PreviewFilterKind MainWindow::currentPreviewFilterKind() const
+{
+    if (!m_toolsTabs) {
+        return PreviewFilterKind::None;
+    }
+    const QWidget* current = m_toolsTabs->currentWidget();
+    if (current == m_masksTab) {
+        return PreviewFilterKind::Mask;
+    }
+    if (current == m_dynamicMasksTab) {
+        return PreviewFilterKind::DynamicMask;
+    }
+    if (current == m_backgroundsTab) {
+        return PreviewFilterKind::Background;
+    }
+    if (current == m_spritesTab) {
+        return PreviewFilterKind::Sprite;
+    }
+    return PreviewFilterKind::None;
+}
+
+void MainWindow::updatePreviewFilterState()
+{
+    if (!m_previewFilterButton) {
+        return;
+    }
+    if (!m_previewFilterEnabled) {
+        m_previewFilterKind = PreviewFilterKind::None;
+        m_previewFilterButton->setText("Filter");
+        refreshFramePreviews();
+        return;
+    }
+    m_previewFilterKind = currentPreviewFilterKind();
+    QString label("Filter");
+    switch (m_previewFilterKind) {
+        case PreviewFilterKind::Mask:
+            label = "Filter: Mask";
+            if (m_maskList && m_maskList->currentRow() < 0) {
+                statusBar()->showMessage("Select a mask to filter frames.", 2000);
+            }
+            break;
+        case PreviewFilterKind::DynamicMask:
+            label = "Filter: Dynamic";
+            if (m_dynamicMaskList && m_dynamicMaskList->currentRow() < 0) {
+                statusBar()->showMessage("Select a dynamic mask to filter frames.", 2000);
+            }
+            break;
+        case PreviewFilterKind::Background:
+            label = "Filter: Background";
+            if (m_backgroundList && m_backgroundList->currentRow() < 0) {
+                statusBar()->showMessage("Select a background to filter frames.", 2000);
+            }
+            break;
+        case PreviewFilterKind::Sprite:
+            label = "Filter: Sprite";
+            statusBar()->showMessage("Sprite assignments are not available yet.", 2500);
+            break;
+        case PreviewFilterKind::None:
+            break;
+    }
+    m_previewFilterButton->setText(label);
+    refreshFramePreviews();
+}
+
+std::vector<int> MainWindow::buildPreviewFrameIndices() const
+{
+    std::vector<int> indices;
+    const int count = m_frameStore ? m_frameStore->count() : 0;
+    if (count <= 0) {
+        return indices;
+    }
+    if (!m_previewFilterEnabled || m_previewFilterKind == PreviewFilterKind::None) {
+        indices.reserve(static_cast<std::size_t>(count));
+        for (int i = 0; i < count; ++i) {
+            indices.push_back(i);
+        }
+        return indices;
+    }
+    switch (m_previewFilterKind) {
+        case PreviewFilterKind::Mask: {
+            const int selected = m_maskList ? m_maskList->currentRow() : -1;
+            if (selected < 0) {
+                break;
+            }
+            for (int i = 0; i < count && i < static_cast<int>(m_frameCompMaskIds.size()); ++i) {
+                if (m_frameCompMaskIds[static_cast<std::size_t>(i)] == selected) {
+                    indices.push_back(i);
+                }
+            }
+            break;
+        }
+        case PreviewFilterKind::DynamicMask: {
+            const int selected = m_dynamicMaskList ? m_dynamicMaskList->currentRow() : -1;
+            if (selected < 0) {
+                break;
+            }
+            for (int i = 0; i < count && i < static_cast<int>(m_frameDynamicMaskIds.size()); ++i) {
+                if (m_frameDynamicMaskIds[static_cast<std::size_t>(i)] == selected) {
+                    indices.push_back(i);
+                }
+            }
+            break;
+        }
+        case PreviewFilterKind::Background: {
+            const int selected = m_backgroundList ? m_backgroundList->currentRow() : -1;
+            if (selected < 0) {
+                break;
+            }
+            for (int i = 0; i < count && i < static_cast<int>(m_frameBackgroundIds.size()); ++i) {
+                if (m_frameBackgroundIds[static_cast<std::size_t>(i)] == selected) {
+                    indices.push_back(i);
+                }
+            }
+            break;
+        }
+        case PreviewFilterKind::Sprite:
+            for (int i = 0; i < count; ++i) {
+                indices.push_back(i);
+            }
+            break;
+        case PreviewFilterKind::None:
+            break;
+    }
+    return indices;
+}
+
+void MainWindow::refreshAllPreviews()
+{
+    if (m_maskList) {
+        updateMaskPreviewIcons();
+    }
+    if (m_dynamicMaskList) {
+        updateDynamicMaskPreviewIcons();
+    }
+    int backgroundRow = m_backgroundList ? m_backgroundList->currentRow() : -1;
+    if (backgroundRow < 0) {
+        backgroundRow = m_lastBackgroundIndex;
+    }
+    refreshBackgroundList();
+    if (m_backgroundList && backgroundRow >= 0 && backgroundRow < m_backgroundList->count()) {
+        m_backgroundList->setCurrentRow(backgroundRow);
+    }
+    refreshFramePreviews();
+    updateMaskPreviewForFrame(m_framesList ? m_framesList->currentRow() : -1);
 }
 
 void MainWindow::refreshFramePreviews()
@@ -1623,7 +2145,15 @@ void MainWindow::refreshFramePreviews()
         return;
     }
 
-    for (int i = 0; i < count; ++i) {
+    const std::vector<int> indices = buildPreviewFrameIndices();
+    if (indices.empty()) {
+        auto* item = new QListWidgetItem(m_previewFilterEnabled ? "No frames match filter" : "No frames");
+        item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
+        m_framePreviewList->addItem(item);
+        return;
+    }
+
+    for (int i : indices) {
         const cv::Mat* image = m_frameStore->at(i);
         if (!image || image->empty()) {
             continue;
@@ -1634,7 +2164,12 @@ void MainWindow::refreshFramePreviews()
         if (i >= 0 && i < static_cast<int>(m_frameExtraFrames.size())) {
             hdFrame = m_frameExtraFrames[static_cast<std::size_t>(i)];
         }
-        cv::Mat previewMat = buildPreviewFrame(*image, reference, hdFrame);
+        cv::Mat composed = applyBackgroundComposite(i, *image, false);
+        cv::Mat hdComposed;
+        if (!hdFrame.empty()) {
+            hdComposed = applyBackgroundComposite(i, hdFrame, true);
+        }
+        cv::Mat previewMat = buildPreviewFrame(composed, reference, hdComposed);
         cv::Mat rgb;
         cv::cvtColor(previewMat, rgb, cv::COLOR_BGR2RGB);
         QImage previewImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888);
@@ -1655,21 +2190,20 @@ void MainWindow::refreshFramePreviews()
         m_framePreviewList->addItem(item);
     }
 
-    if (m_framesList->currentRow() >= 0 && m_framesList->currentRow() < m_framePreviewList->count()) {
-        m_framePreviewList->setCurrentRow(m_framesList->currentRow());
-    }
+    refreshFramePreviewSelection();
 }
 
 void MainWindow::updateFramePreviewAt(int index)
 {
-    if (index < 0 || index >= m_framePreviewList->count()) {
+    const int row = previewRowForFrame(index);
+    if (row < 0 || row >= m_framePreviewList->count()) {
         return;
     }
     const cv::Mat* image = m_frameStore->at(index);
     if (!image || image->empty()) {
         return;
     }
-    QListWidgetItem* item = m_framePreviewList->item(index);
+    QListWidgetItem* item = m_framePreviewList->item(row);
     if (!item) {
         return;
     }
@@ -1678,7 +2212,12 @@ void MainWindow::updateFramePreviewAt(int index)
     if (index >= 0 && index < static_cast<int>(m_frameExtraFrames.size())) {
         hdFrame = m_frameExtraFrames[static_cast<std::size_t>(index)];
     }
-    cv::Mat previewMat = buildPreviewFrame(*image, reference, hdFrame);
+    cv::Mat composed = applyBackgroundComposite(index, *image, false);
+    cv::Mat hdComposed;
+    if (!hdFrame.empty()) {
+        hdComposed = applyBackgroundComposite(index, hdFrame, true);
+    }
+    cv::Mat previewMat = buildPreviewFrame(composed, reference, hdComposed);
     cv::Mat rgb;
     cv::cvtColor(previewMat, rgb, cv::COLOR_BGR2RGB);
     QImage previewImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888);
@@ -1712,8 +2251,8 @@ cv::Mat MainWindow::buildPreviewFrame(const cv::Mat& colorized,
         cv::resize(hd, hd, baseSize, 0.0, 0.0, cv::INTER_AREA);
     }
     const QColor gap = m_framePreviewList
-        ? m_framePreviewList->palette().color(QPalette::Base)
-        : QApplication::palette().color(QPalette::Base);
+        ? m_framePreviewList->palette().color(QPalette::Window)
+        : QApplication::palette().color(QPalette::Window);
     return BuildStackedFrames({color, original, hd}, cv::Scalar(gap.blue(), gap.green(), gap.red()));
 }
 
@@ -1792,6 +2331,140 @@ cv::Mat MainWindow::buildOriginalPreviewForIndex(int index) const
     return cv::Mat();
 }
 
+cv::Mat MainWindow::buildReferenceForSize(int index, const cv::Size& target) const
+{
+    cv::Mat ref = buildOriginalPreviewForIndex(index);
+    if (ref.empty()) {
+        return cv::Mat();
+    }
+    if (ref.size() == target) {
+        return ref;
+    }
+    cv::Mat resized;
+    cv::resize(ref, resized, target, 0.0, 0.0, cv::INTER_NEAREST);
+    return resized;
+}
+
+cv::Mat MainWindow::applyBackgroundComposite(int index, const cv::Mat& frame, bool useHd) const
+{
+    if (index < 0 || frame.empty()) {
+        return frame.clone();
+    }
+    if (index >= static_cast<int>(m_frameBackgroundIds.size())) {
+        return EnsureBgr(frame);
+    }
+    const uint16_t bgId = m_frameBackgroundIds[static_cast<std::size_t>(index)];
+    if (bgId == 0xffff) {
+        return EnsureBgr(frame);
+    }
+    const cv::Mat* bg = nullptr;
+    if (useHd) {
+        if (bgId < m_backgroundFramesX.size()) {
+            bg = &m_backgroundFramesX[bgId];
+        }
+    } else if (m_backgroundStore && bgId < m_backgroundStore->count()) {
+        bg = m_backgroundStore->at(static_cast<int>(bgId));
+    }
+    if (!bg || bg->empty()) {
+        return EnsureBgr(frame);
+    }
+
+    const cv::Mat* mask = nullptr;
+    if (useHd) {
+        if (index < static_cast<int>(m_frameBackgroundMasksX.size())) {
+            mask = &m_frameBackgroundMasksX[static_cast<std::size_t>(index)];
+        }
+        if ((!mask || mask->empty()) && index < static_cast<int>(m_frameBackgroundMasks.size())) {
+            mask = &m_frameBackgroundMasks[static_cast<std::size_t>(index)];
+        }
+    } else if (index < static_cast<int>(m_frameBackgroundMasks.size())) {
+        mask = &m_frameBackgroundMasks[static_cast<std::size_t>(index)];
+    }
+    if (!mask || mask->empty()) {
+        return EnsureBgr(frame);
+    }
+
+    cv::Mat output = EnsureBgr(frame);
+    cv::Mat ref = buildReferenceForSize(index, output.size());
+    if (ref.empty()) {
+        return output;
+    }
+    cv::Mat bgFrame = EnsureBgr(*bg);
+    if (bgFrame.size() != output.size()) {
+        cv::resize(bgFrame, bgFrame, output.size(), 0.0, 0.0, cv::INTER_NEAREST);
+    }
+    cv::Mat maskScaled = *mask;
+    if (maskScaled.size() != output.size()) {
+        cv::resize(maskScaled, maskScaled, output.size(), 0.0, 0.0, cv::INTER_NEAREST);
+    }
+
+    for (int y = 0; y < output.rows; ++y) {
+        cv::Vec3b* row = output.ptr<cv::Vec3b>(y);
+        const cv::Vec3b* brow = bgFrame.ptr<cv::Vec3b>(y);
+        const uint8_t* mrow = maskScaled.ptr<uint8_t>(y);
+        const uint8_t* rrow = ref.ptr<uint8_t>(y);
+        for (int x = 0; x < output.cols; ++x) {
+            if (mrow[x] && rrow[x] == 0) {
+                row[x] = brow[x];
+            }
+        }
+    }
+    return output;
+}
+
+cv::Mat MainWindow::applyBackgroundCompositeWithMask(int index,
+                                                     const cv::Mat& frame,
+                                                     const cv::Mat& mask,
+                                                     bool useHd) const
+{
+    if (index < 0 || frame.empty() || mask.empty()) {
+        return EnsureBgr(frame);
+    }
+    if (index >= static_cast<int>(m_frameBackgroundIds.size())) {
+        return EnsureBgr(frame);
+    }
+    const uint16_t bgId = m_frameBackgroundIds[static_cast<std::size_t>(index)];
+    if (bgId == 0xffff) {
+        return EnsureBgr(frame);
+    }
+    const cv::Mat* bg = nullptr;
+    if (useHd) {
+        if (bgId < m_backgroundFramesX.size()) {
+            bg = &m_backgroundFramesX[bgId];
+        }
+    } else if (m_backgroundStore && bgId < m_backgroundStore->count()) {
+        bg = m_backgroundStore->at(static_cast<int>(bgId));
+    }
+    if (!bg || bg->empty()) {
+        return EnsureBgr(frame);
+    }
+    cv::Mat output = EnsureBgr(frame);
+    cv::Mat ref = buildReferenceForSize(index, output.size());
+    if (ref.empty()) {
+        return output;
+    }
+    cv::Mat bgFrame = EnsureBgr(*bg);
+    if (bgFrame.size() != output.size()) {
+        cv::resize(bgFrame, bgFrame, output.size(), 0.0, 0.0, cv::INTER_NEAREST);
+    }
+    cv::Mat maskScaled = mask;
+    if (maskScaled.size() != output.size()) {
+        cv::resize(maskScaled, maskScaled, output.size(), 0.0, 0.0, cv::INTER_NEAREST);
+    }
+    for (int y = 0; y < output.rows; ++y) {
+        cv::Vec3b* row = output.ptr<cv::Vec3b>(y);
+        const cv::Vec3b* brow = bgFrame.ptr<cv::Vec3b>(y);
+        const uint8_t* mrow = maskScaled.ptr<uint8_t>(y);
+        const uint8_t* rrow = ref.ptr<uint8_t>(y);
+        for (int x = 0; x < output.cols; ++x) {
+            if (mrow[x] && rrow[x] == 0) {
+                row[x] = brow[x];
+            }
+        }
+    }
+    return output;
+}
+
 void MainWindow::updateFrameCanvasImage(int index)
 {
     if (!m_framesCanvas) {
@@ -1806,25 +2479,41 @@ void MainWindow::updateFrameCanvasImage(int index)
         m_framesCanvas->setImage(cv::Mat());
         return;
     }
+    cv::Mat composed = m_showBackgroundLayer
+        ? applyBackgroundComposite(index, *image, m_useHdFrame)
+        : EnsureBgr(*image);
     cv::Mat reference = buildOriginalPreviewForIndex(index);
     cv::Mat original = buildOriginalFrame(reference);
     if (original.empty() || !m_showOriginalFrame) {
-        m_framesCanvas->setImage(*image);
+        m_framesCanvas->setImage(composed);
         m_framesCanvas->canvas()->setGridSegments(0, 0, 0);
         m_framesCanvas->canvas()->setGridScales(1, 1);
         return;
     }
-    cv::Mat displayOriginal = BuildDisplayOriginal(original, image->size());
+    cv::Mat displayOriginal = BuildDisplayOriginal(original, composed.size());
     const QColor gap = m_framesCanvas->palette().color(QPalette::Window);
-    cv::Mat combined = buildCombinedFrame(*image, displayOriginal, cv::Scalar(gap.blue(), gap.green(), gap.red()));
+    cv::Mat combined = buildCombinedFrame(composed, displayOriginal, cv::Scalar(gap.blue(), gap.green(), gap.red()));
     m_framesCanvas->setImage(combined);
     int bottomScale = 1;
     if (!displayOriginal.empty() && original.rows > 0 && original.cols > 0 &&
         displayOriginal.rows == original.rows * 2 && displayOriginal.cols == original.cols * 2) {
         bottomScale = 2;
     }
-    m_framesCanvas->canvas()->setGridSegments(image->rows, kFrameGapPixels, displayOriginal.rows);
+    m_framesCanvas->canvas()->setGridSegments(composed.rows, kFrameGapPixels, displayOriginal.rows);
     m_framesCanvas->canvas()->setGridScales(1, bottomScale);
+}
+
+void MainWindow::updateBackgroundCanvasImage(int index)
+{
+    if (!m_backgroundsCanvas || !m_backgroundStore) {
+        return;
+    }
+    const cv::Mat* image = m_backgroundStore->at(index);
+    if (!image || image->empty()) {
+        m_backgroundsCanvas->setImage(cv::Mat());
+        return;
+    }
+    m_backgroundsCanvas->setImage(*image);
 }
 
 namespace {
@@ -1949,6 +2638,7 @@ void MainWindow::ensureMaskDataSize()
     m_shapeCompToggle->setEnabled(hasFrames);
     if (m_framesCanvas) {
         m_framesCanvas->setMaskButtonsEnabled(hasFrames);
+        m_framesCanvas->setBackgroundMaskEnabled(hasFrames);
     }
     m_maskList->setEnabled(hasFrames);
     m_maskMoveUp->setEnabled(hasFrames);
@@ -1958,9 +2648,62 @@ void MainWindow::ensureMaskDataSize()
     m_dynamicMaskMoveUp->setEnabled(hasFrames);
     m_dynamicMaskMoveDown->setEnabled(hasFrames);
     m_dynamicMaskClearButton->setEnabled(hasFrames);
+    if (m_frameBackgroundAssign) {
+        m_frameBackgroundAssign->setEnabled(hasFrames);
+    }
 
     refreshMaskCombos();
     refreshDynamicMaskCombos();
+    ensureBackgroundDataSize();
+}
+
+void MainWindow::ensureBackgroundDataSize()
+{
+    const int frameCount = m_frameStore ? m_frameStore->count() : 0;
+    if (frameCount < 0) {
+        return;
+    }
+    const bool hasFrames = frameCount > 0 && m_framesList && !(frameCount == 1 && m_framesList->item(0)->text().startsWith("No frames"));
+    if (m_frameBackgroundIds.size() != static_cast<std::size_t>(frameCount)) {
+        m_frameBackgroundIds.resize(static_cast<std::size_t>(frameCount), 0xffff);
+    }
+    if (m_frameBackgroundMasks.size() != static_cast<std::size_t>(frameCount)) {
+        m_frameBackgroundMasks.resize(static_cast<std::size_t>(frameCount));
+    }
+    if (m_frameBackgroundMasksX.size() != static_cast<std::size_t>(frameCount)) {
+        m_frameBackgroundMasksX.resize(static_cast<std::size_t>(frameCount));
+    }
+
+    const cv::Mat* firstFrame = (frameCount > 0) ? m_frameStore->at(0) : nullptr;
+    const int width = firstFrame ? firstFrame->cols : 0;
+    const int height = firstFrame ? firstFrame->rows : 0;
+
+    cv::Size hdSize;
+    for (const auto& hd : m_frameExtraFrames) {
+        if (!hd.empty()) {
+            hdSize = hd.size();
+            break;
+        }
+    }
+
+    for (int i = 0; i < frameCount; ++i) {
+        cv::Mat& mask = m_frameBackgroundMasks[static_cast<std::size_t>(i)];
+        if (width > 0 && height > 0 && (mask.empty() || mask.cols != width || mask.rows != height)) {
+            mask = cv::Mat(height, width, CV_8UC1, cv::Scalar(0));
+        }
+        cv::Mat& maskX = m_frameBackgroundMasksX[static_cast<std::size_t>(i)];
+        if (hdSize.width > 0 && hdSize.height > 0 &&
+            (maskX.empty() || maskX.cols != hdSize.width || maskX.rows != hdSize.height)) {
+            maskX = cv::Mat(hdSize.height, hdSize.width, CV_8UC1, cv::Scalar(0));
+        }
+    }
+
+    refreshBackgroundList();
+    const bool hasBackgrounds = m_backgroundStore && m_backgroundStore->count() > 0;
+    if (m_framesCanvas) {
+        m_framesCanvas->setBackgroundMaskEnabled(hasFrames && hasBackgrounds);
+        m_framesCanvas->setBackgroundEnabled(hasBackgrounds);
+    }
 }
 
 cv::Mat MainWindow::buildReferenceFrame(const cv::Mat& source) const
@@ -1989,10 +2732,14 @@ cv::Mat MainWindow::buildMaskPreview(const cv::Mat& frame, const cv::Mat& mask, 
     if (preview.empty() || mask.empty()) {
         return preview;
     }
+    cv::Mat scaledMask = mask;
+    if (mask.size() != preview.size()) {
+        cv::resize(mask, scaledMask, preview.size(), 0.0, 0.0, cv::INTER_NEAREST);
+    }
     const double alpha = 0.5;
     for (int y = 0; y < preview.rows; ++y) {
         cv::Vec3b* row = preview.ptr<cv::Vec3b>(y);
-        const uint8_t* mrow = mask.ptr<uint8_t>(y);
+        const uint8_t* mrow = scaledMask.ptr<uint8_t>(y);
         for (int x = 0; x < preview.cols; ++x) {
             if (!mrow[x]) {
                 continue;
@@ -2009,39 +2756,114 @@ void MainWindow::updateMaskPreviewForFrame(int index)
 {
     if (index < 0 || index >= m_frameStore->count()) {
         m_framesCanvas->canvas()->clearPreviewImage();
+        m_framesCanvas->canvas()->clearMaskOutline();
         return;
     }
     const cv::Mat* frame = activeFrameImage(index, false);
     if (!frame || frame->empty()) {
+        m_framesCanvas->canvas()->clearMaskOutline();
         return;
     }
     ensureMaskDataSize();
+    ensureBackgroundDataSize();
     cv::Mat reference = buildOriginalPreviewForIndex(index);
     const QColor gap = m_framesCanvas->palette().color(QPalette::Window);
     const cv::Scalar gapColor(gap.blue(), gap.green(), gap.red());
-    if (!m_showOriginalFrame && m_maskMode != MaskMode::None) {
+    cv::Mat base = m_showBackgroundLayer
+        ? applyBackgroundComposite(index, *frame, m_useHdFrame)
+        : EnsureBgr(*frame);
+    cv::Mat topPreview = base;
+    bool hasTopMask = false;
+    bool hasBottomMask = false;
+    QRect topRegion;
+    QRect bottomRegion;
+
+    if (m_backgroundMaskMode) {
+        if (index >= static_cast<int>(m_frameBackgroundIds.size()) ||
+            m_frameBackgroundIds[static_cast<std::size_t>(index)] == 0xffff) {
+            m_backgroundMaskMode = false;
+        } else if (cv::Mat* bgMask = activeBackgroundMask(index)) {
+            if (!bgMask->empty()) {
+                topPreview = buildMaskPreview(base, *bgMask, cv::Vec3b(60, 200, 120));
+                hasTopMask = true;
+                if (m_showOriginalFrame) {
+                    cv::Mat original = buildOriginalFrame(reference);
+                    cv::Mat displayOriginal = BuildDisplayOriginal(original, topPreview.size());
+                    FrameLayout layout = BuildFrameLayout(topPreview, displayOriginal);
+                    topRegion = QRect(layout.topX, 0, layout.topWidth, layout.topHeight);
+                }
+            }
+        }
+    }
+
+    if (!m_showOriginalFrame && m_maskMode != MaskMode::None && !hasTopMask) {
         m_framesCanvas->canvas()->clearPreviewImage();
+        m_framesCanvas->canvas()->clearMaskOutline();
+        m_framesCanvas->canvas()->setSecondaryMaskOutline(cv::Mat(), QColor());
         return;
     }
-    if (m_maskMode == MaskMode::Dynamic) {
-        const int maskId = currentFrameDynamicMaskId();
-        if (maskId >= 0 && maskId < static_cast<int>(m_dynamicMasks.size())) {
-            const cv::Mat& mask = m_dynamicMasks[static_cast<std::size_t>(maskId)];
-            const cv::Mat preview = buildCombinedMaskPreview(*frame, reference, mask, cv::Vec3b(0, 200, 255), gapColor);
-            m_framesCanvas->canvas()->setPreviewImage(preview);
-            return;
+
+    cv::Mat bottomPreview;
+    QColor bottomOutlineColor;
+    if (m_showOriginalFrame) {
+        cv::Mat original = buildOriginalFrame(reference);
+        if (m_maskMode == MaskMode::Dynamic) {
+            const int maskId = currentFrameDynamicMaskId();
+            if (maskId >= 0 && maskId < static_cast<int>(m_dynamicMasks.size())) {
+                const cv::Mat& mask = m_dynamicMasks[static_cast<std::size_t>(maskId)];
+                bottomPreview = buildMaskPreview(original, mask, cv::Vec3b(0, 200, 255));
+                hasBottomMask = true;
+                bottomOutlineColor = QColor(255, 200, 0);
+            }
+        } else if (m_maskMode == MaskMode::Comparison) {
+            const int maskId = currentFrameMaskId();
+            if (maskId >= 0 && maskId < static_cast<int>(m_compMasks.size())) {
+                const cv::Mat& mask = m_compMasks[static_cast<std::size_t>(maskId)];
+                bottomPreview = buildMaskPreview(original, mask, cv::Vec3b(200, 0, 200));
+                hasBottomMask = true;
+                bottomOutlineColor = QColor(200, 0, 200);
+            }
+        }
+        if (bottomPreview.empty()) {
+            bottomPreview = original;
+        }
+        cv::Mat displayOriginal = BuildDisplayOriginal(bottomPreview, topPreview.size());
+        FrameLayout layout = BuildFrameLayout(topPreview, displayOriginal);
+        bottomRegion = QRect(layout.bottomX,
+                             layout.topHeight + kFrameGapPixels,
+                             layout.bottomWidth,
+                             layout.bottomHeight);
+        cv::Mat combined = buildCombinedFrame(topPreview, displayOriginal, gapColor);
+        m_framesCanvas->canvas()->setPreviewImage(combined);
+    } else {
+        if (hasTopMask) {
+            m_framesCanvas->canvas()->setPreviewImage(topPreview);
+        } else {
+            m_framesCanvas->canvas()->clearPreviewImage();
         }
     }
-    if (m_maskMode == MaskMode::Comparison) {
-        const int maskId = currentFrameMaskId();
-        if (maskId >= 0 && maskId < static_cast<int>(m_compMasks.size())) {
-            const cv::Mat& mask = m_compMasks[static_cast<std::size_t>(maskId)];
-            const cv::Mat preview = buildCombinedMaskPreview(*frame, reference, mask, cv::Vec3b(200, 0, 200), gapColor);
-            m_framesCanvas->canvas()->setPreviewImage(preview);
-            return;
+
+    if (hasBottomMask && m_maskMode != MaskMode::None) {
+        const cv::Mat* mask = (m_maskMode == MaskMode::Dynamic)
+            ? (currentFrameDynamicMaskId() >= 0 ? &m_dynamicMasks[static_cast<std::size_t>(currentFrameDynamicMaskId())] : nullptr)
+            : (currentFrameMaskId() >= 0 ? &m_compMasks[static_cast<std::size_t>(currentFrameMaskId())] : nullptr);
+        if (mask && !mask->empty()) {
+            m_framesCanvas->canvas()->setMaskOutline(*mask, bottomOutlineColor, bottomRegion);
+        }
+    } else {
+        m_framesCanvas->canvas()->clearPrimaryOutline();
+    }
+    if (hasTopMask && m_backgroundMaskMode) {
+        if (cv::Mat* bgMask = activeBackgroundMask(index)) {
+            m_framesCanvas->canvas()->setSecondaryMaskOutline(*bgMask, QColor(120, 200, 60), topRegion);
         }
     }
-    m_framesCanvas->canvas()->clearPreviewImage();
+    if (!(hasTopMask && m_backgroundMaskMode)) {
+        m_framesCanvas->canvas()->setSecondaryMaskOutline(cv::Mat(), QColor());
+    }
+    if (!hasBottomMask && !(hasTopMask && m_backgroundMaskMode)) {
+        m_framesCanvas->canvas()->clearMaskOutline();
+    }
 }
 
 void MainWindow::setMaskMode(MaskMode mode)
@@ -2366,6 +3188,20 @@ cv::Mat* MainWindow::activeDynamicMask()
     return &m_dynamicMasks[static_cast<std::size_t>(id)];
 }
 
+cv::Mat* MainWindow::activeBackgroundMask(int index)
+{
+    if (index < 0) {
+        return nullptr;
+    }
+    if (m_useHdFrame && index < static_cast<int>(m_frameBackgroundMasksX.size())) {
+        return &m_frameBackgroundMasksX[static_cast<std::size_t>(index)];
+    }
+    if (index < static_cast<int>(m_frameBackgroundMasks.size())) {
+        return &m_frameBackgroundMasks[static_cast<std::size_t>(index)];
+    }
+    return nullptr;
+}
+
 void MainWindow::swapMaskEntries(int a, int b)
 {
     if (a < 0 || b < 0 || a >= static_cast<int>(m_compMasks.size()) || b >= static_cast<int>(m_compMasks.size())) {
@@ -2471,10 +3307,13 @@ void MainWindow::resetUndoStacks()
     m_frameUndoStacks.clear();
     m_frameHdUndoStacks.clear();
     m_spriteUndoStacks.clear();
+    m_backgroundUndoStacks.clear();
     m_compMaskUndoStacks.clear();
     m_dynMaskUndoStacks.clear();
+    m_backgroundMaskUndoStacks.clear();
     m_frameUndoActive = false;
     m_spriteUndoActive = false;
+    m_backgroundUndoActive = false;
     updateUndoActions();
 }
 
@@ -2482,14 +3321,19 @@ void MainWindow::ensureUndoStacksSize()
 {
     const int frameCount = m_frameStore ? m_frameStore->count() : 0;
     const int spriteCount = m_spriteStore ? m_spriteStore->count() : 0;
+    const int backgroundCount = m_backgroundStore ? m_backgroundStore->count() : 0;
     if (frameCount >= 0) {
         m_frameUndoStacks.resize(static_cast<std::size_t>(frameCount));
         m_frameHdUndoStacks.resize(static_cast<std::size_t>(frameCount));
         m_compMaskUndoStacks.resize(static_cast<std::size_t>(frameCount));
         m_dynMaskUndoStacks.resize(static_cast<std::size_t>(frameCount));
+        m_backgroundMaskUndoStacks.resize(static_cast<std::size_t>(frameCount));
     }
     if (spriteCount >= 0) {
         m_spriteUndoStacks.resize(static_cast<std::size_t>(spriteCount));
+    }
+    if (backgroundCount >= 0) {
+        m_backgroundUndoStacks.resize(static_cast<std::size_t>(backgroundCount));
     }
     updateUndoActions();
 }
@@ -2566,6 +3410,50 @@ void MainWindow::pushMaskUndoSnapshot(MaskMode mode, int index)
     if (state.mask.empty()) {
         return;
     }
+    stack.undo.push_back(std::move(state));
+    if (stack.undo.size() > kMaxUndoDepth) {
+        stack.undo.erase(stack.undo.begin());
+    }
+    stack.redo.clear();
+    updateUndoActions();
+}
+
+void MainWindow::pushBackgroundUndoSnapshot(int index)
+{
+    if (index < 0 || !m_backgroundStore) {
+        return;
+    }
+    if (index >= static_cast<int>(m_backgroundUndoStacks.size())) {
+        return;
+    }
+    cv::Mat* image = m_backgroundStore->atMutable(index);
+    if (!image || image->empty()) {
+        return;
+    }
+    UndoStack& stack = m_backgroundUndoStacks[static_cast<std::size_t>(index)];
+    UndoState state;
+    state.image = image->clone();
+    stack.undo.push_back(std::move(state));
+    if (stack.undo.size() > kMaxUndoDepth) {
+        stack.undo.erase(stack.undo.begin());
+    }
+    stack.redo.clear();
+    updateUndoActions();
+}
+
+void MainWindow::pushBackgroundMaskUndoSnapshot(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_backgroundMaskUndoStacks.size())) {
+        return;
+    }
+    cv::Mat* mask = activeBackgroundMask(index);
+    if (!mask || mask->empty()) {
+        return;
+    }
+    UndoStack& stack = m_backgroundMaskUndoStacks[static_cast<std::size_t>(index)];
+    UndoState state;
+    state.mask = mask->clone();
+    state.mask_kind = MaskKind::None;
     stack.undo.push_back(std::move(state));
     if (stack.undo.size() > kMaxUndoDepth) {
         stack.undo.erase(stack.undo.begin());
@@ -2655,6 +3543,120 @@ bool MainWindow::redoEdit(bool isFrame)
     } else {
         m_spritesCanvas->setImage(*image);
     }
+    updateUndoActions();
+    return true;
+}
+
+bool MainWindow::undoBackgroundEdit()
+{
+    const int index = m_backgroundList ? m_backgroundList->currentRow() : -1;
+    if (index < 0 || index >= static_cast<int>(m_backgroundUndoStacks.size())) {
+        return false;
+    }
+    if (!m_backgroundStore) {
+        return false;
+    }
+    UndoStack& stack = m_backgroundUndoStacks[static_cast<std::size_t>(index)];
+    if (stack.undo.empty()) {
+        return false;
+    }
+    cv::Mat* image = m_backgroundStore->atMutable(index);
+    if (!image || image->empty()) {
+        return false;
+    }
+    UndoState current;
+    current.image = image->clone();
+    stack.redo.push_back(std::move(current));
+    UndoState previous = stack.undo.back();
+    stack.undo.pop_back();
+    *image = previous.image.clone();
+    updateBackgroundCanvasImage(index);
+    updateUndoActions();
+    return true;
+}
+
+bool MainWindow::redoBackgroundEdit()
+{
+    const int index = m_backgroundList ? m_backgroundList->currentRow() : -1;
+    if (index < 0 || index >= static_cast<int>(m_backgroundUndoStacks.size())) {
+        return false;
+    }
+    if (!m_backgroundStore) {
+        return false;
+    }
+    UndoStack& stack = m_backgroundUndoStacks[static_cast<std::size_t>(index)];
+    if (stack.redo.empty()) {
+        return false;
+    }
+    cv::Mat* image = m_backgroundStore->atMutable(index);
+    if (!image || image->empty()) {
+        return false;
+    }
+    UndoState current;
+    current.image = image->clone();
+    stack.undo.push_back(std::move(current));
+    if (stack.undo.size() > kMaxUndoDepth) {
+        stack.undo.erase(stack.undo.begin());
+    }
+    UndoState next = stack.redo.back();
+    stack.redo.pop_back();
+    *image = next.image.clone();
+    updateBackgroundCanvasImage(index);
+    updateUndoActions();
+    return true;
+}
+
+bool MainWindow::undoBackgroundMaskEdit()
+{
+    const int index = m_framesList ? m_framesList->currentRow() : -1;
+    if (index < 0 || index >= static_cast<int>(m_backgroundMaskUndoStacks.size())) {
+        return false;
+    }
+    UndoStack& stack = m_backgroundMaskUndoStacks[static_cast<std::size_t>(index)];
+    if (stack.undo.empty()) {
+        return false;
+    }
+    cv::Mat* mask = activeBackgroundMask(index);
+    if (!mask || mask->empty()) {
+        return false;
+    }
+    UndoState current;
+    current.mask = mask->clone();
+    stack.redo.push_back(std::move(current));
+    UndoState previous = stack.undo.back();
+    stack.undo.pop_back();
+    *mask = previous.mask.clone();
+    updateFrameCanvasImage(index);
+    updateFramePreviewAt(index);
+    updateUndoActions();
+    return true;
+}
+
+bool MainWindow::redoBackgroundMaskEdit()
+{
+    const int index = m_framesList ? m_framesList->currentRow() : -1;
+    if (index < 0 || index >= static_cast<int>(m_backgroundMaskUndoStacks.size())) {
+        return false;
+    }
+    UndoStack& stack = m_backgroundMaskUndoStacks[static_cast<std::size_t>(index)];
+    if (stack.redo.empty()) {
+        return false;
+    }
+    cv::Mat* mask = activeBackgroundMask(index);
+    if (!mask || mask->empty()) {
+        return false;
+    }
+    UndoState current;
+    current.mask = mask->clone();
+    stack.undo.push_back(std::move(current));
+    if (stack.undo.size() > kMaxUndoDepth) {
+        stack.undo.erase(stack.undo.begin());
+    }
+    UndoState next = stack.redo.back();
+    stack.redo.pop_back();
+    *mask = next.mask.clone();
+    updateFrameCanvasImage(index);
+    updateFramePreviewAt(index);
     updateUndoActions();
     return true;
 }
@@ -2786,6 +3788,10 @@ void MainWindow::updateUndoActions()
             index = m_spritesList ? m_spritesList->currentRow() : -1;
             stacks = &m_spriteUndoStacks;
             break;
+        case UndoTarget::Background:
+            index = m_backgroundList ? m_backgroundList->currentRow() : -1;
+            stacks = &m_backgroundUndoStacks;
+            break;
         case UndoTarget::CompMask:
             index = m_framesList ? m_framesList->currentRow() : -1;
             stacks = &m_compMaskUndoStacks;
@@ -2793,6 +3799,10 @@ void MainWindow::updateUndoActions()
         case UndoTarget::DynMask:
             index = m_framesList ? m_framesList->currentRow() : -1;
             stacks = &m_dynMaskUndoStacks;
+            break;
+        case UndoTarget::BackgroundMask:
+            index = m_framesList ? m_framesList->currentRow() : -1;
+            stacks = &m_backgroundMaskUndoStacks;
             break;
     }
     bool canUndo = false;
@@ -2815,7 +3825,9 @@ bool MainWindow::isFrameContext() const
     if (m_canvasTabs && m_canvasTabs->currentWidget() == m_framesCanvas) {
         return true;
     }
-    if (m_canvasTabs && m_canvasTabs->currentWidget() == m_spritesCanvas) {
+    if (m_canvasTabs &&
+        (m_canvasTabs->currentWidget() == m_spritesCanvas ||
+         m_canvasTabs->currentWidget() == m_backgroundsCanvas)) {
         return false;
     }
     return m_framesList && m_framesList->currentRow() >= 0;
@@ -2823,11 +3835,20 @@ bool MainWindow::isFrameContext() const
 
 MainWindow::UndoTarget MainWindow::currentUndoTarget() const
 {
+    if (m_canvasTabs && m_canvasTabs->currentWidget() == m_backgroundsCanvas) {
+        return UndoTarget::Background;
+    }
+    if (m_canvasTabs && m_canvasTabs->currentWidget() == m_spritesCanvas) {
+        return UndoTarget::Sprite;
+    }
     if (!isFrameContext()) {
         return UndoTarget::Sprite;
     }
     if (!m_showOriginalFrame) {
         return UndoTarget::Frame;
+    }
+    if (m_backgroundMaskMode) {
+        return UndoTarget::BackgroundMask;
     }
     if (m_maskMode != MaskMode::None && m_frameHoverArea == FrameHoverArea::Bottom) {
         return (m_maskMode == MaskMode::Dynamic) ? UndoTarget::DynMask : UndoTarget::CompMask;
@@ -2852,6 +3873,7 @@ void MainWindow::setHdMode(bool enabled)
     if (m_hdCreateButton) {
         m_hdCreateButton->setEnabled(index >= 0 && !hasHdFrame(index));
     }
+    ensureBackgroundDataSize();
     const cv::Mat* afterImage = activeFrameImage(index, false);
     const cv::Size afterSize = afterImage ? afterImage->size() : cv::Size();
     if (m_framesCanvas && beforeSize.width > 0 && afterSize.width > 0 &&
@@ -2932,6 +3954,83 @@ void MainWindow::refreshImageList()
 void MainWindow::refreshCounts()
 {
     m_countsLabel->setText(QString("Frames: %1, Sprites: %2").arg(m_state->frameCount()).arg(m_state->spriteCount()));
+}
+
+void MainWindow::refreshBackgroundList()
+{
+    if (!m_backgroundList) {
+        return;
+    }
+    QSignalBlocker blocker(m_backgroundList);
+    m_backgroundList->clear();
+
+    const int count = m_backgroundStore ? m_backgroundStore->count() : 0;
+    if (count <= 0) {
+        auto* item = new QListWidgetItem("No backgrounds");
+        item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
+        m_backgroundList->addItem(item);
+        if (m_backgroundsCanvas) {
+            m_backgroundsCanvas->setTitle("Backgrounds canvas (placeholder)");
+            m_backgroundsCanvas->setStatusText("No backgrounds loaded");
+            m_backgroundsCanvas->setImage(cv::Mat());
+        }
+        if (m_frameBackgroundAssign) {
+            QSignalBlocker blockAssign(m_frameBackgroundAssign);
+            m_frameBackgroundAssign->clear();
+            m_frameBackgroundAssign->addItem("None", -1);
+            m_frameBackgroundAssign->setEnabled(false);
+        }
+        return;
+    }
+
+    for (int i = 0; i < count; ++i) {
+        const cv::Mat* image = m_backgroundStore->at(i);
+        if (!image || image->empty()) {
+            continue;
+        }
+        cv::Mat rgb;
+        cv::Mat previewMat = EnsureBgr(*image);
+        cv::cvtColor(previewMat, rgb, cv::COLOR_BGR2RGB);
+        QImage previewImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888);
+        QPixmap pixmap = QPixmap::fromImage(previewImage.copy());
+        pixmap = pixmap.scaled(kPreviewIconWidth, kPreviewIconHeight, Qt::KeepAspectRatio, Qt::FastTransformation);
+
+        auto* item = new QListWidgetItem();
+        item->setIcon(QIcon(pixmap));
+        item->setText(QString("BG %1").arg(i));
+        item->setSizeHint(QSize(kPreviewItemWidth, kPreviewItemHeight));
+        item->setData(Qt::UserRole, i);
+        item->setData(Qt::UserRole + 1, QStringLiteral("background"));
+        m_backgroundList->addItem(item);
+    }
+
+    int targetRow = m_backgroundList->currentRow();
+    if (targetRow < 0) {
+        targetRow = m_lastBackgroundIndex;
+    }
+    if (targetRow >= 0 && targetRow < m_backgroundList->count()) {
+        m_backgroundList->setCurrentRow(targetRow);
+    } else if (m_backgroundList->count() > 0 && m_lastBackgroundIndex < 0) {
+        m_backgroundList->setCurrentRow(0);
+    }
+
+    if (m_frameBackgroundAssign) {
+        QSignalBlocker blockAssign(m_frameBackgroundAssign);
+        m_frameBackgroundAssign->clear();
+        m_frameBackgroundAssign->addItem("None", -1);
+        for (int i = 0; i < count; ++i) {
+            m_frameBackgroundAssign->addItem(QString("BG %1").arg(i), i);
+        }
+        m_frameBackgroundAssign->setEnabled(true);
+        const int currentFrame = m_framesList ? m_framesList->currentRow() : -1;
+        if (currentFrame >= 0 && currentFrame < static_cast<int>(m_frameBackgroundIds.size())) {
+            const uint16_t bgId = m_frameBackgroundIds[static_cast<std::size_t>(currentFrame)];
+            const int comboIndex = (bgId == 0xffff || bgId >= static_cast<uint16_t>(count))
+                ? 0
+                : static_cast<int>(bgId) + 1;
+            m_frameBackgroundAssign->setCurrentIndex(comboIndex);
+        }
+    }
 }
 
 void MainWindow::refreshFrameSpriteLists()
@@ -3043,6 +4142,11 @@ void MainWindow::updateSelectionFromLists()
         showImageForPath(m_imagesList->currentItem()->text());
         return;
     }
+    if (m_backgroundList && m_backgroundList->currentRow() >= 0) {
+        setInspectorSelection(QString("Background: %1").arg(m_backgroundList->currentItem()->text()));
+        showBackgroundAtIndex(m_backgroundList->currentRow());
+        return;
+    }
     setInspectorSelection("None");
     updateMetadataForFrame(-1);
     updateMetadataForSprite(-1);
@@ -3050,6 +4154,8 @@ void MainWindow::updateSelectionFromLists()
     if (m_maskMode == MaskMode::None) {
         m_framesCanvas->canvas()->clearPreviewImage();
     }
+
+    refreshBackgroundList();
 }
 
 void MainWindow::showImageForPath(const QString& path)
@@ -3093,6 +4199,11 @@ void MainWindow::showFrameAtIndex(int index)
             const int maskId = m_frameDynamicMaskIds[static_cast<std::size_t>(index)];
             m_frameDynamicMaskAssign->setCurrentIndex(maskId == 255 ? 0 : maskId + 1);
         }
+        if (m_frameBackgroundAssign && index >= 0 && index < static_cast<int>(m_frameBackgroundIds.size())) {
+            QSignalBlocker blockAssign(m_frameBackgroundAssign);
+            const uint16_t bgId = m_frameBackgroundIds[static_cast<std::size_t>(index)];
+            m_frameBackgroundAssign->setCurrentIndex(bgId == 0xffff ? 0 : static_cast<int>(bgId) + 1);
+        }
         if (m_shapeCompToggle && index >= 0 && index < static_cast<int>(m_frameShapeCompModes.size())) {
             QSignalBlocker blockShape(m_shapeCompToggle);
             const uint8_t value = m_frameShapeCompModes[static_cast<std::size_t>(index)];
@@ -3105,6 +4216,7 @@ void MainWindow::showFrameAtIndex(int index)
         if (m_framesCanvas) {
             m_framesCanvas->setHdButtonEnabled(hasHd);
             m_framesCanvas->setHdButtonChecked(m_useHdFrame);
+            m_framesCanvas->setBackgroundChecked(m_showBackgroundLayer);
         }
         if (m_hdCreateButton) {
             m_hdCreateButton->setEnabled(index >= 0 && !hasHd);
@@ -3132,6 +4244,17 @@ void MainWindow::showSpriteAtIndex(int index)
         m_spritesCanvas->setImage(*image);
     } else {
         m_spritesCanvas->setImage(cv::Mat());
+    }
+}
+
+void MainWindow::showBackgroundAtIndex(int index)
+{
+    const cv::Mat* image = m_backgroundStore ? m_backgroundStore->at(index) : nullptr;
+    if (image && !image->empty()) {
+        m_backgroundsCanvas->canvas()->clearPreviewImage();
+        m_backgroundsCanvas->setImage(*image);
+    } else {
+        m_backgroundsCanvas->setImage(cv::Mat());
     }
 }
 
@@ -3183,6 +4306,58 @@ void MainWindow::handleToolPress(bool isFrame, int x, int y, Qt::MouseButton but
         FrameLayout layout = BuildFrameLayout(*topFrame, reference);
         int localX = x;
         int localY = y;
+        m_frameDrawOnMask = false;
+        if (m_backgroundMaskMode) {
+            ensureBackgroundDataSize();
+            if (index >= static_cast<int>(m_frameBackgroundIds.size()) ||
+                m_frameBackgroundIds[static_cast<std::size_t>(index)] == 0xffff) {
+                statusBar()->showMessage("Assign a background to this frame before editing its mask.", 2000);
+                return;
+            }
+            if (y < 0 || y >= layout.topHeight ||
+                x < layout.topX || x >= layout.topX + layout.topWidth) {
+                return;
+            }
+            localX = x - layout.topX;
+            localY = y;
+            cv::Mat* mask = activeBackgroundMask(index);
+            if (!mask || mask->empty()) {
+                return;
+            }
+            if (m_drawTool == DrawTool::MagicFill || m_drawTool == DrawTool::Point) {
+                if (localX < 0 || localY < 0 || localX >= mask->cols || localY >= mask->rows) {
+                    return;
+                }
+                if (!m_frameUndoActive) {
+                    pushBackgroundMaskUndoSnapshot(index);
+                    m_frameUndoActive = true;
+                }
+                if (m_drawTool == DrawTool::MagicFill) {
+                    applyMaskFill(*mask, localX, localY, button == Qt::RightButton);
+                } else {
+                    applyToolToMask(*mask,
+                                    DrawTool::Point,
+                                    QPoint(localX, localY),
+                                    QPoint(localX, localY),
+                                    button == Qt::RightButton);
+                }
+                updateFrameCanvasImage(index);
+                updateFramePreviewAt(index);
+                updateMaskPreviewForFrame(index);
+                return;
+            }
+            if (m_drawTool == DrawTool::ColorPicker) {
+                return;
+            }
+            if (!m_frameUndoActive) {
+                pushBackgroundMaskUndoSnapshot(index);
+                m_frameUndoActive = true;
+            }
+            m_frameStart = QPoint(localX, localY);
+            m_frameHasStart = true;
+            m_frameStartButton = button;
+            return;
+        }
         if (!m_showOriginalFrame) {
             m_frameDrawOnMask = false;
         } else if (m_maskMode != MaskMode::None) {
@@ -3324,6 +4499,64 @@ void MainWindow::handleToolDrag(bool isFrame, int x, int y, Qt::MouseButtons but
     if (!m_drawPointEnabled) {
         return;
     }
+    if (isFrame && m_backgroundMaskMode) {
+        const int index = m_framesList->currentRow();
+        if (index < 0) {
+            return;
+        }
+        const cv::Mat* frameImage = activeFrameImage(index, false);
+        if (!frameImage || frameImage->empty()) {
+            return;
+        }
+        cv::Mat reference = buildOriginalPreviewForIndex(index);
+        FrameLayout layout = BuildFrameLayout(*frameImage, reference);
+        if (y < 0 || y >= layout.topHeight ||
+            x < layout.topX || x >= layout.topX + layout.topWidth) {
+            return;
+        }
+        x -= layout.topX;
+        cv::Mat* mask = activeBackgroundMask(index);
+        if (!mask || mask->empty()) {
+            return;
+        }
+        if (m_drawTool == DrawTool::Point) {
+            const bool erase = buttons.testFlag(Qt::RightButton);
+            applyToolToMask(*mask, DrawTool::Point, QPoint(x, y), QPoint(x, y), erase);
+            updateFrameCanvasImage(index);
+            updateFramePreviewAt(index);
+            return;
+        }
+        if (!m_frameHasStart) {
+            return;
+        }
+        cv::Mat previewMask = mask->clone();
+        const bool erase = buttons.testFlag(Qt::RightButton);
+        applyToolToMask(previewMask, m_drawTool, m_frameStart, QPoint(x, y), erase);
+        cv::Mat base = m_showBackgroundLayer
+            ? applyBackgroundComposite(index, *frameImage, m_useHdFrame)
+            : EnsureBgr(*frameImage);
+        cv::Mat topPreview = buildMaskPreview(base, previewMask, cv::Vec3b(60, 200, 120));
+        QRect outlineRegion;
+        if (m_showOriginalFrame) {
+            cv::Mat original = buildOriginalFrame(reference);
+            cv::Mat displayOriginal = BuildDisplayOriginal(original, topPreview.size());
+            FrameLayout layout = BuildFrameLayout(topPreview, displayOriginal);
+            outlineRegion = QRect(layout.topX, 0, layout.topWidth, layout.topHeight);
+        }
+        m_framesCanvas->canvas()->setMaskOutline(previewMask, QColor(120, 200, 60), outlineRegion);
+        if (m_showOriginalFrame) {
+            cv::Mat original = buildOriginalFrame(reference);
+            cv::Mat displayOriginal = BuildDisplayOriginal(original, topPreview.size());
+            const QColor gap = m_framesCanvas->palette().color(QPalette::Window);
+            cv::Mat combined = buildCombinedFrame(topPreview,
+                                                  displayOriginal,
+                                                  cv::Scalar(gap.blue(), gap.green(), gap.red()));
+            m_framesCanvas->canvas()->setPreviewImage(combined);
+        } else {
+            m_framesCanvas->canvas()->setPreviewImage(topPreview);
+        }
+        return;
+    }
     if (isFrame && m_frameDrawOnMask) {
         const int index = m_framesList->currentRow();
         if (index < 0) {
@@ -3379,8 +4612,10 @@ void MainWindow::handleToolDrag(bool isFrame, int x, int y, Qt::MouseButtons but
             applyToolToMask(*mask, DrawTool::Point, QPoint(x, y), QPoint(x, y), erase);
             if (m_maskMode == MaskMode::Comparison) {
                 updateMaskPreviewIcons();
+                m_framesCanvas->canvas()->setMaskOutline(*mask, QColor(200, 0, 200));
             } else {
                 updateDynamicMaskPreviewIcons();
+                m_framesCanvas->canvas()->setMaskOutline(*mask, QColor(255, 200, 0));
             }
             updateMaskPreviewForFrame(index);
             return;
@@ -3394,8 +4629,23 @@ void MainWindow::handleToolDrag(bool isFrame, int x, int y, Qt::MouseButtons but
         if (const cv::Mat* frame = activeFrameImage(index, false)) {
             const QColor gap = m_framesCanvas->palette().color(QPalette::Window);
             const cv::Scalar gapColor(gap.blue(), gap.green(), gap.red());
-            cv::Mat preview = buildCombinedMaskPreview(*frame, reference, previewMask, color, gapColor);
+            const cv::Mat base = m_showBackgroundLayer
+                ? applyBackgroundComposite(index, *frame, m_useHdFrame)
+                : EnsureBgr(*frame);
+            cv::Mat preview = buildCombinedMaskPreview(base, reference, previewMask, color, gapColor);
             m_framesCanvas->canvas()->setPreviewImage(preview);
+            QRect outlineRegion;
+            if (m_showOriginalFrame) {
+                outlineRegion = QRect(layout.bottomX,
+                                      layout.topHeight + kFrameGapPixels,
+                                      layout.bottomWidth,
+                                      layout.bottomHeight);
+            }
+            if (m_maskMode == MaskMode::Comparison) {
+                m_framesCanvas->canvas()->setMaskOutline(previewMask, QColor(200, 0, 200), outlineRegion);
+            } else {
+                m_framesCanvas->canvas()->setMaskOutline(previewMask, QColor(255, 200, 0), outlineRegion);
+            }
         }
         return;
     }
@@ -3437,12 +4687,15 @@ void MainWindow::handleToolDrag(bool isFrame, int x, int y, Qt::MouseButtons but
     if (isFrame) {
         cv::Mat reference = buildOriginalPreviewForIndex(m_framesList->currentRow());
         cv::Mat original = m_showOriginalFrame ? buildOriginalFrame(reference) : cv::Mat();
+        cv::Mat composed = m_showBackgroundLayer
+            ? applyBackgroundComposite(m_framesList->currentRow(), preview, m_useHdFrame)
+            : EnsureBgr(preview);
         if (original.empty()) {
-            m_framesCanvas->canvas()->setPreviewImage(preview);
+            m_framesCanvas->canvas()->setPreviewImage(composed);
         } else {
             const QColor gap = m_framesCanvas->palette().color(QPalette::Window);
-            cv::Mat displayOriginal = BuildDisplayOriginal(original, preview.size());
-            cv::Mat combined = buildCombinedFrame(preview,
+            cv::Mat displayOriginal = BuildDisplayOriginal(original, composed.size());
+            cv::Mat combined = buildCombinedFrame(composed,
                                                   displayOriginal,
                                                   cv::Scalar(gap.blue(), gap.green(), gap.red()));
             m_framesCanvas->canvas()->setPreviewImage(combined);
@@ -3455,6 +4708,49 @@ void MainWindow::handleToolDrag(bool isFrame, int x, int y, Qt::MouseButtons but
 void MainWindow::handleToolRelease(bool isFrame, int x, int y, Qt::MouseButton button)
 {
     if (!m_drawPointEnabled) {
+        return;
+    }
+    if (isFrame && m_backgroundMaskMode) {
+        if (m_drawTool == DrawTool::Point ||
+            m_drawTool == DrawTool::ColorPicker ||
+            m_drawTool == DrawTool::MagicFill) {
+            m_frameUndoActive = false;
+            return;
+        }
+        if (!m_frameHasStart) {
+            return;
+        }
+        const int index = m_framesList->currentRow();
+        if (index < 0) {
+            m_frameHasStart = false;
+            return;
+        }
+        const cv::Mat* frameImage = activeFrameImage(index, false);
+        if (!frameImage || frameImage->empty()) {
+            m_frameHasStart = false;
+            return;
+        }
+        cv::Mat reference = buildOriginalPreviewForIndex(index);
+        FrameLayout layout = BuildFrameLayout(*frameImage, reference);
+        if (y < 0 || y >= layout.topHeight ||
+            x < layout.topX || x >= layout.topX + layout.topWidth) {
+            m_frameHasStart = false;
+            return;
+        }
+        x -= layout.topX;
+        cv::Mat* mask = activeBackgroundMask(index);
+        if (!mask || mask->empty()) {
+            m_frameHasStart = false;
+            return;
+        }
+        const bool erase = (m_frameStartButton == Qt::RightButton || button == Qt::RightButton);
+        applyToolToMask(*mask, m_drawTool, m_frameStart, QPoint(x, y), erase);
+        m_frameHasStart = false;
+        m_framesCanvas->canvas()->clearPreviewImage();
+        updateFrameCanvasImage(index);
+        updateFramePreviewAt(index);
+        updateMaskPreviewForFrame(index);
+        m_frameUndoActive = false;
         return;
     }
     if (isFrame && m_frameDrawOnMask) {
@@ -3584,6 +4880,100 @@ void MainWindow::handleToolRelease(bool isFrame, int x, int y, Qt::MouseButton b
         m_spritesCanvas->setImage(*image);
         m_spriteUndoActive = false;
     }
+}
+
+void MainWindow::handleBackgroundToolPress(int x, int y, Qt::MouseButton button)
+{
+    if (!m_drawPointEnabled || !m_backgroundStore) {
+        return;
+    }
+    const int index = m_backgroundList ? m_backgroundList->currentRow() : -1;
+    if (index < 0) {
+        return;
+    }
+    cv::Mat* image = m_backgroundStore->atMutable(index);
+    if (!image || image->empty()) {
+        return;
+    }
+    if (m_drawTool != DrawTool::ColorPicker) {
+        if (!m_backgroundUndoActive) {
+            pushBackgroundUndoSnapshot(index);
+            m_backgroundUndoActive = true;
+        }
+    }
+    if (m_drawTool == DrawTool::Point) {
+        applyToolToImage(*image, DrawTool::Point, QPoint(x, y), QPoint(x, y), button == Qt::RightButton);
+    } else if (m_drawTool == DrawTool::ColorPicker) {
+        pickColorFromImage(*image, x, y);
+    } else if (m_drawTool == DrawTool::MagicFill) {
+        applyMagicFill(*image, x, y);
+    } else {
+        m_spriteStart = QPoint(x, y);
+        m_spriteHasStart = true;
+        m_spriteStartButton = button;
+    }
+    updateBackgroundCanvasImage(index);
+}
+
+void MainWindow::handleBackgroundToolDrag(int x, int y, Qt::MouseButtons buttons)
+{
+    if (!m_drawPointEnabled || !m_backgroundStore) {
+        return;
+    }
+    const int index = m_backgroundList ? m_backgroundList->currentRow() : -1;
+    if (index < 0) {
+        return;
+    }
+    cv::Mat* image = m_backgroundStore->atMutable(index);
+    if (!image || image->empty()) {
+        return;
+    }
+    if (m_drawTool == DrawTool::Point) {
+        const bool erase = buttons.testFlag(Qt::RightButton);
+        applyToolToImage(*image, DrawTool::Point, QPoint(x, y), QPoint(x, y), erase);
+        updateBackgroundCanvasImage(index);
+        return;
+    }
+    if (!m_spriteHasStart) {
+        return;
+    }
+    const QPoint start = m_spriteStart;
+    const bool erase = buttons.testFlag(Qt::RightButton);
+    cv::Mat preview = image->clone();
+    applyToolToImage(preview, m_drawTool, start, QPoint(x, y), erase);
+    m_backgroundsCanvas->canvas()->setPreviewImage(preview);
+}
+
+void MainWindow::handleBackgroundToolRelease(int x, int y, Qt::MouseButton button)
+{
+    if (!m_drawPointEnabled || !m_backgroundStore) {
+        return;
+    }
+    const int index = m_backgroundList ? m_backgroundList->currentRow() : -1;
+    if (index < 0) {
+        return;
+    }
+    cv::Mat* image = m_backgroundStore->atMutable(index);
+    if (!image || image->empty()) {
+        return;
+    }
+    if (m_drawTool == DrawTool::Point ||
+        m_drawTool == DrawTool::ColorPicker ||
+        m_drawTool == DrawTool::MagicFill) {
+        m_backgroundUndoActive = false;
+        return;
+    }
+    if (!m_spriteHasStart) {
+        return;
+    }
+    const QPoint start = m_spriteStart;
+    const Qt::MouseButton startButton = m_spriteStartButton;
+    m_spriteHasStart = false;
+    const bool erase = (startButton == Qt::RightButton || button == Qt::RightButton);
+    applyToolToImage(*image, m_drawTool, start, QPoint(x, y), erase);
+    m_backgroundsCanvas->canvas()->clearPreviewImage();
+    updateBackgroundCanvasImage(index);
+    m_backgroundUndoActive = false;
 }
 
 cv::Scalar MainWindow::currentDrawColor(bool erase) const

@@ -56,8 +56,17 @@ private:
     enum class UndoTarget {
         Frame,
         Sprite,
+        Background,
         CompMask,
-        DynMask
+        DynMask,
+        BackgroundMask
+    };
+    enum class PreviewFilterKind {
+        None,
+        Mask,
+        DynamicMask,
+        Background,
+        Sprite
     };
 
     void updateWindowTitle();
@@ -65,11 +74,13 @@ private:
     void refreshImageList();
     void refreshCounts();
     void refreshFrameSpriteLists();
+    void refreshBackgroundList();
     void setInspectorSelection(const QString& label);
     void updateSelectionFromLists();
     void showImageForPath(const QString& path);
     void showFrameAtIndex(int index);
     void showSpriteAtIndex(int index);
+    void showBackgroundAtIndex(int index);
     void populateBookmarks(const std::vector<uint32_t>& frameStarts,
                            const std::vector<std::string>& names);
     void applyFrameFilter(const QString& text);
@@ -83,17 +94,35 @@ private:
     LegacyProject buildLegacyProject(const QString& baseName) const;
     void refreshFramePreviews();
     void updateFramePreviewAt(int index);
+    void refreshFramePreviewSelection();
+    int previewRowForFrame(int index) const;
+    PreviewFilterKind currentPreviewFilterKind() const;
+    void updatePreviewFilterState();
+    std::vector<int> buildPreviewFrameIndices() const;
+    void refreshAllPreviews();
     cv::Mat buildPreviewFrame(const cv::Mat& colorized,
                               const cv::Mat& reference,
                               const cv::Mat& hdFrame) const;
+    cv::Mat buildReferenceForSize(int index, const cv::Size& target) const;
+    cv::Mat applyBackgroundComposite(int index, const cv::Mat& frame, bool useHd) const;
+    cv::Mat applyBackgroundCompositeWithMask(int index,
+                                             const cv::Mat& frame,
+                                             const cv::Mat& mask,
+                                             bool useHd) const;
     void resetUndoStacks();
     void ensureUndoStacksSize();
     void pushUndoSnapshot(bool isFrame, int index);
     void pushMaskUndoSnapshot(MaskMode mode, int index);
+    void pushBackgroundMaskUndoSnapshot(int index);
+    void pushBackgroundUndoSnapshot(int index);
     bool undoEdit(bool isFrame);
     bool redoEdit(bool isFrame);
+    bool undoBackgroundEdit();
+    bool redoBackgroundEdit();
     bool undoMaskEdit(MaskMode mode);
     bool redoMaskEdit(MaskMode mode);
+    bool undoBackgroundMaskEdit();
+    bool redoBackgroundMaskEdit();
     void updateUndoActions();
     bool isFrameContext() const;
     UndoTarget currentUndoTarget() const;
@@ -101,6 +130,7 @@ private:
     bool hasHdFrame(int index) const;
     cv::Mat* activeFrameImage(int index, bool forEdit);
     void ensureMaskDataSize();
+    void ensureBackgroundDataSize();
     cv::Mat buildReferenceFrame(const cv::Mat& source) const;
     cv::Mat buildMaskPreview(const cv::Mat& frame, const cv::Mat& mask, const cv::Vec3b& color) const;
     cv::Mat buildOriginalFrame(const cv::Mat& reference) const;
@@ -125,18 +155,23 @@ private:
     void applyMaskListOrder();
     void applyDynamicMaskListOrder();
     void updateFrameCanvasImage(int index);
+    void updateBackgroundCanvasImage(int index);
     int currentFrameMaskId() const;
     int currentFrameDynamicMaskId() const;
     void setCurrentFrameMaskId(int id);
     void setCurrentFrameDynamicMaskId(int id);
     cv::Mat* activeComparisonMask();
     cv::Mat* activeDynamicMask();
+    cv::Mat* activeBackgroundMask(int index);
     void swapMaskEntries(int a, int b);
     void swapDynamicMaskEntries(int a, int b);
     void persistRecentFiles();
     void handleToolPress(bool isFrame, int x, int y, Qt::MouseButton button);
     void handleToolDrag(bool isFrame, int x, int y, Qt::MouseButtons buttons);
     void handleToolRelease(bool isFrame, int x, int y, Qt::MouseButton button);
+    void handleBackgroundToolPress(int x, int y, Qt::MouseButton button);
+    void handleBackgroundToolDrag(int x, int y, Qt::MouseButtons buttons);
+    void handleBackgroundToolRelease(int x, int y, Qt::MouseButton button);
     void applyToolToImage(cv::Mat& image, DrawTool tool, const QPoint& start, const QPoint& end, bool erase);
     void applyMagicFill(cv::Mat& image, int x, int y);
     void pickColorFromImage(const cv::Mat& image, int x, int y);
@@ -146,15 +181,20 @@ private:
     class CanvasWidget* m_framesCanvas;
     class CanvasWidget* m_spritesCanvas;
     class CanvasWidget* m_imagesCanvas;
+    class CanvasWidget* m_backgroundsCanvas;
     class QLabel* m_toolsLabel;
     class QLabel* m_inspectorLabel;
     class QMenu* m_recentMenu;
     class QListWidget* m_framesList;
     class QListWidget* m_spritesList;
     class QListWidget* m_imagesList;
+    class QListWidget* m_backgroundList;
     class QLineEdit* m_frameFilter;
     class QLineEdit* m_spriteFilter;
     class QListWidget* m_framePreviewList;
+    class QToolButton* m_previewFilterButton;
+    class QToolButton* m_previewFilterClearButton;
+    class QToolButton* m_previewRefreshButton;
     class QListWidget* m_maskList;
     class QToolButton* m_maskMoveUp;
     class QToolButton* m_maskMoveDown;
@@ -165,12 +205,18 @@ private:
     class QPushButton* m_dynamicMaskClearButton;
     class QComboBox* m_frameMaskAssign;
     class QComboBox* m_frameDynamicMaskAssign;
+    class QComboBox* m_frameBackgroundAssign;
     class QCheckBox* m_shapeCompToggle;
     class QComboBox* m_hdSourceCombo;
     class QComboBox* m_hdScaleCombo;
     class QPushButton* m_hdCreateButton;
     class QPushButton* m_hdDeleteButton;
     class QTabWidget* m_canvasTabs;
+    class QTabWidget* m_toolsTabs;
+    class QWidget* m_masksTab;
+    class QWidget* m_dynamicMasksTab;
+    class QWidget* m_backgroundsTab;
+    class QWidget* m_spritesTab;
     class QComboBox* m_bookmarksCombo;
     class QSpinBox* m_frameJump;
     class QLabel* m_projectLabel;
@@ -178,10 +224,12 @@ private:
     class QLabel* m_selectionLabel;
     class QLabel* m_frameMetaLabel;
     class QLabel* m_spriteMetaLabel;
+    class QLabel* m_coordLabel;
     class ProjectState* m_state;
     class ImageStore* m_imageStore;
     class IndexedImageStore* m_frameStore;
     class IndexedImageStore* m_spriteStore;
+    class IndexedImageStore* m_backgroundStore;
 
     std::vector<uint32_t> m_frameDurations;
     std::vector<std::string> m_spriteNames;
@@ -190,12 +238,19 @@ private:
     std::vector<UndoStack> m_frameUndoStacks;
     std::vector<UndoStack> m_frameHdUndoStacks;
     std::vector<UndoStack> m_spriteUndoStacks;
+    std::vector<UndoStack> m_backgroundUndoStacks;
     std::vector<UndoStack> m_compMaskUndoStacks;
     std::vector<UndoStack> m_dynMaskUndoStacks;
+    std::vector<UndoStack> m_backgroundMaskUndoStacks;
     std::vector<cv::Mat> m_frameRefs;
     std::vector<std::vector<uint16_t>> m_frameDynamicColors;
     std::vector<cv::Mat> m_compMasks;
     std::vector<cv::Mat> m_dynamicMasks;
+    std::vector<cv::Mat> m_backgroundFramesX;
+    std::vector<uint8_t> m_backgroundExtraFlags;
+    std::vector<uint16_t> m_frameBackgroundIds;
+    std::vector<cv::Mat> m_frameBackgroundMasks;
+    std::vector<cv::Mat> m_frameBackgroundMasksX;
     std::vector<cv::Mat> m_frameExtraFrames;
     std::vector<uint8_t> m_frameExtraFlags;
     std::vector<uint8_t> m_frameCompMaskIds;
@@ -206,12 +261,18 @@ private:
     MaskMode m_maskMode = MaskMode::None;
     bool m_frameUndoActive = false;
     bool m_spriteUndoActive = false;
+    bool m_backgroundUndoActive = false;
     bool m_maskReorderActive = false;
     bool m_dynamicMaskReorderActive = false;
     bool m_showOriginalFrame = true;
     bool m_frameDrawOnMask = false;
+    bool m_backgroundMaskMode = false;
     FrameHoverArea m_frameHoverArea = FrameHoverArea::None;
     bool m_useHdFrame = false;
+    bool m_showBackgroundLayer = true;
+    int m_lastBackgroundIndex = -1;
+    bool m_previewFilterEnabled = false;
+    PreviewFilterKind m_previewFilterKind = PreviewFilterKind::None;
     class QAction* m_undoAction;
     class QAction* m_redoAction;
     DrawTool m_drawTool = DrawTool::Point;

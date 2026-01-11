@@ -18,6 +18,12 @@ struct LegacyProject {
     std::vector<cv::Mat> frames_x;
     std::vector<uint8_t> frame_extra_flags;
     std::vector<cv::Mat> sprites;
+    std::vector<cv::Mat> background_frames;
+    std::vector<cv::Mat> background_frames_x;
+    std::vector<uint8_t> background_extra_flags;
+    std::vector<uint16_t> background_ids;
+    std::vector<cv::Mat> background_masks;
+    std::vector<cv::Mat> background_masks_x;
     std::vector<cv::Mat> comp_masks;
     std::vector<uint8_t> frame_comp_mask_ids;
     std::vector<uint8_t> frame_shape_comp_modes;

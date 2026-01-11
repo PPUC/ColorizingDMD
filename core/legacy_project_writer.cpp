@@ -122,7 +122,7 @@ bool SaveLegacyProject(const std::string& crom_path,
     const uint32_t n_sprites = static_cast<uint32_t>(project.sprites.size());
     const uint32_t no_colors = project.no_colors > 0 ? project.no_colors : 64;
     uint32_t n_comp_masks = 0;
-    const uint16_t n_backgrounds = 0;
+    const uint16_t n_backgrounds = static_cast<uint16_t>(project.background_frames.size());
     const uint32_t length_header = 14 * sizeof(uint32_t);
 
     const std::size_t mask_pixels = static_cast<std::size_t>(frame_width) * frame_height;
@@ -156,6 +156,15 @@ bool SaveLegacyProject(const std::string& crom_path,
             if (!frame_x.empty()) {
                 frame_width_x = static_cast<uint32_t>(frame_x.cols);
                 frame_height_x = static_cast<uint32_t>(frame_x.rows);
+                break;
+            }
+        }
+    }
+    if (!project.background_frames_x.empty()) {
+        for (const auto& bg_x : project.background_frames_x) {
+            if (!bg_x.empty()) {
+                frame_width_x = static_cast<uint32_t>(bg_x.cols);
+                frame_height_x = static_cast<uint32_t>(bg_x.rows);
                 break;
             }
         }
@@ -214,6 +223,11 @@ bool SaveLegacyProject(const std::string& crom_path,
     std::vector<uint16_t> sprite_colored(n_sprites * MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT, 0);
     std::vector<uint8_t> sprite_mask_x(sprite_original.size(), 255);
     std::vector<uint16_t> sprite_colored_x(sprite_colored.size(), 0);
+    std::vector<uint8_t> background_flags(n_backgrounds, 0);
+    std::vector<uint16_t> background_frames_565(static_cast<std::size_t>(n_backgrounds) *
+                                                frame_width * frame_height, 0);
+    std::vector<uint16_t> background_frames_x_565(static_cast<std::size_t>(n_backgrounds) *
+                                                  frame_width_x * frame_height_x, 0);
 
     if (!project.frame_comp_mask_ids.empty()) {
         for (std::size_t i = 0; i < std::min(project.frame_comp_mask_ids.size(),
@@ -285,6 +299,36 @@ bool SaveLegacyProject(const std::string& crom_path,
             for (uint32_t x = 0; x < MAX_SPRITE_WIDTH; ++x) {
                 sprite_original[offset + y * MAX_SPRITE_WIDTH + x] = 0;
                 sprite_colored[offset + y * MAX_SPRITE_WIDTH + x] = BgrToRgb565(row[x]);
+            }
+        }
+    }
+
+    for (uint32_t index = 0; index < n_backgrounds; ++index) {
+        if (index < project.background_extra_flags.size()) {
+            background_flags[index] = project.background_extra_flags[index];
+        }
+        if (index < project.background_frames.size()) {
+            cv::Mat bg = EnsureBgr(project.background_frames[index], cv::Size(frame_width, frame_height));
+            const std::size_t offset = static_cast<std::size_t>(index) * frame_width * frame_height;
+            for (uint32_t y = 0; y < frame_height; ++y) {
+                const cv::Vec3b* row = bg.ptr<cv::Vec3b>(static_cast<int>(y));
+                for (uint32_t x = 0; x < frame_width; ++x) {
+                    background_frames_565[offset + y * frame_width + x] = BgrToRgb565(row[x]);
+                }
+            }
+        }
+        if (index < project.background_frames_x.size()) {
+            const cv::Mat& bgx = project.background_frames_x[index];
+            if (!bgx.empty()) {
+                background_flags[index] = 1;
+                cv::Mat bgX = EnsureBgr(bgx, cv::Size(frame_width_x, frame_height_x));
+                const std::size_t offset_x = static_cast<std::size_t>(index) * frame_width_x * frame_height_x;
+                for (uint32_t y = 0; y < frame_height_x; ++y) {
+                    const cv::Vec3b* row = bgX.ptr<cv::Vec3b>(static_cast<int>(y));
+                    for (uint32_t x = 0; x < frame_width_x; ++x) {
+                        background_frames_x_565[offset_x + y * frame_width_x + x] = BgrToRgb565(row[x]);
+                    }
+                }
             }
         }
     }
@@ -369,7 +413,36 @@ bool SaveLegacyProject(const std::string& crom_path,
     std::vector<uint16_t> background_ids(n_frames, 0xffff);
     std::vector<uint8_t> background_mask(n_frames * frame_width * frame_height, 0);
     std::vector<uint8_t> background_mask_x(n_frames * frame_width_x * frame_height_x, 0);
-    if (!WriteExact(crom, background_ids.data(), background_ids.size() * sizeof(uint16_t)) ||
+    if (!project.background_ids.empty()) {
+        for (std::size_t i = 0; i < std::min(project.background_ids.size(),
+                                             static_cast<std::size_t>(background_ids.size())); ++i) {
+            background_ids[i] = project.background_ids[i];
+        }
+    }
+    if (!project.background_masks.empty()) {
+        const std::size_t mask_pixels = static_cast<std::size_t>(frame_width) * frame_height;
+        for (std::size_t i = 0; i < std::min(project.background_masks.size(),
+                                             static_cast<std::size_t>(n_frames)); ++i) {
+            const cv::Mat& mask = project.background_masks[i];
+            if (!mask.empty() && mask.rows == static_cast<int>(frame_height) && mask.cols == static_cast<int>(frame_width)) {
+                std::memcpy(background_mask.data() + i * mask_pixels, mask.data, mask_pixels);
+            }
+        }
+    }
+    if (!project.background_masks_x.empty()) {
+        const std::size_t mask_pixels_x = static_cast<std::size_t>(frame_width_x) * frame_height_x;
+        for (std::size_t i = 0; i < std::min(project.background_masks_x.size(),
+                                             static_cast<std::size_t>(n_frames)); ++i) {
+            const cv::Mat& mask = project.background_masks_x[i];
+            if (!mask.empty() && mask.rows == static_cast<int>(frame_height_x) && mask.cols == static_cast<int>(frame_width_x)) {
+                std::memcpy(background_mask_x.data() + i * mask_pixels_x, mask.data, mask_pixels_x);
+            }
+        }
+    }
+    if (!WriteExact(crom, background_flags.data(), background_flags.size()) ||
+        !WriteExact(crom, background_frames_565.data(), background_frames_565.size() * sizeof(uint16_t)) ||
+        !WriteExact(crom, background_frames_x_565.data(), background_frames_x_565.size() * sizeof(uint16_t)) ||
+        !WriteExact(crom, background_ids.data(), background_ids.size() * sizeof(uint16_t)) ||
         !WriteExact(crom, background_mask.data(), background_mask.size()) ||
         !WriteExact(crom, background_mask_x.data(), background_mask_x.size())) {
         if (error) {

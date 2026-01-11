@@ -15,8 +15,10 @@ CanvasWidget::CanvasWidget(const QString& title, QWidget* parent)
     , m_fitButton(new QToolButton(m_canvas))
     , m_gridButton(new QToolButton(m_canvas))
     , m_originalButton(new QToolButton(m_canvas))
+    , m_backgroundButton(new QToolButton(m_canvas))
     , m_maskButton(new QToolButton(m_canvas))
     , m_dynamicButton(new QToolButton(m_canvas))
+    , m_backgroundMaskButton(new QToolButton(m_canvas))
     , m_hdButton(new QToolButton(m_canvas))
 {
     auto* layout = new QVBoxLayout(this);
@@ -48,6 +50,14 @@ CanvasWidget::CanvasWidget(const QString& title, QWidget* parent)
     m_originalButton->setCursor(Qt::PointingHandCursor);
     connect(m_originalButton, &QToolButton::toggled, this, &CanvasWidget::originalToggled);
 
+    m_backgroundButton->setText("BG");
+    m_backgroundButton->setCheckable(true);
+    m_backgroundButton->setChecked(true);
+    m_backgroundButton->setAutoRaise(true);
+    m_backgroundButton->setToolTip("Toggle background");
+    m_backgroundButton->setCursor(Qt::PointingHandCursor);
+    connect(m_backgroundButton, &QToolButton::toggled, this, &CanvasWidget::backgroundToggled);
+
     m_maskButton->setText("Mask");
     m_maskButton->setCheckable(true);
     m_maskButton->setAutoRaise(true);
@@ -61,6 +71,13 @@ CanvasWidget::CanvasWidget(const QString& title, QWidget* parent)
     m_dynamicButton->setToolTip("Edit dynamic mask");
     m_dynamicButton->setCursor(Qt::PointingHandCursor);
     connect(m_dynamicButton, &QToolButton::toggled, this, &CanvasWidget::dynamicToggled);
+
+    m_backgroundMaskButton->setText("BG Mask");
+    m_backgroundMaskButton->setCheckable(true);
+    m_backgroundMaskButton->setAutoRaise(true);
+    m_backgroundMaskButton->setToolTip("Edit background mask");
+    m_backgroundMaskButton->setCursor(Qt::PointingHandCursor);
+    connect(m_backgroundMaskButton, &QToolButton::toggled, this, &CanvasWidget::backgroundMaskToggled);
 
     m_hdButton->setText("HD");
     m_hdButton->setCheckable(true);
@@ -129,6 +146,56 @@ void CanvasWidget::setMaskButtonsEnabled(bool enabled)
     m_dynamicButton->setEnabled(enabled);
 }
 
+void CanvasWidget::setBackgroundMaskChecked(bool enabled)
+{
+    if (!m_backgroundMaskButton) {
+        return;
+    }
+    QSignalBlocker blocker(m_backgroundMaskButton);
+    m_backgroundMaskButton->setChecked(enabled);
+}
+
+void CanvasWidget::setBackgroundMaskEnabled(bool enabled)
+{
+    if (!m_backgroundMaskButton) {
+        return;
+    }
+    m_backgroundMaskButton->setEnabled(enabled);
+}
+
+void CanvasWidget::setBackgroundMaskVisible(bool visible)
+{
+    if (!m_backgroundMaskButton) {
+        return;
+    }
+    m_backgroundMaskButton->setVisible(visible);
+}
+
+void CanvasWidget::setBackgroundChecked(bool enabled)
+{
+    if (!m_backgroundButton) {
+        return;
+    }
+    QSignalBlocker blocker(m_backgroundButton);
+    m_backgroundButton->setChecked(enabled);
+}
+
+void CanvasWidget::setBackgroundEnabled(bool enabled)
+{
+    if (!m_backgroundButton) {
+        return;
+    }
+    m_backgroundButton->setEnabled(enabled);
+}
+
+void CanvasWidget::setBackgroundVisible(bool visible)
+{
+    if (!m_backgroundButton) {
+        return;
+    }
+    m_backgroundButton->setVisible(visible);
+}
+
 void CanvasWidget::setHdButtonChecked(bool enabled)
 {
     if (!m_hdButton) {
@@ -149,7 +216,8 @@ void CanvasWidget::setHdButtonEnabled(bool enabled)
 void CanvasWidget::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
-    if (!m_fitButton || !m_gridButton || !m_originalButton || !m_maskButton || !m_dynamicButton || !m_hdButton) {
+    if (!m_fitButton || !m_gridButton || !m_originalButton || !m_backgroundButton ||
+        !m_maskButton || !m_dynamicButton || !m_hdButton) {
         return;
     }
     const int margin = 8;
@@ -169,8 +237,13 @@ void CanvasWidget::resizeEvent(QResizeEvent* event)
     m_originalButton->move(originalX, y);
     m_originalButton->raise();
 
+    const QSize backgroundSize = m_backgroundButton->sizeHint();
+    const int backgroundX = originalX - backgroundSize.width() - 6;
+    m_backgroundButton->move(backgroundX, y);
+    m_backgroundButton->raise();
+
     const QSize dynamicSize = m_dynamicButton->sizeHint();
-    const int dynamicX = originalX - dynamicSize.width() - 6;
+    const int dynamicX = backgroundX - dynamicSize.width() - 6;
     m_dynamicButton->move(dynamicX, y);
     m_dynamicButton->raise();
 
@@ -179,8 +252,13 @@ void CanvasWidget::resizeEvent(QResizeEvent* event)
     m_maskButton->move(maskX, y);
     m_maskButton->raise();
 
+    const QSize bgSize = m_backgroundMaskButton->sizeHint();
+    const int bgX = maskX - bgSize.width() - 6;
+    m_backgroundMaskButton->move(bgX, y);
+    m_backgroundMaskButton->raise();
+
     const QSize hdSize = m_hdButton->sizeHint();
-    const int hdX = maskX - hdSize.width() - 6;
+    const int hdX = bgX - hdSize.width() - 6;
     m_hdButton->move(hdX, y);
     m_hdButton->raise();
 }

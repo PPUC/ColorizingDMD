@@ -516,6 +516,12 @@ bool LoadLegacyProject(const std::string& path,
 
     std::vector<uint16_t> sprite_dyna_cols;
     std::vector<uint8_t> sprite_dyna_masks;
+    std::vector<uint8_t> background_flags;
+    std::vector<uint16_t> background_frames_565;
+    std::vector<uint16_t> background_frames_x_565;
+    std::vector<uint16_t> background_ids;
+    std::vector<uint8_t> background_masks;
+    std::vector<uint8_t> background_masks_x;
 
     if (length_header >= 9 * sizeof(uint32_t)) {
         const std::size_t rotations_bytes =
@@ -557,20 +563,36 @@ bool LoadLegacyProject(const std::string& path,
                         return false;
                     }
                     if (length_header >= 13 * sizeof(uint32_t)) {
-                        const std::size_t background_flags = static_cast<std::size_t>(n_backgrounds);
+                        const std::size_t background_flags_bytes = static_cast<std::size_t>(n_backgrounds);
                         const std::size_t background_frames =
-                            static_cast<std::size_t>(n_backgrounds) * frame_width * frame_height * sizeof(uint16_t);
+                            static_cast<std::size_t>(n_backgrounds) * frame_width * frame_height;
                         const std::size_t background_frames_x =
-                            static_cast<std::size_t>(n_backgrounds) * frame_width_x * frame_height_x * sizeof(uint16_t);
-                        const std::size_t background_ids =
+                            static_cast<std::size_t>(n_backgrounds) * frame_width_x * frame_height_x;
+                        const std::size_t background_ids_bytes =
                             static_cast<std::size_t>(n_frames) * sizeof(uint16_t);
-                        const std::size_t background_masks =
+                        const std::size_t background_masks_bytes =
                             static_cast<std::size_t>(n_frames) * frame_width * frame_height;
-                        const std::size_t background_masks_x =
+                        const std::size_t background_masks_x_bytes =
                             static_cast<std::size_t>(n_frames) * frame_width_x * frame_height_x;
-                        if (!SkipExact(file,
-                                       background_flags + background_frames + background_frames_x +
-                                       background_ids + background_masks + background_masks_x)) {
+
+                        background_flags.resize(background_flags_bytes);
+                        background_frames_565.resize(background_frames);
+                        background_frames_x_565.resize(background_frames_x);
+                        background_ids.resize(n_frames, 0xffff);
+                        background_masks.resize(background_masks_bytes);
+                        background_masks_x.resize(background_masks_x_bytes);
+                        if ((background_flags_bytes > 0 &&
+                             !ReadExact(file, background_flags.data(), background_flags_bytes)) ||
+                            (background_frames > 0 &&
+                             !ReadExact(file, background_frames_565.data(), background_frames * sizeof(uint16_t))) ||
+                            (background_frames_x > 0 &&
+                             !ReadExact(file, background_frames_x_565.data(), background_frames_x * sizeof(uint16_t))) ||
+                            (background_ids_bytes > 0 &&
+                             !ReadExact(file, background_ids.data(), background_ids_bytes)) ||
+                            (background_masks_bytes > 0 &&
+                             !ReadExact(file, background_masks.data(), background_masks_bytes)) ||
+                            (background_masks_x_bytes > 0 &&
+                             !ReadExact(file, background_masks_x.data(), background_masks_x_bytes))) {
                             if (error) {
                                 *error = "Unexpected end of file (background data)";
                             }
@@ -671,6 +693,15 @@ bool LoadLegacyProject(const std::string& path,
     out.frames.reserve(n_frames);
     out.frames_x.reserve(n_frames);
     out.frame_extra_flags = extra_frame;
+    out.background_extra_flags = background_flags;
+    out.background_ids = background_ids;
+    if (out.background_ids.size() < n_frames) {
+        out.background_ids.resize(n_frames, 0xffff);
+    }
+    out.background_masks.reserve(n_frames);
+    out.background_masks_x.reserve(n_frames);
+    out.background_frames.reserve(n_backgrounds);
+    out.background_frames_x.reserve(n_backgrounds);
     out.frame_refs.reserve(n_frames);
     out.frame_dynamic_colors.reserve(n_frames);
     out.frame_dynamic_mask_ids.assign(n_frames, 255);
@@ -756,6 +787,66 @@ bool LoadLegacyProject(const std::string& path,
             std::memcpy(colors.data(), cols_data, colors.size() * sizeof(uint16_t));
         }
         out.frame_dynamic_colors.push_back(std::move(colors));
+    }
+
+    if (n_backgrounds > 0) {
+        const std::size_t bg_pixels = static_cast<std::size_t>(frame_width) * frame_height;
+        const std::size_t bg_pixels_x = static_cast<std::size_t>(frame_width_x) * frame_height_x;
+        for (uint32_t bg = 0; bg < n_backgrounds; ++bg) {
+            const std::size_t offset = static_cast<std::size_t>(bg) * bg_pixels;
+            const uint16_t* bg_data = background_frames_565.empty()
+                ? nullptr
+                : background_frames_565.data() + offset;
+            if (bg_data && bg_pixels > 0) {
+                out.background_frames.push_back(BuildFrameImage(frame_width,
+                                                                frame_height,
+                                                                bg_data,
+                                                                nullptr,
+                                                                nullptr,
+                                                                nullptr,
+                                                                no_colors));
+            } else {
+                out.background_frames.emplace_back();
+            }
+
+            const std::size_t offset_x = static_cast<std::size_t>(bg) * bg_pixels_x;
+            const uint16_t* bg_data_x = background_frames_x_565.empty()
+                ? nullptr
+                : background_frames_x_565.data() + offset_x;
+            if (bg_data_x && bg_pixels_x > 0) {
+                out.background_frames_x.push_back(BuildFrameImage(frame_width_x,
+                                                                  frame_height_x,
+                                                                  bg_data_x,
+                                                                  nullptr,
+                                                                  nullptr,
+                                                                  nullptr,
+                                                                  no_colors));
+            } else {
+                out.background_frames_x.emplace_back();
+            }
+        }
+    }
+    if (!background_masks.empty()) {
+        const std::size_t bg_pixels = static_cast<std::size_t>(frame_width) * frame_height;
+        for (uint32_t i = 0; i < n_frames; ++i) {
+            cv::Mat mask(static_cast<int>(frame_height), static_cast<int>(frame_width), CV_8UC1, cv::Scalar(0));
+            const std::size_t offset = static_cast<std::size_t>(i) * bg_pixels;
+            std::memcpy(mask.data, background_masks.data() + offset, bg_pixels);
+            out.background_masks.push_back(mask);
+        }
+    } else {
+        out.background_masks.resize(n_frames);
+    }
+    if (!background_masks_x.empty()) {
+        const std::size_t bg_pixels_x = static_cast<std::size_t>(frame_width_x) * frame_height_x;
+        for (uint32_t i = 0; i < n_frames; ++i) {
+            cv::Mat mask(static_cast<int>(frame_height_x), static_cast<int>(frame_width_x), CV_8UC1, cv::Scalar(0));
+            const std::size_t offset = static_cast<std::size_t>(i) * bg_pixels_x;
+            std::memcpy(mask.data, background_masks_x.data() + offset, bg_pixels_x);
+            out.background_masks_x.push_back(mask);
+        }
+    } else {
+        out.background_masks_x.resize(n_frames);
     }
 
     out.sprites.reserve(n_sprites);
