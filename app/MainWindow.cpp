@@ -21,6 +21,7 @@
 #include <QStyle>
 #include <QScrollArea>
 #include <QColorDialog>
+#include <QKeyEvent>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -703,6 +704,9 @@ MainWindow::MainWindow(QWidget* parent)
             case UndoTarget::BackgroundMask:
                 handled = undoBackgroundMaskEdit();
                 break;
+            case UndoTarget::Palette:
+                handled = undoPaletteEdit();
+                break;
         }
         if (handled) {
             statusBar()->showMessage("Undo", 1500);
@@ -729,6 +733,9 @@ MainWindow::MainWindow(QWidget* parent)
                 break;
             case UndoTarget::BackgroundMask:
                 handled = redoBackgroundMaskEdit();
+                break;
+            case UndoTarget::Palette:
+                handled = redoPaletteEdit();
                 break;
         }
         if (handled) {
@@ -1081,6 +1088,7 @@ MainWindow::MainWindow(QWidget* parent)
     dynamicMasksTab->setLayout(dynLayout);
 
     auto* colorsTab = new QWidget(toolsTabs);
+    m_colorsTab = colorsTab;
     m_currentColorButton = new QToolButton(colorsTab);
     m_currentColorButton->setAutoRaise(true);
     m_currentColorButton->setFixedSize(32, 32);
@@ -1090,6 +1098,8 @@ MainWindow::MainWindow(QWidget* parent)
     m_paletteSetCombo = new QComboBox(colorsTab);
     m_colorPickButton = new QPushButton("Pick Color...", colorsTab);
     m_paletteAssignButton = new QPushButton("Set Slot", colorsTab);
+    m_paletteGradientButton = new QPushButton("Gradient", colorsTab);
+    m_paletteGradientButton->setEnabled(false);
     m_paletteList = new QListWidget(colorsTab);
     m_paletteList->setViewMode(QListView::IconMode);
     m_paletteList->setFlow(QListView::LeftToRight);
@@ -1141,6 +1151,14 @@ MainWindow::MainWindow(QWidget* parent)
         if (row < 0) {
             return;
         }
+        if (m_paletteSetSlotActive) {
+            cancelPaletteSetSlot();
+            return;
+        }
+        if (m_dynamicSetSlotActive) {
+            cancelPaletteSetSlot();
+            return;
+        }
         m_reducedSlotIndex = row;
         if (m_reducedAssignButton) {
             m_reducedAssignButton->setEnabled(true);
@@ -1149,6 +1167,19 @@ MainWindow::MainWindow(QWidget* parent)
             QSignalBlocker blocker(m_dynamicPaletteList);
             m_dynamicPaletteList->setCurrentRow(-1);
             m_dynamicSlotIndex = -1;
+        }
+        if (m_paletteGradientActive) {
+            cancelPaletteGradient();
+        }
+        if (m_reducedSetSlotActive) {
+            const QColor current(static_cast<int>(m_drawColor[2]),
+                                 static_cast<int>(m_drawColor[1]),
+                                 static_cast<int>(m_drawColor[0]));
+            pushReducedUndoSnapshot(m_reducedPaletteIndex);
+            setReducedSlotColor(m_reducedPaletteIndex, row, current);
+            refreshReducedPaletteButtons();
+            cancelPaletteSetSlot();
+            return;
         }
         m_paletteSelectionIsReference = true;
         if (m_paletteList) {
@@ -1192,6 +1223,14 @@ MainWindow::MainWindow(QWidget* parent)
         if (row < 0) {
             return;
         }
+        if (m_paletteSetSlotActive) {
+            cancelPaletteSetSlot();
+            return;
+        }
+        if (m_reducedSetSlotActive) {
+            cancelPaletteSetSlot();
+            return;
+        }
         m_dynamicSlotIndex = row;
         if (m_dynamicAssignButton) {
             m_dynamicAssignButton->setEnabled(true);
@@ -1200,6 +1239,22 @@ MainWindow::MainWindow(QWidget* parent)
             QSignalBlocker blocker(m_reducedPaletteList);
             m_reducedPaletteList->setCurrentRow(-1);
             m_reducedSlotIndex = -1;
+        }
+        if (m_paletteGradientActive) {
+            cancelPaletteGradient();
+        }
+        if (m_dynamicSetSlotActive) {
+            const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
+            if (frameIndex >= 0 && frameIndex < static_cast<int>(m_frameDynamicColors.size())) {
+                const QColor current(static_cast<int>(m_drawColor[2]),
+                                     static_cast<int>(m_drawColor[1]),
+                                     static_cast<int>(m_drawColor[0]));
+                pushDynamicUndoSnapshot(frameIndex, m_dynamicSetIndex);
+                setDynamicSlotColor(frameIndex, m_dynamicSetIndex, row, current);
+                refreshDynamicPaletteButtons();
+            }
+            cancelPaletteSetSlot();
+            return;
         }
         m_paletteSelectionIsReference = true;
         if (m_paletteList) {
@@ -1232,6 +1287,7 @@ MainWindow::MainWindow(QWidget* parent)
     fullTop->addWidget(new QLabel("Full palette", colorsTab));
     fullTop->addWidget(m_paletteSetCombo);
     fullTop->addStretch(1);
+    fullTop->addWidget(m_paletteGradientButton);
     fullTop->addWidget(m_paletteAssignButton);
     colorLayout->addLayout(fullTop);
     colorLayout->addWidget(m_paletteList);
@@ -2034,36 +2090,78 @@ MainWindow::MainWindow(QWidget* parent)
     }
     connect(m_paletteList, &QListWidget::currentRowChanged, this, [this](int row) {
         if (row >= 0 && row < m_paletteColors.size()) {
+            if (m_reducedSetSlotActive || m_dynamicSetSlotActive) {
+                cancelPaletteSetSlot();
+                return;
+            }
             m_currentPaletteIndex = row;
+            const bool reference = m_paletteSelectionIsReference;
             if (m_paletteList) {
-                const QColor color = m_paletteSelectionIsReference ? QColor(70, 150, 255) : QColor(255, 140, 0);
+                const QColor color = reference ? QColor(70, 150, 255) : QColor(255, 140, 0);
                 m_paletteList->setProperty("selectionColor", color);
                 m_paletteList->viewport()->update();
             }
-            if (m_reducedPaletteList) {
-                QSignalBlocker blocker(m_reducedPaletteList);
-                m_reducedPaletteList->setCurrentRow(-1);
-                m_reducedSlotIndex = -1;
+            if (m_paletteSetSlotActive) {
+                const QColor current(static_cast<int>(m_drawColor[2]),
+                                     static_cast<int>(m_drawColor[1]),
+                                     static_cast<int>(m_drawColor[0]));
+                pushPaletteUndoSnapshot();
+                m_paletteColors[row] = current;
+                if (m_paletteSetIndex >= 0 && m_paletteSetIndex < m_fullPalettes.size()) {
+                    m_fullPalettes[m_paletteSetIndex] = m_paletteColors;
+                }
+                m_currentPaletteIndex = row;
+                m_paletteSelectionIsReference = false;
+                if (m_paletteList) {
+                    m_paletteList->setProperty("selectionColor", QColor(255, 140, 0));
+                    m_paletteList->viewport()->update();
+                }
+                refreshPaletteList();
+                cancelPaletteSetSlot();
+                if (m_paletteList) {
+                    QSignalBlocker blocker(m_paletteList);
+                    m_paletteList->setCurrentRow(row);
+                    m_paletteList->viewport()->update();
+                }
+                if (m_paletteGradientButton) {
+                    QTimer::singleShot(0, this, [this]() {
+                        if (!m_paletteGradientButton) {
+                            return;
+                        }
+                        const bool hasSelection = m_paletteList && m_paletteList->currentRow() >= 0;
+                        const bool enable = hasSelection && !m_paletteSelectionIsReference;
+                        m_paletteGradientButton->setEnabled(enable);
+                    });
+                }
+                return;
             }
-            if (m_dynamicPaletteList) {
-                QSignalBlocker blocker(m_dynamicPaletteList);
-                m_dynamicPaletteList->setCurrentRow(-1);
-                m_dynamicSlotIndex = -1;
+            if (m_paletteGradientActive && m_paletteGradientStartIndex >= 0 && m_paletteGradientStartIndex != row) {
+                pushPaletteUndoSnapshot();
+                applyPaletteGradient(m_paletteGradientStartIndex, row);
+                cancelPaletteGradient();
+                refreshPaletteList();
             }
-            m_paletteSelectionIsReference = false;
+            if (!reference) {
+                if (m_reducedPaletteList) {
+                    QSignalBlocker blocker(m_reducedPaletteList);
+                    m_reducedPaletteList->setCurrentRow(-1);
+                    m_reducedSlotIndex = -1;
+                }
+                if (m_dynamicPaletteList) {
+                    QSignalBlocker blocker(m_dynamicPaletteList);
+                    m_dynamicPaletteList->setCurrentRow(-1);
+                    m_dynamicSlotIndex = -1;
+                }
+            }
             setDrawColor(m_paletteColors[row], false);
             if (m_paletteAssignButton) {
                 m_paletteAssignButton->setEnabled(true);
             }
-        } else if (m_paletteAssignButton) {
-            m_paletteAssignButton->setEnabled(false);
-        }
-    });
-    connect(m_paletteList, &QListWidget::itemClicked, this, [this](QListWidgetItem*) {
-        m_paletteSelectionIsReference = false;
-        if (m_paletteList) {
-            m_paletteList->setProperty("selectionColor", QColor(255, 140, 0));
-            m_paletteList->viewport()->update();
+            if (m_paletteGradientButton) {
+                m_paletteGradientButton->setEnabled(!reference);
+            }
+        } else if (m_paletteGradientButton) {
+            m_paletteGradientButton->setEnabled(false);
         }
     });
     connect(m_paletteList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) {
@@ -2078,6 +2176,7 @@ MainWindow::MainWindow(QWidget* parent)
         if (!picked.isValid()) {
             return;
         }
+        pushPaletteUndoSnapshot();
         const cv::Vec3b quant = Rgb565ToBgr(BgrToRgb565(cv::Vec3b(picked.blue(), picked.green(), picked.red())));
         m_paletteColors[row] = QColor(quant[2], quant[1], quant[0]);
         if (m_paletteSetIndex >= 0 && m_paletteSetIndex < m_fullPalettes.size()) {
@@ -2085,6 +2184,30 @@ MainWindow::MainWindow(QWidget* parent)
         }
         refreshPaletteList();
         m_paletteList->setCurrentRow(row);
+    });
+    connect(m_paletteList, &QListWidget::itemClicked, this, [this](QListWidgetItem*) {
+        if (m_paletteGradientActive || m_paletteSetSlotActive) {
+            return;
+        }
+        m_paletteSelectionIsReference = false;
+        if (m_reducedPaletteList) {
+            QSignalBlocker blocker(m_reducedPaletteList);
+            m_reducedPaletteList->setCurrentRow(-1);
+            m_reducedSlotIndex = -1;
+        }
+        if (m_dynamicPaletteList) {
+            QSignalBlocker blocker(m_dynamicPaletteList);
+            m_dynamicPaletteList->setCurrentRow(-1);
+            m_dynamicSlotIndex = -1;
+        }
+        if (m_paletteList) {
+            m_paletteList->setProperty("selectionColor", QColor(255, 140, 0));
+            m_paletteList->viewport()->update();
+        }
+        if (m_paletteGradientButton) {
+            const bool hasSelection = m_paletteList && m_paletteList->currentRow() >= 0;
+            m_paletteGradientButton->setEnabled(hasSelection);
+        }
     });
     connect(m_colorPickButton, &QPushButton::clicked, this, [this]() {
         const QColor current(static_cast<int>(m_drawColor[2]),
@@ -2107,22 +2230,17 @@ MainWindow::MainWindow(QWidget* parent)
         setDrawColor(picked, true);
     });
     connect(m_paletteAssignButton, &QPushButton::clicked, this, [this]() {
-        if (m_currentPaletteIndex < 0 || m_currentPaletteIndex >= m_paletteColors.size()) {
-            return;
-        }
-        const QColor current(static_cast<int>(m_drawColor[2]),
-                             static_cast<int>(m_drawColor[1]),
-                             static_cast<int>(m_drawColor[0]));
-        m_paletteColors[m_currentPaletteIndex] = current;
-        if (m_paletteSetIndex >= 0 && m_paletteSetIndex < m_fullPalettes.size()) {
-            m_fullPalettes[m_paletteSetIndex] = m_paletteColors;
-        }
-        refreshPaletteList();
-        m_paletteList->setCurrentRow(m_currentPaletteIndex);
+        startPaletteSetSlot();
+    });
+    connect(m_paletteGradientButton, &QPushButton::clicked, this, [this]() {
+        startPaletteGradient();
     });
     connect(m_paletteSetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
         if (index < 0 || index >= m_fullPalettes.size()) {
             return;
+        }
+        if (m_paletteSetSlotActive || m_reducedSetSlotActive || m_dynamicSetSlotActive) {
+            cancelPaletteSetSlot();
         }
         m_paletteSetIndex = index;
         m_paletteColors = m_fullPalettes[m_paletteSetIndex];
@@ -2137,6 +2255,9 @@ MainWindow::MainWindow(QWidget* parent)
         if (index < 0 || index >= kReducedPaletteCount) {
             return;
         }
+        if (m_paletteSetSlotActive || m_reducedSetSlotActive || m_dynamicSetSlotActive) {
+            cancelPaletteSetSlot();
+        }
         m_reducedPaletteIndex = index;
         refreshReducedPaletteButtons();
     });
@@ -2144,34 +2265,17 @@ MainWindow::MainWindow(QWidget* parent)
         if (index < 0 || index >= MAX_DYNA_SETS_PER_FRAMEN) {
             return;
         }
+        if (m_paletteSetSlotActive || m_reducedSetSlotActive || m_dynamicSetSlotActive) {
+            cancelPaletteSetSlot();
+        }
         m_dynamicSetIndex = index;
         refreshDynamicPaletteButtons();
     });
     connect(m_reducedAssignButton, &QPushButton::clicked, this, [this]() {
-        if (m_reducedSlotIndex < 0 || m_reducedSlotIndex >= 16) {
-            return;
-        }
-        const QColor current(static_cast<int>(m_drawColor[2]),
-                             static_cast<int>(m_drawColor[1]),
-                             static_cast<int>(m_drawColor[0]));
-        setReducedSlotColor(m_reducedPaletteIndex, m_reducedSlotIndex, current);
-        refreshReducedPaletteButtons();
-        setDrawColor(current, true);
+        startReducedSetSlot();
     });
     connect(m_dynamicAssignButton, &QPushButton::clicked, this, [this]() {
-        if (m_dynamicSlotIndex < 0 || m_dynamicSlotIndex >= 16) {
-            return;
-        }
-        const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
-        if (frameIndex < 0 || frameIndex >= static_cast<int>(m_frameDynamicColors.size())) {
-            return;
-        }
-        const QColor current(static_cast<int>(m_drawColor[2]),
-                             static_cast<int>(m_drawColor[1]),
-                             static_cast<int>(m_drawColor[0]));
-        setDynamicSlotColor(frameIndex, m_dynamicSetIndex, m_dynamicSlotIndex, current);
-        refreshDynamicPaletteButtons();
-        setDrawColor(current, true);
+        startDynamicSetSlot();
     });
     connect(m_toolsTabs, &QTabWidget::currentChanged, this, [this](int) {
         if (m_previewFilterEnabled) {
@@ -4018,6 +4122,8 @@ void MainWindow::resetUndoStacks()
     m_compMaskUndoStacks.clear();
     m_dynMaskUndoStacks.clear();
     m_backgroundMaskUndoStacks.clear();
+    m_paletteUndo.clear();
+    m_paletteRedo.clear();
     m_frameUndoActive = false;
     m_spriteUndoActive = false;
     m_backgroundUndoActive = false;
@@ -4495,6 +4601,8 @@ void MainWindow::updateUndoActions()
     const UndoTarget target = currentUndoTarget();
     int index = -1;
     const std::vector<UndoStack>* stacks = nullptr;
+    bool canUndo = false;
+    bool canRedo = false;
     switch (target) {
         case UndoTarget::Frame:
             index = m_framesList ? m_framesList->currentRow() : -1;
@@ -4528,9 +4636,11 @@ void MainWindow::updateUndoActions()
             index = m_framesList ? m_framesList->currentRow() : -1;
             stacks = &m_backgroundMaskUndoStacks;
             break;
+        case UndoTarget::Palette:
+            canUndo = !m_paletteUndo.empty();
+            canRedo = !m_paletteRedo.empty();
+            break;
     }
-    bool canUndo = false;
-    bool canRedo = false;
     if (stacks && index >= 0 && index < static_cast<int>(stacks->size())) {
         const UndoStack& stack = (*stacks)[static_cast<std::size_t>(index)];
         canUndo = !stack.undo.empty();
@@ -4559,6 +4669,9 @@ bool MainWindow::isFrameContext() const
 
 MainWindow::UndoTarget MainWindow::currentUndoTarget() const
 {
+    if (m_toolsTabs && m_colorsTab && m_toolsTabs->currentWidget() == m_colorsTab) {
+        return UndoTarget::Palette;
+    }
     if (m_canvasTabs && m_canvasTabs->currentWidget() == m_backgroundsCanvas) {
         return UndoTarget::Background;
     }
@@ -4755,6 +4868,239 @@ void MainWindow::refreshPaletteList()
             m_paletteSetCombo->setCurrentIndex(m_paletteSetIndex);
         }
     }
+    if (m_paletteAssignButton) {
+        m_paletteAssignButton->setEnabled(!m_paletteColors.isEmpty());
+    }
+}
+
+void MainWindow::pushPaletteUndoSnapshot()
+{
+    if (m_paletteSetIndex < 0 || m_paletteSetIndex >= m_fullPalettes.size()) {
+        return;
+    }
+    PaletteUndoState state;
+    state.kind = PaletteUndoState::Kind::Full;
+    state.palette_index = m_paletteSetIndex;
+    state.full_colors = m_fullPalettes[m_paletteSetIndex];
+    m_paletteUndo.push_back(state);
+    if (m_paletteUndo.size() > kMaxUndoDepth) {
+        m_paletteUndo.erase(m_paletteUndo.begin());
+    }
+    m_paletteRedo.clear();
+    updateUndoActions();
+}
+
+void MainWindow::pushReducedUndoSnapshot(int setIndex)
+{
+    if (setIndex < 0 || setIndex >= kReducedPaletteCount) {
+        return;
+    }
+    if (m_reducedPaletteIndices.size() < static_cast<std::size_t>(kReducedPaletteCount * 16)) {
+        return;
+    }
+    PaletteUndoState state;
+    state.kind = PaletteUndoState::Kind::Reduced;
+    state.set_index = setIndex;
+    state.values.resize(16);
+    const std::size_t offset = static_cast<std::size_t>(setIndex) * 16;
+    std::copy_n(m_reducedPaletteIndices.begin() + offset, 16, state.values.begin());
+    m_paletteUndo.push_back(state);
+    if (m_paletteUndo.size() > kMaxUndoDepth) {
+        m_paletteUndo.erase(m_paletteUndo.begin());
+    }
+    m_paletteRedo.clear();
+    updateUndoActions();
+}
+
+void MainWindow::pushDynamicUndoSnapshot(int frameIndex, int setIndex)
+{
+    if (frameIndex < 0 || frameIndex >= static_cast<int>(m_frameDynamicColors.size()) ||
+        setIndex < 0 || setIndex >= MAX_DYNA_SETS_PER_FRAMEN) {
+        return;
+    }
+    const std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(frameIndex)];
+    const int stride = dynamicColorsPerSet(colors);
+    if (stride <= 0) {
+        return;
+    }
+    const std::size_t offset = static_cast<std::size_t>(setIndex) * stride;
+    if (offset + static_cast<std::size_t>(stride) > colors.size()) {
+        return;
+    }
+    PaletteUndoState state;
+    state.kind = PaletteUndoState::Kind::Dynamic;
+    state.frame_index = frameIndex;
+    state.set_index = setIndex;
+    state.values.resize(static_cast<std::size_t>(stride));
+    std::copy_n(colors.begin() + offset, stride, state.values.begin());
+    m_paletteUndo.push_back(state);
+    if (m_paletteUndo.size() > kMaxUndoDepth) {
+        m_paletteUndo.erase(m_paletteUndo.begin());
+    }
+    m_paletteRedo.clear();
+    updateUndoActions();
+}
+
+bool MainWindow::undoPaletteEdit()
+{
+    if (m_paletteUndo.empty()) {
+        return false;
+    }
+    PaletteUndoState previous = m_paletteUndo.back();
+    m_paletteUndo.pop_back();
+
+    PaletteUndoState current;
+    if (previous.kind == PaletteUndoState::Kind::Full) {
+        current.kind = PaletteUndoState::Kind::Full;
+        current.palette_index = m_paletteSetIndex;
+        if (m_paletteSetIndex >= 0 && m_paletteSetIndex < m_fullPalettes.size()) {
+            current.full_colors = m_fullPalettes[m_paletteSetIndex];
+        }
+    } else if (previous.kind == PaletteUndoState::Kind::Reduced) {
+        current.kind = PaletteUndoState::Kind::Reduced;
+        current.set_index = previous.set_index;
+        if (previous.set_index >= 0 && previous.set_index < kReducedPaletteCount) {
+            current.values.resize(16);
+            const std::size_t offset = static_cast<std::size_t>(previous.set_index) * 16;
+            if (offset + 16 <= m_reducedPaletteIndices.size()) {
+                std::copy_n(m_reducedPaletteIndices.begin() + offset, 16, current.values.begin());
+            }
+        }
+    } else if (previous.kind == PaletteUndoState::Kind::Dynamic) {
+        current.kind = PaletteUndoState::Kind::Dynamic;
+        current.frame_index = previous.frame_index;
+        current.set_index = previous.set_index;
+        if (previous.frame_index >= 0 &&
+            previous.frame_index < static_cast<int>(m_frameDynamicColors.size()) &&
+            previous.set_index >= 0 && previous.set_index < MAX_DYNA_SETS_PER_FRAMEN) {
+            const std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(previous.frame_index)];
+            const int stride = dynamicColorsPerSet(colors);
+            const std::size_t offset = static_cast<std::size_t>(previous.set_index) * stride;
+            if (stride > 0 && offset + static_cast<std::size_t>(stride) <= colors.size()) {
+                current.values.resize(static_cast<std::size_t>(stride));
+                std::copy_n(colors.begin() + offset, stride, current.values.begin());
+            }
+        }
+    }
+    m_paletteRedo.push_back(current);
+    if (m_paletteRedo.size() > kMaxUndoDepth) {
+        m_paletteRedo.erase(m_paletteRedo.begin());
+    }
+
+    if (previous.kind == PaletteUndoState::Kind::Full) {
+        if (previous.palette_index >= 0 && previous.palette_index < m_fullPalettes.size()) {
+            m_paletteSetIndex = previous.palette_index;
+            m_fullPalettes[m_paletteSetIndex] = previous.full_colors;
+            m_paletteColors = previous.full_colors;
+            m_currentPaletteIndex = 0;
+            refreshPaletteList();
+        }
+    } else if (previous.kind == PaletteUndoState::Kind::Reduced) {
+        if (previous.set_index >= 0 && previous.set_index < kReducedPaletteCount &&
+            previous.values.size() >= 16) {
+            const std::size_t offset = static_cast<std::size_t>(previous.set_index) * 16;
+            if (offset + 16 <= m_reducedPaletteIndices.size()) {
+                std::copy_n(previous.values.begin(), 16, m_reducedPaletteIndices.begin() + offset);
+            }
+            refreshReducedPaletteButtons();
+        }
+    } else if (previous.kind == PaletteUndoState::Kind::Dynamic) {
+        if (previous.frame_index >= 0 &&
+            previous.frame_index < static_cast<int>(m_frameDynamicColors.size()) &&
+            previous.set_index >= 0 && previous.set_index < MAX_DYNA_SETS_PER_FRAMEN &&
+            !previous.values.empty()) {
+            std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(previous.frame_index)];
+            const int stride = dynamicColorsPerSet(colors);
+            const std::size_t offset = static_cast<std::size_t>(previous.set_index) * stride;
+            if (stride > 0 && offset + previous.values.size() <= colors.size()) {
+                std::copy_n(previous.values.begin(), previous.values.size(), colors.begin() + offset);
+            }
+            refreshDynamicPaletteButtons();
+        }
+    }
+    updateUndoActions();
+    return true;
+}
+
+bool MainWindow::redoPaletteEdit()
+{
+    if (m_paletteRedo.empty()) {
+        return false;
+    }
+    PaletteUndoState next = m_paletteRedo.back();
+    m_paletteRedo.pop_back();
+
+    PaletteUndoState current;
+    if (next.kind == PaletteUndoState::Kind::Full) {
+        current.kind = PaletteUndoState::Kind::Full;
+        current.palette_index = m_paletteSetIndex;
+        if (m_paletteSetIndex >= 0 && m_paletteSetIndex < m_fullPalettes.size()) {
+            current.full_colors = m_fullPalettes[m_paletteSetIndex];
+        }
+    } else if (next.kind == PaletteUndoState::Kind::Reduced) {
+        current.kind = PaletteUndoState::Kind::Reduced;
+        current.set_index = next.set_index;
+        if (next.set_index >= 0 && next.set_index < kReducedPaletteCount) {
+            current.values.resize(16);
+            const std::size_t offset = static_cast<std::size_t>(next.set_index) * 16;
+            if (offset + 16 <= m_reducedPaletteIndices.size()) {
+                std::copy_n(m_reducedPaletteIndices.begin() + offset, 16, current.values.begin());
+            }
+        }
+    } else if (next.kind == PaletteUndoState::Kind::Dynamic) {
+        current.kind = PaletteUndoState::Kind::Dynamic;
+        current.frame_index = next.frame_index;
+        current.set_index = next.set_index;
+        if (next.frame_index >= 0 &&
+            next.frame_index < static_cast<int>(m_frameDynamicColors.size()) &&
+            next.set_index >= 0 && next.set_index < MAX_DYNA_SETS_PER_FRAMEN) {
+            const std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(next.frame_index)];
+            const int stride = dynamicColorsPerSet(colors);
+            const std::size_t offset = static_cast<std::size_t>(next.set_index) * stride;
+            if (stride > 0 && offset + static_cast<std::size_t>(stride) <= colors.size()) {
+                current.values.resize(static_cast<std::size_t>(stride));
+                std::copy_n(colors.begin() + offset, stride, current.values.begin());
+            }
+        }
+    }
+    m_paletteUndo.push_back(current);
+    if (m_paletteUndo.size() > kMaxUndoDepth) {
+        m_paletteUndo.erase(m_paletteUndo.begin());
+    }
+
+    if (next.kind == PaletteUndoState::Kind::Full) {
+        if (next.palette_index >= 0 && next.palette_index < m_fullPalettes.size()) {
+            m_paletteSetIndex = next.palette_index;
+            m_fullPalettes[m_paletteSetIndex] = next.full_colors;
+            m_paletteColors = next.full_colors;
+            m_currentPaletteIndex = 0;
+            refreshPaletteList();
+        }
+    } else if (next.kind == PaletteUndoState::Kind::Reduced) {
+        if (next.set_index >= 0 && next.set_index < kReducedPaletteCount &&
+            next.values.size() >= 16) {
+            const std::size_t offset = static_cast<std::size_t>(next.set_index) * 16;
+            if (offset + 16 <= m_reducedPaletteIndices.size()) {
+                std::copy_n(next.values.begin(), 16, m_reducedPaletteIndices.begin() + offset);
+            }
+            refreshReducedPaletteButtons();
+        }
+    } else if (next.kind == PaletteUndoState::Kind::Dynamic) {
+        if (next.frame_index >= 0 &&
+            next.frame_index < static_cast<int>(m_frameDynamicColors.size()) &&
+            next.set_index >= 0 && next.set_index < MAX_DYNA_SETS_PER_FRAMEN &&
+            !next.values.empty()) {
+            std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(next.frame_index)];
+            const int stride = dynamicColorsPerSet(colors);
+            const std::size_t offset = static_cast<std::size_t>(next.set_index) * stride;
+            if (stride > 0 && offset + next.values.size() <= colors.size()) {
+                std::copy_n(next.values.begin(), next.values.size(), colors.begin() + offset);
+            }
+            refreshDynamicPaletteButtons();
+        }
+    }
+    updateUndoActions();
+    return true;
 }
 
 int MainWindow::reducedSlotCount() const
@@ -4935,7 +5281,7 @@ void MainWindow::refreshReducedPaletteButtons()
         m_reducedPaletteList->setCurrentRow(-1);
     }
     if (m_reducedAssignButton) {
-        m_reducedAssignButton->setEnabled(m_reducedSlotIndex >= 0);
+        m_reducedAssignButton->setEnabled(m_reducedPaletteList->count() > 0);
     }
 }
 
@@ -5003,7 +5349,7 @@ void MainWindow::refreshDynamicPaletteButtons()
         m_dynamicPaletteList->setCurrentRow(-1);
     }
     if (m_dynamicAssignButton) {
-        m_dynamicAssignButton->setEnabled(m_dynamicSlotIndex >= 0 && hasFrame);
+        m_dynamicAssignButton->setEnabled(hasFrame);
     }
 }
 
@@ -5068,6 +5414,189 @@ void MainWindow::updateCurrentColorSwatch()
                        static_cast<int>(m_drawColor[0]));
     m_currentColorButton->setStyleSheet(
         QString("QToolButton { background-color: %1; border: 1px solid #444; }").arg(color.name()));
+}
+
+void MainWindow::startPaletteGradient()
+{
+    if (m_paletteGradientActive) {
+        cancelPaletteGradient();
+        return;
+    }
+    if (m_paletteSetSlotActive || m_reducedSetSlotActive || m_dynamicSetSlotActive) {
+        cancelPaletteSetSlot();
+    }
+    if (!m_paletteList || m_currentPaletteIndex < 0 || m_currentPaletteIndex >= m_paletteColors.size()) {
+        return;
+    }
+    m_paletteGradientActive = true;
+    m_paletteGradientStartIndex = m_currentPaletteIndex;
+    if (m_paletteGradientButton) {
+        m_paletteGradientButton->setText("Pick End");
+    }
+    statusBar()->showMessage("Select the end palette slot for the gradient (Esc to cancel).", 4000);
+}
+
+void MainWindow::startPaletteSetSlot()
+{
+    if (m_paletteSetSlotActive) {
+        cancelPaletteSetSlot();
+        return;
+    }
+    if (!m_paletteList || m_paletteColors.isEmpty()) {
+        return;
+    }
+    m_paletteSelectionIsReference = false;
+    m_paletteSetSlotActive = true;
+    m_reducedSetSlotActive = false;
+    m_dynamicSetSlotActive = false;
+    if (m_paletteGradientActive) {
+        cancelPaletteGradient();
+    }
+    if (m_paletteList) {
+        m_paletteList->setProperty("selectionColor", QColor(255, 140, 0));
+        m_paletteList->viewport()->update();
+    }
+    if (m_paletteGradientButton) {
+        m_paletteGradientButton->setEnabled(false);
+    }
+    if (m_paletteAssignButton) {
+        m_paletteAssignButton->setText("Pick Slot");
+    }
+    statusBar()->showMessage("Select a full palette slot to set (Esc to cancel).", 4000);
+}
+
+void MainWindow::startReducedSetSlot()
+{
+    if (m_reducedSetSlotActive) {
+        cancelPaletteSetSlot();
+        return;
+    }
+    if (!m_reducedPaletteList) {
+        return;
+    }
+    m_paletteSelectionIsReference = true;
+    m_reducedSetSlotActive = true;
+    m_paletteSetSlotActive = false;
+    m_dynamicSetSlotActive = false;
+    if (m_paletteGradientActive) {
+        cancelPaletteGradient();
+    }
+    if (m_paletteGradientButton) {
+        m_paletteGradientButton->setEnabled(false);
+    }
+    if (m_reducedAssignButton) {
+        m_reducedAssignButton->setText("Pick Slot");
+    }
+    if (m_paletteList) {
+        m_paletteList->setProperty("selectionColor", QColor(70, 150, 255));
+        m_paletteList->viewport()->update();
+    }
+    statusBar()->showMessage("Select a reduced slot to set (Esc to cancel).", 4000);
+}
+
+void MainWindow::startDynamicSetSlot()
+{
+    if (m_dynamicSetSlotActive) {
+        cancelPaletteSetSlot();
+        return;
+    }
+    if (!m_dynamicPaletteList) {
+        return;
+    }
+    m_paletteSelectionIsReference = true;
+    m_dynamicSetSlotActive = true;
+    m_paletteSetSlotActive = false;
+    m_reducedSetSlotActive = false;
+    if (m_paletteGradientActive) {
+        cancelPaletteGradient();
+    }
+    if (m_paletteGradientButton) {
+        m_paletteGradientButton->setEnabled(false);
+    }
+    if (m_dynamicAssignButton) {
+        m_dynamicAssignButton->setText("Pick Slot");
+    }
+    if (m_paletteList) {
+        m_paletteList->setProperty("selectionColor", QColor(70, 150, 255));
+        m_paletteList->viewport()->update();
+    }
+    statusBar()->showMessage("Select a dynamic slot to set (Esc to cancel).", 4000);
+}
+
+void MainWindow::cancelPaletteSetSlot()
+{
+    m_paletteSetSlotActive = false;
+    m_reducedSetSlotActive = false;
+    m_dynamicSetSlotActive = false;
+    if (m_paletteAssignButton) {
+        m_paletteAssignButton->setText("Set Slot");
+    }
+    if (m_reducedAssignButton) {
+        m_reducedAssignButton->setText("Set Slot");
+    }
+    if (m_dynamicAssignButton) {
+        m_dynamicAssignButton->setText("Set Slot");
+    }
+    if (m_paletteGradientButton) {
+        const bool hasSelection = m_paletteList && m_paletteList->currentRow() >= 0;
+        const bool enable = hasSelection && !m_paletteSelectionIsReference;
+        m_paletteGradientButton->setEnabled(enable);
+    }
+    if (m_paletteList) {
+        const QColor color = m_paletteSelectionIsReference ? QColor(70, 150, 255) : QColor(255, 140, 0);
+        m_paletteList->setProperty("selectionColor", color);
+        m_paletteList->viewport()->update();
+    }
+    statusBar()->showMessage("Set slot canceled.", 1500);
+}
+
+void MainWindow::cancelPaletteGradient()
+{
+    m_paletteGradientActive = false;
+    m_paletteGradientStartIndex = -1;
+    if (m_paletteGradientButton) {
+        m_paletteGradientButton->setText("Gradient");
+    }
+    statusBar()->showMessage("Gradient canceled.", 2000);
+}
+
+void MainWindow::applyPaletteGradient(int startIndex, int endIndex)
+{
+    if (startIndex < 0 || endIndex < 0 || startIndex >= m_paletteColors.size() ||
+        endIndex >= m_paletteColors.size() || startIndex == endIndex) {
+        return;
+    }
+    const int stepCount = std::abs(endIndex - startIndex);
+    const QColor startColor = m_paletteColors[startIndex];
+    const QColor endColor = m_paletteColors[endIndex];
+    for (int step = 0; step <= stepCount; ++step) {
+        const double t = stepCount == 0 ? 0.0 : static_cast<double>(step) / stepCount;
+        const int r = static_cast<int>(std::round(startColor.red() + (endColor.red() - startColor.red()) * t));
+        const int g = static_cast<int>(std::round(startColor.green() + (endColor.green() - startColor.green()) * t));
+        const int b = static_cast<int>(std::round(startColor.blue() + (endColor.blue() - startColor.blue()) * t));
+        const cv::Vec3b quant = Rgb565ToBgr(BgrToRgb565(cv::Vec3b(
+            static_cast<uint8_t>(b),
+            static_cast<uint8_t>(g),
+            static_cast<uint8_t>(r))));
+        const int index = startIndex < endIndex ? (startIndex + step) : (startIndex - step);
+        m_paletteColors[index] = QColor(quant[2], quant[1], quant[0]);
+    }
+    if (m_paletteSetIndex >= 0 && m_paletteSetIndex < m_fullPalettes.size()) {
+        m_fullPalettes[m_paletteSetIndex] = m_paletteColors;
+    }
+    refreshPaletteList();
+}
+
+void MainWindow::keyPressEvent(QKeyEvent* event)
+{
+    if (event->key() == Qt::Key_Escape) {
+        if (m_paletteGradientActive) {
+            cancelPaletteGradient();
+            event->accept();
+            return;
+        }
+    }
+    QMainWindow::keyPressEvent(event);
 }
 
 void MainWindow::loadPaletteFromProject(const LegacyProject& legacy)
@@ -6265,6 +6794,14 @@ void MainWindow::pickColorFromImage(const cv::Mat& image, int x, int y)
 
 void MainWindow::cancelCurrentDraw()
 {
+    if (m_paletteGradientActive) {
+        cancelPaletteGradient();
+        return;
+    }
+    if (m_paletteSetSlotActive || m_reducedSetSlotActive || m_dynamicSetSlotActive) {
+        cancelPaletteSetSlot();
+        return;
+    }
     m_frameHasStart = false;
     m_spriteHasStart = false;
     m_frameUndoActive = false;

@@ -59,7 +59,8 @@ private:
         Background,
         CompMask,
         DynMask,
-        BackgroundMask
+        BackgroundMask,
+        Palette
     };
     enum class PreviewFilterKind {
         None,
@@ -111,6 +112,11 @@ private:
                                              bool useHd) const;
     void resetUndoStacks();
     void ensureUndoStacksSize();
+    void pushPaletteUndoSnapshot();
+    void pushReducedUndoSnapshot(int setIndex);
+    void pushDynamicUndoSnapshot(int frameIndex, int setIndex);
+    bool undoPaletteEdit();
+    bool redoPaletteEdit();
     void pushUndoSnapshot(bool isFrame, int index);
     void pushMaskUndoSnapshot(MaskMode mode, int index);
     void pushBackgroundMaskUndoSnapshot(int index);
@@ -197,6 +203,14 @@ private:
     void updateCurrentColorSwatch();
     void loadPaletteFromProject(const struct LegacyProject& legacy);
     void cancelCurrentDraw();
+    void startPaletteGradient();
+    void cancelPaletteGradient();
+    void applyPaletteGradient(int startIndex, int endIndex);
+    void startPaletteSetSlot();
+    void startReducedSetSlot();
+    void startDynamicSetSlot();
+    void cancelPaletteSetSlot();
+    void keyPressEvent(QKeyEvent* event) override;
 
     class CanvasWidget* m_framesCanvas;
     class CanvasWidget* m_spritesCanvas;
@@ -239,6 +253,7 @@ private:
     class QWidget* m_dynamicMasksTab;
     class QWidget* m_backgroundsTab;
     class QWidget* m_spritesTab;
+    class QWidget* m_colorsTab;
     class QComboBox* m_bookmarksCombo;
     class QSpinBox* m_frameJump;
     class QLabel* m_projectLabel;
@@ -251,6 +266,7 @@ private:
     class QLabel* m_colorInfoLabel;
     class QPushButton* m_colorPickButton;
     class QPushButton* m_paletteAssignButton;
+    class QPushButton* m_paletteGradientButton;
     class QListWidget* m_paletteList;
     class QComboBox* m_paletteSetCombo;
     class QComboBox* m_reducedSetCombo;
@@ -326,6 +342,26 @@ private:
     int m_dynamicSetIndex = 0;
     int m_dynamicSlotIndex = -1;
     bool m_paletteSelectionIsReference = false;
+    bool m_paletteGradientActive = false;
+    int m_paletteGradientStartIndex = -1;
+    bool m_paletteSetSlotActive = false;
+    bool m_reducedSetSlotActive = false;
+    bool m_dynamicSetSlotActive = false;
+    struct PaletteUndoState {
+        enum class Kind {
+            Full,
+            Reduced,
+            Dynamic
+        };
+        Kind kind = Kind::Full;
+        int palette_index = -1;
+        int set_index = -1;
+        int frame_index = -1;
+        QVector<QColor> full_colors;
+        std::vector<uint16_t> values;
+    };
+    std::vector<PaletteUndoState> m_paletteUndo;
+    std::vector<PaletteUndoState> m_paletteRedo;
     bool m_frameHasStart = false;
     bool m_spriteHasStart = false;
     QPoint m_frameStart;
