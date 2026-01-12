@@ -78,6 +78,7 @@ bool LoadLegacyMetadataFromRP(const std::string& path,
                               uint32_t frame_height,
                               uint32_t n_frames,
                               uint32_t n_sprites,
+                              LegacyProject& out,
                               std::vector<uint32_t>& frame_durations,
                               std::vector<std::string>& sprite_names,
                               std::vector<uint32_t>& section_firsts,
@@ -109,36 +110,52 @@ bool LoadLegacyMetadataFromRP(const std::string& path,
     }
 
     constexpr std::size_t kBoolSize = 4;
-    if (!SkipExact(file, MAX_COL_SETS * kBoolSize)) {
+    std::vector<uint32_t> active_col_set(MAX_COL_SETS, 0);
+    if (!ReadExact(file, active_col_set.data(), active_col_set.size() * sizeof(uint32_t))) {
         if (error) {
             *error = "Unexpected end of .cRP file (col sets)";
         }
         return false;
     }
 
-    const std::size_t col_sets_bytes = MAX_COL_SETS * 16 * sizeof(uint16_t);
-    if (!SkipExact(file, col_sets_bytes)) {
+    out.reduced_palettes.resize(MAX_COL_SETS * 16);
+    if (!ReadExact(file, out.reduced_palettes.data(),
+                   out.reduced_palettes.size() * sizeof(uint16_t))) {
         if (error) {
             *error = "Unexpected end of .cRP file (color sets)";
         }
         return false;
     }
 
-    if (!SkipExact(file, sizeof(uint8_t) + sizeof(uint8_t))) {
+    if (!ReadExact(file, &out.active_reduced_palette, sizeof(uint8_t)) ||
+        !ReadExact(file, &out.preview_reduced_palette, sizeof(uint8_t))) {
         if (error) {
             *error = "Unexpected end of .cRP file (color set indices)";
         }
         return false;
     }
 
-    if (!SkipExact(file, MAX_COL_SETS * 64)) {
+    std::vector<char> name_col_set(MAX_COL_SETS * 64, 0);
+    if (!ReadExact(file, name_col_set.data(), name_col_set.size())) {
         if (error) {
             *error = "Unexpected end of .cRP file (color set names)";
         }
         return false;
     }
+    out.reduced_palette_names.clear();
+    out.reduced_palette_names.reserve(MAX_COL_SETS);
+    for (int i = 0; i < MAX_COL_SETS; ++i) {
+        out.reduced_palette_names.push_back(TrimName(name_col_set, i * 64, 64));
+    }
 
-    if (!SkipExact(file, sizeof(uint32_t) + sizeof(uint8_t) + sizeof(int32_t) + kBoolSize)) {
+    uint32_t draw_col_mode = 0;
+    uint8_t draw_mode = 0;
+    int32_t mask_sel_mode = 0;
+    uint32_t fill_mode = 0;
+    if (!ReadExact(file, &draw_col_mode, sizeof(draw_col_mode)) ||
+        !ReadExact(file, &draw_mode, sizeof(draw_mode)) ||
+        !ReadExact(file, &mask_sel_mode, sizeof(mask_sel_mode)) ||
+        !ReadExact(file, &fill_mode, sizeof(fill_mode))) {
         if (error) {
             *error = "Unexpected end of .cRP file (draw settings)";
         }
@@ -195,6 +212,85 @@ bool LoadLegacyMetadataFromRP(const std::string& path,
     if (!ReadExact(file, frame_durations.data(), n_frames * sizeof(uint32_t))) {
         if (error) {
             *error = "Unexpected end of .cRP file (frame durations)";
+        }
+        return false;
+    }
+
+    if (!SkipExact(file, 4 * MAX_SPRITES * sizeof(uint16_t))) {
+        if (error) {
+            *error = "Unexpected end of .cRP file (sprite rects)";
+        }
+        return false;
+    }
+    if (!SkipExact(file, 2 * MAX_SPRITES * sizeof(uint32_t))) {
+        if (error) {
+            *error = "Unexpected end of .cRP file (sprite rect mirrors)";
+        }
+        return false;
+    }
+
+    out.palettes.resize(N_PALETTES * 64);
+    if (!ReadExact(file, out.palettes.data(), out.palettes.size() * sizeof(uint16_t))) {
+        if (error) {
+            *error = "Unexpected end of .cRP file (palette data)";
+        }
+        return false;
+    }
+
+    if (!SkipExact(file, 16 * sizeof(uint16_t))) {
+        if (error) {
+            *error = "Unexpected end of .cRP file (edit colors)";
+        }
+        return false;
+    }
+
+    uint32_t n_image_pos_saves = 0;
+    if (!ReadExact(file, &n_image_pos_saves, sizeof(n_image_pos_saves))) {
+        if (error) {
+            *error = "Unexpected end of .cRP file (image positions)";
+        }
+        return false;
+    }
+    if (!SkipExact(file, N_IMAGE_POS_TO_SAVE * 64)) {
+        if (error) {
+            *error = "Unexpected end of .cRP file (image pos names)";
+        }
+        return false;
+    }
+    if (!SkipExact(file, N_IMAGE_POS_TO_SAVE * 16 * sizeof(int32_t))) {
+        if (error) {
+            *error = "Unexpected end of .cRP file (image pos data)";
+        }
+        return false;
+    }
+
+    std::vector<char> pal_names(N_PALETTES * 64, 0);
+    if (!ReadExact(file, pal_names.data(), pal_names.size())) {
+        if (error) {
+            *error = "Unexpected end of .cRP file (palette names)";
+        }
+        return false;
+    }
+    out.palette_names.clear();
+    out.palette_names.reserve(N_PALETTES);
+    for (int i = 0; i < N_PALETTES; ++i) {
+        out.palette_names.push_back(TrimName(pal_names, i * 64, 64));
+    }
+
+    uint32_t is_imported = 0;
+    uint32_t time_elapsed = 0;
+    uint32_t is_pup_pack = 0;
+    if (!ReadExact(file, &is_imported, sizeof(is_imported)) ||
+        !ReadExact(file, &time_elapsed, sizeof(time_elapsed)) ||
+        !ReadExact(file, &is_pup_pack, sizeof(is_pup_pack))) {
+        if (error) {
+            *error = "Unexpected end of .cRP file (import metadata)";
+        }
+        return false;
+    }
+    if (!SkipExact(file, sizeof(wchar_t) * 256)) {
+        if (error) {
+            *error = "Unexpected end of .cRP file (pup pack)";
         }
         return false;
     }
@@ -877,6 +973,7 @@ bool LoadLegacyProject(const std::string& path,
                                      frame_height,
                                      n_frames,
                                      n_sprites,
+                                     out,
                                      frame_durations,
                                      sprite_names,
                                      section_firsts,

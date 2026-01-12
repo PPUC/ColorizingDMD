@@ -17,6 +17,10 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QListView>
+#include <QSizePolicy>
+#include <QStyle>
+#include <QScrollArea>
+#include <QColorDialog>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -68,14 +72,20 @@ constexpr int kPreviewIconWidthHd = kPreviewIconWidth * 2;
 constexpr int kPreviewIconHeightHd = kPreviewIconHeight * 2;
 constexpr int kPreviewItemWidthHd = kPreviewIconWidthHd + 12;
 constexpr int kPreviewItemHeightHd = kPreviewIconHeightHd + 28;
+constexpr int kPaletteSwatchSize = 26;
+constexpr int kPaletteItemSize = 32;
+constexpr int kReducedPaletteCount = 64;
 constexpr int kMaxUndoDepth = 50;
 constexpr int kFrameGapPixels = 8;
 
 constexpr int kFrameIndexRole = Qt::UserRole + 1;
 constexpr int kFrameDurationRole = Qt::UserRole + 2;
 constexpr int kPreviewIconSizeRole = Qt::UserRole + 3;
+constexpr int kPaletteDisabledRole = Qt::UserRole + 4;
 
 cv::Mat EnsureBgr(const cv::Mat& source);
+uint16_t BgrToRgb565(const cv::Vec3b& color);
+cv::Vec3b Rgb565ToBgr(uint16_t value);
 
 struct FrameLayout {
     int topWidth = 0;
@@ -236,6 +246,7 @@ public:
         QStyle* style = opt.widget ? opt.widget->style() : QApplication::style();
 
         style->drawPrimitive(QStyle::PE_PanelItemViewItem, &opt, painter, opt.widget);
+        painter->setClipRect(opt.rect);
 
         const QFontMetrics metrics(opt.font);
         const int padding = 6;
@@ -352,6 +363,75 @@ public:
     }
 };
 
+class PaletteSwatchDelegate : public QStyledItemDelegate
+{
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
+        painter->save();
+
+        QStyleOptionViewItem opt = option;
+        initStyleOption(&opt, index);
+        painter->fillRect(opt.rect, opt.palette.base());
+        painter->setClipRect(opt.rect);
+
+        const QIcon icon = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
+        const int swatchSize = kPaletteItemSize;
+        const QRect swatchRect(opt.rect.center().x() - swatchSize / 2,
+                               opt.rect.center().y() - swatchSize / 2,
+                               swatchSize,
+                               swatchSize);
+        if (!icon.isNull()) {
+            const QSize iconSize = opt.decorationSize.isValid() ? opt.decorationSize
+                                                                : QSize(kPaletteSwatchSize, kPaletteSwatchSize);
+            const QPixmap pixmap = icon.pixmap(iconSize, QIcon::Normal, QIcon::Off);
+            const QSize targetSize = pixmap.size().scaled(swatchRect.size(), Qt::KeepAspectRatio);
+            const QPoint topLeft(swatchRect.center().x() - targetSize.width() / 2,
+                                 swatchRect.center().y() - targetSize.height() / 2);
+            painter->drawPixmap(QRect(topLeft, targetSize), pixmap);
+        }
+
+        QPen basePen(QColor(0, 0, 0));
+        basePen.setWidth(1);
+        painter->setPen(basePen);
+        painter->drawRect(swatchRect.adjusted(0, 0, -1, -1));
+
+        if (index.data(kPaletteDisabledRole).toBool()) {
+            painter->fillRect(swatchRect, QColor(0, 0, 0, 120));
+            QPen crossPen(QColor(220, 0, 0, 200));
+            crossPen.setWidth(2);
+            painter->setPen(crossPen);
+            painter->drawLine(swatchRect.topLeft() + QPoint(2, 2),
+                              swatchRect.bottomRight() - QPoint(2, 2));
+            painter->drawLine(swatchRect.topRight() + QPoint(-2, 2),
+                              swatchRect.bottomLeft() + QPoint(2, -2));
+        }
+
+        if (option.state & QStyle::State_Selected) {
+            const int thickness = std::max(2, kPaletteSwatchSize / 3);
+            QColor selectionColor(255, 140, 0);
+            if (opt.widget) {
+                const QVariant value = opt.widget->property("selectionColor");
+                if (value.isValid() && value.canConvert<QColor>()) {
+                    selectionColor = value.value<QColor>();
+                }
+            }
+            QPen pen(selectionColor);
+            pen.setWidth(thickness);
+            pen.setJoinStyle(Qt::MiterJoin);
+            painter->setPen(pen);
+            const int inset = thickness / 2;
+            const QRect outline = swatchRect.adjusted(-inset, -inset, inset, inset);
+            const QRect clipped = outline.intersected(opt.rect.adjusted(0, 0, -1, -1));
+            painter->drawRect(clipped);
+        }
+
+        painter->restore();
+    }
+};
+
 cv::Mat EnsureBgr(const cv::Mat& source)
 {
     if (source.empty()) {
@@ -444,6 +524,16 @@ cv::Mat BuildBackgroundPreview(const cv::Mat& sdFrame, const cv::Mat& hdFrame, c
         return cv::Mat();
     }
     return BuildStackedFrames({sd, hd}, gapColor);
+}
+
+QSize PreviewItemSizeForIcon(const QSize& iconSize, const QFont& font)
+{
+    const QFontMetrics metrics(font);
+    const int padding = 6;
+    const int textHeight = metrics.height() + 4;
+    const int height = iconSize.height() + textHeight + padding * 2;
+    const int width = std::max(iconSize.width() + padding * 2, kPreviewItemWidth);
+    return QSize(width, height);
 }
 
 bool IsLikelyJsonFile(const QString& path)
@@ -990,12 +1080,178 @@ MainWindow::MainWindow(QWidget* parent)
     dynLayout->addLayout(dynButtons);
     dynamicMasksTab->setLayout(dynLayout);
 
+    auto* colorsTab = new QWidget(toolsTabs);
+    m_currentColorButton = new QToolButton(colorsTab);
+    m_currentColorButton->setAutoRaise(true);
+    m_currentColorButton->setFixedSize(32, 32);
+    m_currentColorButton->setToolTip("Current color");
+    m_colorInfoLabel = new QLabel("RGB565: 0xFFFF\nRGB: 255,255,255", colorsTab);
+    m_colorInfoLabel->setFixedWidth(160);
+    m_paletteSetCombo = new QComboBox(colorsTab);
+    m_colorPickButton = new QPushButton("Pick Color...", colorsTab);
+    m_paletteAssignButton = new QPushButton("Set Slot", colorsTab);
+    m_paletteList = new QListWidget(colorsTab);
+    m_paletteList->setViewMode(QListView::IconMode);
+    m_paletteList->setFlow(QListView::LeftToRight);
+    m_paletteList->setWrapping(true);
+    m_paletteList->setMovement(QListView::Static);
+    m_paletteList->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_paletteList->setResizeMode(QListView::Adjust);
+    m_paletteList->setIconSize(QSize(kPaletteSwatchSize, kPaletteSwatchSize));
+    const int paletteCellSize = kPaletteItemSize + 10;
+    m_paletteList->setGridSize(QSize(paletteCellSize, paletteCellSize));
+    m_paletteList->setSpacing(0);
+    m_paletteList->setUniformItemSizes(true);
+    m_paletteList->setResizeMode(QListView::Fixed);
+    m_paletteList->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
+    const int scrollExtent = m_paletteList->style()->pixelMetric(QStyle::PM_ScrollBarExtent, nullptr, m_paletteList);
+    const int paletteGridWidth =
+        paletteCellSize * 8 + m_paletteList->frameWidth() * 2 + scrollExtent + 4;
+    m_paletteList->setMinimumWidth(paletteGridWidth);
+    m_paletteList->setMaximumWidth(paletteGridWidth);
+    m_paletteList->setItemDelegate(new PaletteSwatchDelegate(m_paletteList));
+    m_paletteList->setFrameShape(QFrame::NoFrame);
+    m_paletteList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_paletteList->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_paletteList->setFixedHeight(paletteGridWidth);
+    m_paletteList->setProperty("selectionColor", QColor(255, 140, 0));
+
+    m_reducedSetCombo = new QComboBox(colorsTab);
+    m_reducedAssignButton = new QPushButton("Set Slot", colorsTab);
+    m_reducedPaletteList = new QListWidget(colorsTab);
+    m_reducedPaletteList->setViewMode(QListView::IconMode);
+    m_reducedPaletteList->setFlow(QListView::LeftToRight);
+    m_reducedPaletteList->setWrapping(true);
+    m_reducedPaletteList->setMovement(QListView::Static);
+    m_reducedPaletteList->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_reducedPaletteList->setResizeMode(QListView::Fixed);
+    m_reducedPaletteList->setIconSize(QSize(kPaletteSwatchSize, kPaletteSwatchSize));
+    m_reducedPaletteList->setGridSize(QSize(paletteCellSize, paletteCellSize));
+    m_reducedPaletteList->setSpacing(0);
+    m_reducedPaletteList->setUniformItemSizes(true);
+    m_reducedPaletteList->setItemDelegate(new PaletteSwatchDelegate(m_reducedPaletteList));
+    m_reducedPaletteList->setFrameShape(QFrame::NoFrame);
+    m_reducedPaletteList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_reducedPaletteList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    const int reducedGridWidth = paletteCellSize * 8 + m_reducedPaletteList->frameWidth() * 2 + 4;
+    const int reducedGridHeight = paletteCellSize * 2 + m_reducedPaletteList->frameWidth() * 2 + 4;
+    m_reducedPaletteList->setFixedSize(reducedGridWidth, reducedGridHeight);
+    m_reducedPaletteList->setProperty("selectionColor", QColor(255, 140, 0));
+    connect(m_reducedPaletteList, &QListWidget::currentRowChanged, this, [this](int row) {
+        if (row < 0) {
+            return;
+        }
+        m_reducedSlotIndex = row;
+        if (m_reducedAssignButton) {
+            m_reducedAssignButton->setEnabled(true);
+        }
+        if (m_dynamicPaletteList) {
+            QSignalBlocker blocker(m_dynamicPaletteList);
+            m_dynamicPaletteList->setCurrentRow(-1);
+            m_dynamicSlotIndex = -1;
+        }
+        m_paletteSelectionIsReference = true;
+        if (m_paletteList) {
+            m_paletteList->setProperty("selectionColor", QColor(70, 150, 255));
+            m_paletteList->viewport()->update();
+        }
+        const QColor color = reducedSlotColor(m_reducedPaletteIndex, row);
+        setDrawColor(color, true);
+    });
+    auto* reducedLayout = new QVBoxLayout();
+    auto* reducedTop = new QHBoxLayout();
+    reducedTop->addWidget(new QLabel("Reduced set", colorsTab));
+    reducedTop->addWidget(m_reducedSetCombo);
+    reducedTop->addStretch(1);
+    reducedTop->addWidget(m_reducedAssignButton);
+    reducedLayout->addLayout(reducedTop);
+    reducedLayout->addWidget(m_reducedPaletteList);
+
+    m_dynamicSetCombo = new QComboBox(colorsTab);
+    m_dynamicAssignButton = new QPushButton("Set Slot", colorsTab);
+    m_dynamicPaletteList = new QListWidget(colorsTab);
+    m_dynamicPaletteList->setViewMode(QListView::IconMode);
+    m_dynamicPaletteList->setFlow(QListView::LeftToRight);
+    m_dynamicPaletteList->setWrapping(true);
+    m_dynamicPaletteList->setMovement(QListView::Static);
+    m_dynamicPaletteList->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_dynamicPaletteList->setResizeMode(QListView::Fixed);
+    m_dynamicPaletteList->setIconSize(QSize(kPaletteSwatchSize, kPaletteSwatchSize));
+    m_dynamicPaletteList->setGridSize(QSize(paletteCellSize, paletteCellSize));
+    m_dynamicPaletteList->setSpacing(0);
+    m_dynamicPaletteList->setUniformItemSizes(true);
+    m_dynamicPaletteList->setItemDelegate(new PaletteSwatchDelegate(m_dynamicPaletteList));
+    m_dynamicPaletteList->setFrameShape(QFrame::NoFrame);
+    m_dynamicPaletteList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_dynamicPaletteList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    const int dynamicGridWidth = paletteCellSize * 8 + m_dynamicPaletteList->frameWidth() * 2 + 4;
+    const int dynamicGridHeight = paletteCellSize * 2 + m_dynamicPaletteList->frameWidth() * 2 + 4;
+    m_dynamicPaletteList->setFixedSize(dynamicGridWidth, dynamicGridHeight);
+    m_dynamicPaletteList->setProperty("selectionColor", QColor(255, 140, 0));
+    connect(m_dynamicPaletteList, &QListWidget::currentRowChanged, this, [this](int row) {
+        if (row < 0) {
+            return;
+        }
+        m_dynamicSlotIndex = row;
+        if (m_dynamicAssignButton) {
+            m_dynamicAssignButton->setEnabled(true);
+        }
+        if (m_reducedPaletteList) {
+            QSignalBlocker blocker(m_reducedPaletteList);
+            m_reducedPaletteList->setCurrentRow(-1);
+            m_reducedSlotIndex = -1;
+        }
+        m_paletteSelectionIsReference = true;
+        if (m_paletteList) {
+            m_paletteList->setProperty("selectionColor", QColor(70, 150, 255));
+            m_paletteList->viewport()->update();
+        }
+        const QColor color = dynamicSlotColor(row);
+        setDrawColor(color, true);
+    });
+    auto* dynamicLayout = new QVBoxLayout();
+    auto* dynamicTop = new QHBoxLayout();
+    dynamicTop->addWidget(new QLabel("Dynamic set", colorsTab));
+    dynamicTop->addWidget(m_dynamicSetCombo);
+    dynamicTop->addStretch(1);
+    dynamicTop->addWidget(m_dynamicAssignButton);
+    dynamicLayout->addLayout(dynamicTop);
+    dynamicLayout->addWidget(m_dynamicPaletteList);
+
+    auto* colorsScrollArea = new QScrollArea(colorsTab);
+    colorsScrollArea->setWidgetResizable(true);
+    colorsScrollArea->setFrameShape(QFrame::NoFrame);
+    auto* colorsContent = new QWidget(colorsScrollArea);
+    auto* colorLayout = new QVBoxLayout(colorsContent);
+    auto* colorTop = new QHBoxLayout();
+    colorTop->addWidget(m_currentColorButton);
+    colorTop->addWidget(m_colorInfoLabel, 1);
+    colorTop->addWidget(m_colorPickButton);
+    colorLayout->addLayout(colorTop);
+    auto* fullTop = new QHBoxLayout();
+    fullTop->addWidget(new QLabel("Full palette", colorsTab));
+    fullTop->addWidget(m_paletteSetCombo);
+    fullTop->addStretch(1);
+    fullTop->addWidget(m_paletteAssignButton);
+    colorLayout->addLayout(fullTop);
+    colorLayout->addWidget(m_paletteList);
+    colorLayout->addSpacing(8);
+    colorLayout->addLayout(reducedLayout);
+    colorLayout->addSpacing(8);
+    colorLayout->addLayout(dynamicLayout);
+    colorsContent->setLayout(colorLayout);
+    colorsScrollArea->setWidget(colorsContent);
+    auto* colorsTabLayout = new QVBoxLayout(colorsTab);
+    colorsTabLayout->addWidget(colorsScrollArea);
+    colorsTab->setLayout(colorsTabLayout);
+
     toolsTabs->addTab(framesTab, "Frames");
     toolsTabs->addTab(spritesTab, "Sprites");
     toolsTabs->addTab(imagesTab, "Images");
     toolsTabs->addTab(masksTab, "Masks");
     toolsTabs->addTab(dynamicMasksTab, "Dynamic Masks");
     toolsTabs->addTab(backgroundsTab, "Backgrounds");
+    toolsTabs->addTab(colorsTab, "Colors");
     toolDock->setWidget(toolsTabs);
     addDockWidget(Qt::LeftDockWidgetArea, toolDock);
 
@@ -1298,6 +1554,8 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(m_frameDynamicMaskAssign, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         setCurrentFrameDynamicMaskId(m_frameDynamicMaskAssign->currentData().toInt());
+        syncDynamicSetSelection();
+        refreshDynamicPaletteButtons();
         updateMaskPreviewForFrame(m_framesList->currentRow());
         if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::DynamicMask) {
             updatePreviewFilterState();
@@ -1326,6 +1584,7 @@ MainWindow::MainWindow(QWidget* parent)
         }
     });
     connect(m_dynamicMaskList, &QListWidget::currentRowChanged, this, [this](int) {
+        syncDynamicSetSelection();
         updateMaskPreviewForFrame(m_framesList->currentRow());
         if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::DynamicMask) {
             updatePreviewFilterState();
@@ -1765,6 +2024,155 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_previewRefreshButton, &QToolButton::clicked, this, [this]() {
         refreshAllPreviews();
     });
+    initPalette();
+    refreshPaletteList();
+    refreshReducedPaletteUI();
+    refreshDynamicPaletteUI();
+    setDrawColor(QColor(255, 255, 255), true);
+    if (m_paletteAssignButton) {
+        m_paletteAssignButton->setEnabled(false);
+    }
+    connect(m_paletteList, &QListWidget::currentRowChanged, this, [this](int row) {
+        if (row >= 0 && row < m_paletteColors.size()) {
+            m_currentPaletteIndex = row;
+            if (m_paletteList) {
+                const QColor color = m_paletteSelectionIsReference ? QColor(70, 150, 255) : QColor(255, 140, 0);
+                m_paletteList->setProperty("selectionColor", color);
+                m_paletteList->viewport()->update();
+            }
+            if (m_reducedPaletteList) {
+                QSignalBlocker blocker(m_reducedPaletteList);
+                m_reducedPaletteList->setCurrentRow(-1);
+                m_reducedSlotIndex = -1;
+            }
+            if (m_dynamicPaletteList) {
+                QSignalBlocker blocker(m_dynamicPaletteList);
+                m_dynamicPaletteList->setCurrentRow(-1);
+                m_dynamicSlotIndex = -1;
+            }
+            m_paletteSelectionIsReference = false;
+            setDrawColor(m_paletteColors[row], false);
+            if (m_paletteAssignButton) {
+                m_paletteAssignButton->setEnabled(true);
+            }
+        } else if (m_paletteAssignButton) {
+            m_paletteAssignButton->setEnabled(false);
+        }
+    });
+    connect(m_paletteList, &QListWidget::itemClicked, this, [this](QListWidgetItem*) {
+        m_paletteSelectionIsReference = false;
+        if (m_paletteList) {
+            m_paletteList->setProperty("selectionColor", QColor(255, 140, 0));
+            m_paletteList->viewport()->update();
+        }
+    });
+    connect(m_paletteList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) {
+        if (!item) {
+            return;
+        }
+        const int row = item->data(Qt::UserRole).toInt();
+        if (row < 0 || row >= m_paletteColors.size()) {
+            return;
+        }
+        const QColor picked = QColorDialog::getColor(m_paletteColors[row], this, "Select palette color");
+        if (!picked.isValid()) {
+            return;
+        }
+        const cv::Vec3b quant = Rgb565ToBgr(BgrToRgb565(cv::Vec3b(picked.blue(), picked.green(), picked.red())));
+        m_paletteColors[row] = QColor(quant[2], quant[1], quant[0]);
+        if (m_paletteSetIndex >= 0 && m_paletteSetIndex < m_fullPalettes.size()) {
+            m_fullPalettes[m_paletteSetIndex] = m_paletteColors;
+        }
+        refreshPaletteList();
+        m_paletteList->setCurrentRow(row);
+    });
+    connect(m_colorPickButton, &QPushButton::clicked, this, [this]() {
+        const QColor current(static_cast<int>(m_drawColor[2]),
+                             static_cast<int>(m_drawColor[1]),
+                             static_cast<int>(m_drawColor[0]));
+        const QColor picked = QColorDialog::getColor(current, this, "Select draw color");
+        if (!picked.isValid()) {
+            return;
+        }
+        setDrawColor(picked, true);
+    });
+    connect(m_currentColorButton, &QToolButton::clicked, this, [this]() {
+        const QColor current(static_cast<int>(m_drawColor[2]),
+                             static_cast<int>(m_drawColor[1]),
+                             static_cast<int>(m_drawColor[0]));
+        const QColor picked = QColorDialog::getColor(current, this, "Select draw color");
+        if (!picked.isValid()) {
+            return;
+        }
+        setDrawColor(picked, true);
+    });
+    connect(m_paletteAssignButton, &QPushButton::clicked, this, [this]() {
+        if (m_currentPaletteIndex < 0 || m_currentPaletteIndex >= m_paletteColors.size()) {
+            return;
+        }
+        const QColor current(static_cast<int>(m_drawColor[2]),
+                             static_cast<int>(m_drawColor[1]),
+                             static_cast<int>(m_drawColor[0]));
+        m_paletteColors[m_currentPaletteIndex] = current;
+        if (m_paletteSetIndex >= 0 && m_paletteSetIndex < m_fullPalettes.size()) {
+            m_fullPalettes[m_paletteSetIndex] = m_paletteColors;
+        }
+        refreshPaletteList();
+        m_paletteList->setCurrentRow(m_currentPaletteIndex);
+    });
+    connect(m_paletteSetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+        if (index < 0 || index >= m_fullPalettes.size()) {
+            return;
+        }
+        m_paletteSetIndex = index;
+        m_paletteColors = m_fullPalettes[m_paletteSetIndex];
+        m_currentPaletteIndex = 0;
+        refreshPaletteList();
+        refreshReducedPaletteButtons();
+        if (!m_paletteColors.isEmpty()) {
+            setDrawColor(m_paletteColors.front(), true);
+        }
+    });
+    connect(m_reducedSetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+        if (index < 0 || index >= kReducedPaletteCount) {
+            return;
+        }
+        m_reducedPaletteIndex = index;
+        refreshReducedPaletteButtons();
+    });
+    connect(m_dynamicSetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+        if (index < 0 || index >= MAX_DYNA_SETS_PER_FRAMEN) {
+            return;
+        }
+        m_dynamicSetIndex = index;
+        refreshDynamicPaletteButtons();
+    });
+    connect(m_reducedAssignButton, &QPushButton::clicked, this, [this]() {
+        if (m_reducedSlotIndex < 0 || m_reducedSlotIndex >= 16) {
+            return;
+        }
+        const QColor current(static_cast<int>(m_drawColor[2]),
+                             static_cast<int>(m_drawColor[1]),
+                             static_cast<int>(m_drawColor[0]));
+        setReducedSlotColor(m_reducedPaletteIndex, m_reducedSlotIndex, current);
+        refreshReducedPaletteButtons();
+        setDrawColor(current, true);
+    });
+    connect(m_dynamicAssignButton, &QPushButton::clicked, this, [this]() {
+        if (m_dynamicSlotIndex < 0 || m_dynamicSlotIndex >= 16) {
+            return;
+        }
+        const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
+        if (frameIndex < 0 || frameIndex >= static_cast<int>(m_frameDynamicColors.size())) {
+            return;
+        }
+        const QColor current(static_cast<int>(m_drawColor[2]),
+                             static_cast<int>(m_drawColor[1]),
+                             static_cast<int>(m_drawColor[0]));
+        setDynamicSlotColor(frameIndex, m_dynamicSetIndex, m_dynamicSlotIndex, current);
+        refreshDynamicPaletteButtons();
+        setDrawColor(current, true);
+    });
     connect(m_toolsTabs, &QTabWidget::currentChanged, this, [this](int) {
         if (m_previewFilterEnabled) {
             updatePreviewFilterState();
@@ -1946,6 +2354,7 @@ void MainWindow::openProjectFile(const QString& filename)
         if (m_frameBackgroundIds.size() < legacy.frames.size()) {
             m_frameBackgroundIds.resize(legacy.frames.size(), 0xffff);
         }
+        loadPaletteFromProject(legacy);
 
         QStringList frames;
         for (int i = 0; i < static_cast<int>(legacy.frames.size()); ++i) {
@@ -2134,6 +2543,25 @@ LegacyProject MainWindow::buildLegacyProject(const QString& baseName) const
     project.background_ids = m_frameBackgroundIds;
     project.background_masks = m_frameBackgroundMasks;
     project.background_masks_x = m_frameBackgroundMasksX;
+    project.active_reduced_palette = static_cast<uint8_t>(std::max(0, std::min(m_reducedPaletteIndex, kReducedPaletteCount - 1)));
+    project.preview_reduced_palette = project.active_reduced_palette;
+    project.reduced_palettes = m_reducedPaletteIndices;
+    project.reduced_palette_names = m_reducedPaletteNames;
+    project.palettes.clear();
+    project.palettes.resize(static_cast<std::size_t>(N_PALETTES * 64), 0);
+    for (int p = 0; p < N_PALETTES && p < m_fullPalettes.size(); ++p) {
+        const QVector<QColor>& colors = m_fullPalettes[p];
+        for (int i = 0; i < 64 && i < colors.size(); ++i) {
+            const QColor color = colors[i];
+            const cv::Vec3b bgr(color.blue(), color.green(), color.red());
+            project.palettes[static_cast<std::size_t>(p) * 64 + static_cast<std::size_t>(i)] = BgrToRgb565(bgr);
+        }
+    }
+    project.palette_names.clear();
+    project.palette_names.reserve(N_PALETTES);
+    for (int i = 0; i < N_PALETTES && i < m_paletteNames.size(); ++i) {
+        project.palette_names.push_back(m_paletteNames[i].toStdString());
+    }
 
     const QStringList spriteLabels = m_state->sprites();
     project.sprite_labels.reserve(static_cast<std::size_t>(spriteCount));
@@ -2395,6 +2823,7 @@ void MainWindow::refreshFramePreviews()
         item->setIcon(QIcon(pixmap));
         item->setText(QString());
         item->setData(kPreviewIconSizeRole, iconSize);
+        item->setSizeHint(PreviewItemSizeForIcon(iconSize, m_framePreviewList->font()));
         item->setData(kFrameIndexRole, i);
         int duration = 30;
         if (i < static_cast<int>(m_frameDurations.size()) && m_frameDurations[i] > 0) {
@@ -2444,6 +2873,7 @@ void MainWindow::updateFramePreviewAt(int index)
     pixmap = pixmap.scaled(iconSize, Qt::KeepAspectRatio, Qt::FastTransformation);
     item->setIcon(QIcon(pixmap));
     item->setData(kPreviewIconSizeRole, iconSize);
+    item->setSizeHint(PreviewItemSizeForIcon(iconSize, m_framePreviewList->font()));
     m_framePreviewList->doItemsLayout();
 }
 
@@ -3242,6 +3672,8 @@ void MainWindow::refreshDynamicMaskCombos()
         m_frameDynamicMaskAssign->setCurrentIndex(0);
     }
     updateDynamicMaskPreviewIcons();
+    syncDynamicSetSelection();
+    refreshDynamicPaletteButtons();
 }
 
 cv::Mat MainWindow::buildMaskIconImage(const cv::Mat& mask, const cv::Vec3b& color) const
@@ -4272,6 +4704,423 @@ void MainWindow::refreshCounts()
     m_countsLabel->setText(QString("Frames: %1, Sprites: %2").arg(m_state->frameCount()).arg(m_state->spriteCount()));
 }
 
+void MainWindow::initPalette()
+{
+    if (!m_fullPalettes.isEmpty()) {
+        return;
+    }
+    m_fullPalettes.resize(N_PALETTES);
+    m_paletteNames.resize(N_PALETTES);
+    for (int p = 0; p < N_PALETTES; ++p) {
+        m_paletteNames[p] = QString("Palette %1").arg(p);
+        m_fullPalettes[p].reserve(64);
+        for (int i = 0; i < 64; ++i) {
+            const int value = static_cast<int>(std::round(255.0 * i / 63.0));
+            QColor color(value, value, value);
+            const cv::Vec3b quant = Rgb565ToBgr(BgrToRgb565(cv::Vec3b(color.blue(), color.green(), color.red())));
+            m_fullPalettes[p].push_back(QColor(quant[2], quant[1], quant[0]));
+        }
+    }
+    m_paletteSetIndex = 0;
+    m_paletteColors = m_fullPalettes[m_paletteSetIndex];
+}
+
+void MainWindow::refreshPaletteList()
+{
+    if (!m_paletteList) {
+        return;
+    }
+    QSignalBlocker blocker(m_paletteList);
+    m_paletteList->clear();
+    for (int i = 0; i < m_paletteColors.size(); ++i) {
+        QPixmap pixmap(kPaletteSwatchSize, kPaletteSwatchSize);
+        pixmap.fill(m_paletteColors[i]);
+        auto* item = new QListWidgetItem(QIcon(pixmap), QString());
+        item->setSizeHint(m_paletteList->gridSize());
+        item->setData(Qt::UserRole, i);
+        m_paletteList->addItem(item);
+    }
+    if (m_currentPaletteIndex >= 0 && m_currentPaletteIndex < m_paletteList->count()) {
+        m_paletteList->setCurrentRow(m_currentPaletteIndex);
+    }
+    if (m_paletteSetCombo) {
+        QSignalBlocker blockCombo(m_paletteSetCombo);
+        m_paletteSetCombo->clear();
+        for (int i = 0; i < m_paletteNames.size(); ++i) {
+            const QString name = m_paletteNames[i].trimmed();
+            const QString label = name.isEmpty() ? QString::number(i + 1) : name;
+            m_paletteSetCombo->addItem(label, i);
+        }
+        if (m_paletteSetIndex >= 0 && m_paletteSetIndex < m_paletteSetCombo->count()) {
+            m_paletteSetCombo->setCurrentIndex(m_paletteSetIndex);
+        }
+    }
+}
+
+int MainWindow::reducedSlotCount() const
+{
+    const int count = static_cast<int>(m_noColors);
+    if (count <= 0) {
+        return 16;
+    }
+    return std::min(16, count);
+}
+
+int MainWindow::dynamicSlotCount() const
+{
+    const int count = static_cast<int>(m_noColors);
+    if (count <= 0) {
+        return 16;
+    }
+    return std::min(16, count);
+}
+
+int MainWindow::dynamicColorsPerSet(const std::vector<uint16_t>& colors) const
+{
+    if (colors.empty()) {
+        return 0;
+    }
+    if (colors.size() % MAX_DYNA_SETS_PER_FRAMEN == 0) {
+        return static_cast<int>(colors.size() / MAX_DYNA_SETS_PER_FRAMEN);
+    }
+    return 16;
+}
+
+QColor MainWindow::reducedSlotColor(int setIndex, int slot) const
+{
+    if (setIndex < 0 || setIndex >= kReducedPaletteCount || slot < 0 || slot >= 16) {
+        return QColor(0, 0, 0);
+    }
+    const std::size_t offset = static_cast<std::size_t>(setIndex) * 16 + static_cast<std::size_t>(slot);
+    if (offset >= m_reducedPaletteIndices.size()) {
+        return QColor(0, 0, 0);
+    }
+    const uint16_t value = m_reducedPaletteIndices[offset];
+    const cv::Vec3b bgr = Rgb565ToBgr(value);
+    return QColor(bgr[2], bgr[1], bgr[0]);
+}
+
+QColor MainWindow::dynamicSlotColor(int slot) const
+{
+    if (slot < 0 || slot >= 16) {
+        return QColor(0, 0, 0);
+    }
+    const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
+    if (frameIndex < 0 || frameIndex >= static_cast<int>(m_frameDynamicColors.size())) {
+        return QColor(0, 0, 0);
+    }
+    const std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(frameIndex)];
+    const int stride = dynamicColorsPerSet(colors);
+    if (stride <= 0 || slot >= stride) {
+        return QColor(0, 0, 0);
+    }
+    const std::size_t offset = static_cast<std::size_t>(m_dynamicSetIndex) * stride + slot;
+    if (offset >= colors.size()) {
+        return QColor(0, 0, 0);
+    }
+    const uint16_t value = colors[offset];
+    const cv::Vec3b bgr = Rgb565ToBgr(value);
+    return QColor(bgr[2], bgr[1], bgr[0]);
+}
+
+void MainWindow::setReducedSlotColor(int setIndex, int slot, const QColor& color)
+{
+    if (setIndex < 0 || setIndex >= kReducedPaletteCount || slot < 0 || slot >= 16) {
+        return;
+    }
+    if (m_reducedPaletteIndices.size() < static_cast<std::size_t>(kReducedPaletteCount * 16)) {
+        m_reducedPaletteIndices.resize(static_cast<std::size_t>(kReducedPaletteCount * 16), 0);
+    }
+    const cv::Vec3b bgr(color.blue(), color.green(), color.red());
+    const uint16_t value = BgrToRgb565(bgr);
+    const std::size_t offset = static_cast<std::size_t>(setIndex) * 16 + static_cast<std::size_t>(slot);
+    if (offset < m_reducedPaletteIndices.size()) {
+        m_reducedPaletteIndices[offset] = value;
+    }
+}
+
+void MainWindow::setDynamicSlotColor(int frameIndex, int setIndex, int slot, const QColor& color)
+{
+    if (frameIndex < 0 || frameIndex >= static_cast<int>(m_frameDynamicColors.size())) {
+        return;
+    }
+    if (setIndex < 0 || setIndex >= MAX_DYNA_SETS_PER_FRAMEN || slot < 0 || slot >= 16) {
+        return;
+    }
+    std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(frameIndex)];
+    const int stride = dynamicColorsPerSet(colors);
+    if (stride <= 0 || slot >= stride) {
+        return;
+    }
+    const std::size_t offset = static_cast<std::size_t>(setIndex) * stride + slot;
+    if (offset >= colors.size()) {
+        return;
+    }
+    const cv::Vec3b bgr(color.blue(), color.green(), color.red());
+    colors[offset] = BgrToRgb565(bgr);
+}
+
+void MainWindow::refreshReducedPaletteUI()
+{
+    if (!m_reducedSetCombo) {
+        return;
+    }
+    if (m_reducedPaletteNames.size() < static_cast<std::size_t>(kReducedPaletteCount)) {
+        m_reducedPaletteNames.resize(kReducedPaletteCount);
+    }
+    if (m_reducedPaletteIndices.size() < static_cast<std::size_t>(kReducedPaletteCount * 16)) {
+        m_reducedPaletteIndices.resize(static_cast<std::size_t>(kReducedPaletteCount * 16), 0);
+    }
+    QSignalBlocker blocker(m_reducedSetCombo);
+    m_reducedSetCombo->clear();
+    for (int i = 0; i < kReducedPaletteCount; ++i) {
+        QString name;
+        if (static_cast<std::size_t>(i) < m_reducedPaletteNames.size()) {
+            name = QString::fromStdString(m_reducedPaletteNames[static_cast<std::size_t>(i)]).trimmed();
+        }
+        const QString label = name.isEmpty() ? QString::number(i + 1) : name;
+        m_reducedSetCombo->addItem(label, i);
+    }
+    if (m_reducedPaletteIndex < 0 || m_reducedPaletteIndex >= kReducedPaletteCount) {
+        m_reducedPaletteIndex = 0;
+    }
+    if (m_reducedPaletteIndex >= 0 && m_reducedPaletteIndex < m_reducedSetCombo->count()) {
+        m_reducedSetCombo->setCurrentIndex(m_reducedPaletteIndex);
+    }
+    refreshReducedPaletteButtons();
+}
+
+void MainWindow::refreshReducedPaletteButtons()
+{
+    if (!m_reducedPaletteList) {
+        return;
+    }
+    const int slotCount = reducedSlotCount();
+    if (m_reducedSlotIndex >= slotCount) {
+        m_reducedSlotIndex = -1;
+    }
+    QSignalBlocker blocker(m_reducedPaletteList);
+    if (m_reducedPaletteList->count() != 16) {
+        m_reducedPaletteList->clear();
+        for (int i = 0; i < 16; ++i) {
+            auto* item = new QListWidgetItem();
+            item->setData(Qt::UserRole, i);
+            item->setSizeHint(m_reducedPaletteList->gridSize());
+            m_reducedPaletteList->addItem(item);
+        }
+    }
+    for (int i = 0; i < m_reducedPaletteList->count(); ++i) {
+        QListWidgetItem* item = m_reducedPaletteList->item(i);
+        if (!item) {
+            continue;
+        }
+        const bool enabled = i < slotCount;
+        Qt::ItemFlags flags = item->flags();
+        if (enabled) {
+            flags |= Qt::ItemIsEnabled | Qt::ItemIsSelectable;
+        } else {
+            flags &= ~Qt::ItemIsEnabled;
+            flags &= ~Qt::ItemIsSelectable;
+        }
+        item->setFlags(flags);
+        item->setData(kPaletteDisabledRole, !enabled);
+        QPixmap pixmap(kPaletteSwatchSize, kPaletteSwatchSize);
+        const QColor color = enabled ? reducedSlotColor(m_reducedPaletteIndex, i) : QColor(32, 32, 32);
+        pixmap.fill(color);
+        item->setIcon(QIcon(pixmap));
+    }
+    if (m_reducedSlotIndex >= 0 && m_reducedSlotIndex < m_reducedPaletteList->count()) {
+        m_reducedPaletteList->setCurrentRow(m_reducedSlotIndex);
+    } else {
+        m_reducedPaletteList->setCurrentRow(-1);
+    }
+    if (m_reducedAssignButton) {
+        m_reducedAssignButton->setEnabled(m_reducedSlotIndex >= 0);
+    }
+}
+
+void MainWindow::refreshDynamicPaletteUI()
+{
+    if (!m_dynamicSetCombo) {
+        return;
+    }
+    QSignalBlocker blocker(m_dynamicSetCombo);
+    m_dynamicSetCombo->clear();
+    for (int i = 0; i < MAX_DYNA_SETS_PER_FRAMEN; ++i) {
+        m_dynamicSetCombo->addItem(QString("Dynamic %1").arg(i + 1), i);
+    }
+    if (m_dynamicSetIndex < 0 || m_dynamicSetIndex >= MAX_DYNA_SETS_PER_FRAMEN) {
+        m_dynamicSetIndex = 0;
+    }
+    m_dynamicSetCombo->setCurrentIndex(m_dynamicSetIndex);
+    refreshDynamicPaletteButtons();
+}
+
+void MainWindow::refreshDynamicPaletteButtons()
+{
+    if (!m_dynamicPaletteList) {
+        return;
+    }
+    const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
+    const bool hasFrame = frameIndex >= 0 && frameIndex < static_cast<int>(m_frameDynamicColors.size());
+    const int slotCount = dynamicSlotCount();
+    if (m_dynamicSlotIndex >= slotCount) {
+        m_dynamicSlotIndex = -1;
+    }
+    QSignalBlocker blocker(m_dynamicPaletteList);
+    if (m_dynamicPaletteList->count() != 16) {
+        m_dynamicPaletteList->clear();
+        for (int i = 0; i < 16; ++i) {
+            auto* item = new QListWidgetItem();
+            item->setData(Qt::UserRole, i);
+            item->setSizeHint(m_dynamicPaletteList->gridSize());
+            m_dynamicPaletteList->addItem(item);
+        }
+    }
+    for (int i = 0; i < m_dynamicPaletteList->count(); ++i) {
+        QListWidgetItem* item = m_dynamicPaletteList->item(i);
+        if (!item) {
+            continue;
+        }
+        const bool enabled = hasFrame && i < slotCount;
+        Qt::ItemFlags flags = item->flags();
+        if (enabled) {
+            flags |= Qt::ItemIsEnabled | Qt::ItemIsSelectable;
+        } else {
+            flags &= ~Qt::ItemIsEnabled;
+            flags &= ~Qt::ItemIsSelectable;
+        }
+        item->setFlags(flags);
+        item->setData(kPaletteDisabledRole, !enabled);
+        QPixmap pixmap(kPaletteSwatchSize, kPaletteSwatchSize);
+        const QColor color = enabled ? dynamicSlotColor(i) : QColor(32, 32, 32);
+        pixmap.fill(color);
+        item->setIcon(QIcon(pixmap));
+    }
+    if (m_dynamicSlotIndex >= 0 && m_dynamicSlotIndex < m_dynamicPaletteList->count()) {
+        m_dynamicPaletteList->setCurrentRow(m_dynamicSlotIndex);
+    } else {
+        m_dynamicPaletteList->setCurrentRow(-1);
+    }
+    if (m_dynamicAssignButton) {
+        m_dynamicAssignButton->setEnabled(m_dynamicSlotIndex >= 0 && hasFrame);
+    }
+}
+
+void MainWindow::syncDynamicSetSelection()
+{
+    int desired = -1;
+    if (m_dynamicMaskList && m_dynamicMaskList->currentRow() >= 0) {
+        desired = m_dynamicMaskList->currentRow();
+    }
+    if (desired < 0) {
+        desired = m_dynamicSetIndex;
+    }
+    if (desired < 0 || desired >= MAX_DYNA_SETS_PER_FRAMEN) {
+        desired = 0;
+    }
+    m_dynamicSetIndex = desired;
+    if (m_dynamicSetCombo) {
+        QSignalBlocker blocker(m_dynamicSetCombo);
+        m_dynamicSetCombo->setCurrentIndex(m_dynamicSetIndex);
+    }
+}
+
+void MainWindow::setDrawColor(const QColor& color, bool updatePaletteSelection)
+{
+    const cv::Vec3b bgr = cv::Vec3b(color.blue(), color.green(), color.red());
+    const uint16_t rgb565 = BgrToRgb565(bgr);
+    const cv::Vec3b quant = Rgb565ToBgr(rgb565);
+    m_drawColor = cv::Scalar(quant[0], quant[1], quant[2], 255);
+    updateCurrentColorSwatch();
+
+    if (m_colorInfoLabel) {
+        m_colorInfoLabel->setText(QString("RGB565: 0x%1\nRGB: %2,%3,%4")
+                                      .arg(rgb565, 4, 16, QLatin1Char('0'))
+                                      .arg(quant[2])
+                                      .arg(quant[1])
+                                      .arg(quant[0])
+                                      .toUpper());
+    }
+        if (updatePaletteSelection && m_paletteList) {
+            const QColor quantColor(quant[2], quant[1], quant[0]);
+            int match = -1;
+        for (int i = 0; i < m_paletteColors.size(); ++i) {
+            if (m_paletteColors[i] == quantColor) {
+                match = i;
+                break;
+            }
+        }
+        if (match >= 0) {
+            m_currentPaletteIndex = match;
+            m_paletteList->setCurrentRow(match);
+        }
+    }
+}
+
+void MainWindow::updateCurrentColorSwatch()
+{
+    if (!m_currentColorButton) {
+        return;
+    }
+    const QColor color(static_cast<int>(m_drawColor[2]),
+                       static_cast<int>(m_drawColor[1]),
+                       static_cast<int>(m_drawColor[0]));
+    m_currentColorButton->setStyleSheet(
+        QString("QToolButton { background-color: %1; border: 1px solid #444; }").arg(color.name()));
+}
+
+void MainWindow::loadPaletteFromProject(const LegacyProject& legacy)
+{
+    initPalette();
+    if (!legacy.palettes.empty() && legacy.palettes.size() >= static_cast<std::size_t>(N_PALETTES * 64)) {
+        QVector<QVector<QColor>> loaded;
+        loaded.resize(N_PALETTES);
+        for (int p = 0; p < N_PALETTES; ++p) {
+            loaded[p].reserve(64);
+            const std::size_t base = static_cast<std::size_t>(p) * 64;
+            for (int i = 0; i < 64; ++i) {
+                const uint16_t value = legacy.palettes[base + static_cast<std::size_t>(i)];
+                const cv::Vec3b bgr = Rgb565ToBgr(value);
+                loaded[p].push_back(QColor(bgr[2], bgr[1], bgr[0]));
+            }
+        }
+        m_fullPalettes = loaded;
+    }
+    if (!legacy.palette_names.empty() && legacy.palette_names.size() >= static_cast<std::size_t>(N_PALETTES)) {
+        m_paletteNames.resize(N_PALETTES);
+        for (int i = 0; i < N_PALETTES; ++i) {
+            m_paletteNames[i] = QString::fromStdString(legacy.palette_names[static_cast<std::size_t>(i)]);
+        }
+    }
+    if (m_paletteSetIndex < 0 || m_paletteSetIndex >= m_fullPalettes.size()) {
+        m_paletteSetIndex = 0;
+    }
+    if (!m_fullPalettes.isEmpty()) {
+        m_paletteColors = m_fullPalettes[m_paletteSetIndex];
+    }
+    m_reducedPaletteIndices = legacy.reduced_palettes;
+    m_reducedPaletteNames = legacy.reduced_palette_names;
+    if (m_reducedPaletteIndices.size() < static_cast<std::size_t>(kReducedPaletteCount * 16)) {
+        m_reducedPaletteIndices.resize(static_cast<std::size_t>(kReducedPaletteCount * 16), 0);
+    }
+    if (m_reducedPaletteNames.size() < static_cast<std::size_t>(kReducedPaletteCount)) {
+        m_reducedPaletteNames.resize(static_cast<std::size_t>(kReducedPaletteCount), std::string());
+    }
+    m_reducedPaletteIndex = legacy.active_reduced_palette < kReducedPaletteCount
+        ? legacy.active_reduced_palette
+        : 0;
+    m_currentPaletteIndex = 0;
+    refreshPaletteList();
+    refreshReducedPaletteUI();
+    refreshDynamicPaletteUI();
+    if (!m_paletteColors.isEmpty()) {
+        setDrawColor(m_paletteColors.front(), true);
+    } else {
+        updateCurrentColorSwatch();
+    }
+}
+
 void MainWindow::refreshBackgroundList()
 {
     if (!m_backgroundList) {
@@ -4329,6 +5178,7 @@ void MainWindow::refreshBackgroundList()
         item->setIcon(QIcon(pixmap));
         item->setText(QString("BG %1").arg(i));
         item->setData(kPreviewIconSizeRole, iconSize);
+        item->setSizeHint(PreviewItemSizeForIcon(iconSize, m_backgroundList->font()));
         item->setData(Qt::UserRole, i);
         item->setData(Qt::UserRole + 1, QStringLiteral("background"));
         m_backgroundList->addItem(item);
@@ -4550,6 +5400,8 @@ void MainWindow::showFrameAtIndex(int index)
         }
         updateHdControlsForContext();
         updateMaskPreviewForFrame(index);
+        syncDynamicSetSelection();
+        refreshDynamicPaletteButtons();
     } else {
         updateFrameCanvasImage(-1);
     }
@@ -5387,20 +6239,27 @@ void MainWindow::pickColorFromImage(const cv::Mat& image, int x, int y)
     if (image.empty()) {
         return;
     }
+    if (x < 0 || y < 0 || x >= image.cols || y >= image.rows) {
+        return;
+    }
+    QColor picked;
     if (image.type() == CV_8UC3) {
         const cv::Vec3b color = image.at<cv::Vec3b>(y, x);
-        m_drawColor = cv::Scalar(color[0], color[1], color[2], 255);
+        picked = QColor(color[2], color[1], color[0]);
     } else if (image.type() == CV_8UC4) {
         const cv::Vec4b color = image.at<cv::Vec4b>(y, x);
-        m_drawColor = cv::Scalar(color[0], color[1], color[2], color[3]);
+        picked = QColor(color[2], color[1], color[0], color[3]);
     } else if (image.type() == CV_8UC1) {
         const uint8_t value = image.at<uint8_t>(y, x);
-        m_drawColor = cv::Scalar(value, value, value, 255);
+        picked = QColor(value, value, value);
+    } else {
+        return;
     }
-    statusBar()->showMessage(QString("Picked color: %1, %2, %3")
-                                 .arg(m_drawColor[2])
-                                 .arg(m_drawColor[1])
-                                 .arg(m_drawColor[0]),
+    setDrawColor(picked, true);
+    statusBar()->showMessage(QString("Picked color: R%1 G%2 B%3")
+                                 .arg(static_cast<int>(m_drawColor[2]))
+                                 .arg(static_cast<int>(m_drawColor[1]))
+                                 .arg(static_cast<int>(m_drawColor[0])),
                              2000);
 }
 

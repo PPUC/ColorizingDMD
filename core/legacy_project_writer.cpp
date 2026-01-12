@@ -526,6 +526,20 @@ bool SaveLegacyProject(const std::string& crom_path,
         }
     }
 
+    if (!project.reduced_palettes.empty() &&
+        project.reduced_palettes.size() >= static_cast<std::size_t>(MAX_COL_SETS * 16)) {
+        col_sets.assign(project.reduced_palettes.begin(),
+                        project.reduced_palettes.begin() + static_cast<std::size_t>(MAX_COL_SETS * 16));
+        std::fill(active_col_set.begin(), active_col_set.end(), 1);
+    }
+    if (!project.reduced_palette_names.empty()) {
+        for (uint32_t i = 0; i < MAX_COL_SETS && i < project.reduced_palette_names.size(); ++i) {
+            WriteFixedString(name_col_set, i * 64, 64, project.reduced_palette_names[i]);
+        }
+    }
+    ac_col_set = project.active_reduced_palette;
+    pre_col_set = project.preview_reduced_palette;
+
     if (!WriteExact(crp, o_frames.data(), o_frames.size()) ||
         !WriteExact(crp, active_col_set.data(), active_col_set.size() * sizeof(uint32_t)) ||
         !WriteExact(crp, col_sets.data(), col_sets.size() * sizeof(uint16_t)) ||
@@ -561,6 +575,17 @@ bool SaveLegacyProject(const std::string& crom_path,
     uint32_t time_elapsed = 0;
     uint32_t is_pup_pack = 0;
     std::vector<char> pup_pack(sizeof(wchar_t) * 256, 0);
+
+    if (!project.palettes.empty() &&
+        project.palettes.size() >= static_cast<std::size_t>(N_PALETTES * 64)) {
+        palette.assign(project.palettes.begin(),
+                       project.palettes.begin() + static_cast<std::size_t>(N_PALETTES * 64));
+    }
+    if (!project.palette_names.empty()) {
+        for (uint32_t i = 0; i < N_PALETTES && i < project.palette_names.size(); ++i) {
+            WriteFixedString(pal_names, i * 64, 64, project.palette_names[i]);
+        }
+    }
 
     if (!WriteExact(crp, sprite_rect.data(), sprite_rect.size() * sizeof(uint16_t)) ||
         !WriteExact(crp, sprite_rect_mirror.data(), sprite_rect_mirror.size() * sizeof(uint32_t)) ||

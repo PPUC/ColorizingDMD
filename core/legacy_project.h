@@ -36,6 +36,12 @@ struct LegacyProject {
     std::vector<uint32_t> frame_durations;
     std::vector<uint32_t> section_firsts;
     std::vector<std::string> section_names;
+    std::vector<uint16_t> palettes;
+    std::vector<std::string> palette_names;
+    std::vector<uint16_t> reduced_palettes;
+    std::vector<std::string> reduced_palette_names;
+    uint8_t active_reduced_palette = 0;
+    uint8_t preview_reduced_palette = 0;
     uint32_t no_colors = 64;
 };
 
