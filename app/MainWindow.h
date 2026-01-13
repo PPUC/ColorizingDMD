@@ -78,6 +78,7 @@ private:
     void refreshBackgroundList();
     void setInspectorSelection(const QString& label);
     void updateSelectionFromLists();
+    bool eventFilter(QObject* obj, QEvent* event) override;
     void showImageForPath(const QString& path);
     void showFrameAtIndex(int index);
     void showSpriteAtIndex(int index);

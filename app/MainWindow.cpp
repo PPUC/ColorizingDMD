@@ -43,12 +43,19 @@
 #include <QStyledItemDelegate>
 #include <QPainter>
 #include <QPalette>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QDropEvent>
+#include <QMimeData>
+#include <QDataStream>
+#include <QMap>
 
 #include <algorithm>
 #include <cmath>
 #include <cctype>
 #include <cstring>
 #include <unordered_set>
+#include <unordered_map>
 
 #include <opencv2/imgproc.hpp>
 
@@ -263,6 +270,7 @@ public:
 
         QStyleOptionViewItem opt = option;
         initStyleOption(&opt, index);
+        opt.showDecorationSelected = true;
         QStyle* style = opt.widget ? opt.widget->style() : QApplication::style();
 
         const bool secondarySelected = index.data(kPreviewSecondarySelectedRole).toBool();
@@ -340,9 +348,8 @@ public:
 
         QStyleOptionViewItem opt = option;
         initStyleOption(&opt, index);
-        QStyle* style = opt.widget ? opt.widget->style() : QApplication::style();
-
-        style->drawPrimitive(QStyle::PE_PanelItemViewItem, &opt, painter, opt.widget);
+        const bool selected = (opt.state & QStyle::State_Selected);
+        painter->fillRect(opt.rect, selected ? opt.palette.highlight() : opt.palette.base());
 
         const QFontMetrics metrics(opt.font);
         const int padding = 6;
@@ -372,7 +379,8 @@ public:
         }
 
         const QString text = index.data(Qt::DisplayRole).toString();
-        painter->setPen(opt.palette.text().color());
+        painter->setPen(selected ? opt.palette.highlightedText().color()
+                                 : opt.palette.text().color());
         painter->drawText(textRect, Qt::AlignHCenter | Qt::AlignVCenter, text);
 
         painter->restore();
@@ -564,6 +572,29 @@ QSize PreviewItemSizeForIcon(const QSize& iconSize, const QFont& font)
     const int height = iconSize.height() + textHeight + padding * 2;
     const int width = std::max(iconSize.width() + padding * 2, kPreviewItemWidth);
     return QSize(width, height);
+}
+
+bool ExtractListDrop(const QMimeData* mimeData, QString& kind, int& index)
+{
+    if (!mimeData || !mimeData->hasFormat("application/x-qabstractitemmodeldatalist")) {
+        return false;
+    }
+    const QByteArray encoded = mimeData->data("application/x-qabstractitemmodeldatalist");
+    QDataStream stream(encoded);
+    while (!stream.atEnd()) {
+        int row = 0;
+        int col = 0;
+        QMap<int, QVariant> roleData;
+        stream >> row >> col >> roleData;
+        if (roleData.contains(Qt::UserRole + 1) && roleData.contains(Qt::UserRole)) {
+            kind = roleData.value(Qt::UserRole + 1).toString();
+            index = roleData.value(Qt::UserRole).toInt();
+            if (!kind.isEmpty() && index >= 0) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 bool IsLikelyJsonFile(const QString& path)
@@ -1012,6 +1043,24 @@ MainWindow::MainWindow(QWidget* parent)
     m_frameFilter = new QLineEdit(framesTab);
     m_frameFilter->setPlaceholderText("Filter frames...");
     m_framesList = new QListWidget(framesTab);
+    m_framesList->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_framesList->setViewMode(QListView::IconMode);
+    m_framesList->setFlow(QListView::TopToBottom);
+    m_framesList->setWrapping(false);
+    m_framesList->setMovement(QListView::Snap);
+    m_framesList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_framesList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+    m_framesList->setResizeMode(QListView::Adjust);
+    m_framesList->setUniformItemSizes(false);
+    m_framesList->setDragDropMode(QAbstractItemView::DragOnly);
+    m_framesList->setDragDropOverwriteMode(false);
+    m_framesList->setDragEnabled(true);
+    m_framesList->setAcceptDrops(false);
+    m_framesList->setDropIndicatorShown(false);
+    m_framesList->setIconSize(QSize(kPreviewIconWidthHd, kPreviewIconHeightHd));
+    m_framesList->setGridSize(QSize());
+    m_framesList->setSpacing(4);
+    m_framesList->setItemDelegate(new ToolPreviewDelegate(m_framesList));
     auto* framesLayout = new QVBoxLayout(framesTab);
     framesLayout->addWidget(m_frameFilter);
     framesLayout->addWidget(m_framesList, 1);
@@ -1454,6 +1503,11 @@ MainWindow::MainWindow(QWidget* parent)
     m_framePreviewList->setGridSize(QSize());
     m_framePreviewList->setSpacing(1);
     m_framePreviewList->setItemDelegate(new FramePreviewDelegate(m_framePreviewList));
+    m_framePreviewList->setAcceptDrops(true);
+    m_framePreviewList->setDropIndicatorShown(true);
+    m_framePreviewList->setDragDropMode(QAbstractItemView::DropOnly);
+    m_framePreviewList->viewport()->installEventFilter(this);
+    m_framePreviewList->installEventFilter(this);
     previewLayout->addWidget(m_framePreviewList);
 
     previewWidget->setLayout(previewLayout);
@@ -1628,6 +1682,7 @@ MainWindow::MainWindow(QWidget* parent)
             setHdMode(true);
         }
         if (createdAny) {
+            refreshFrameSpriteLists();
             statusBar()->showMessage("HD frame created.", 2000);
         }
     });
@@ -1686,6 +1741,7 @@ MainWindow::MainWindow(QWidget* parent)
             setHdMode(false);
         }
         if (deletedAny) {
+            refreshFrameSpriteLists();
             statusBar()->showMessage("HD frame deleted.", 2000);
         }
     });
@@ -6804,7 +6860,70 @@ void MainWindow::refreshFrameSpriteLists()
         while (m_frameStore->count() > m_state->frames().size()) {
             m_frameStore->removeAt(m_frameStore->count() - 1);
         }
-        m_framesList->addItems(m_state->frames());
+        const QColor gap = m_framesList->palette().color(QPalette::Window);
+        const QStringList frameNames = m_state->frames();
+        std::unordered_map<int, QString> bookmarkLabels;
+        if (!m_sectionStarts.empty() && !m_sectionNames.empty()) {
+            const std::size_t count = std::min(m_sectionStarts.size(), m_sectionNames.size());
+            for (std::size_t i = 0; i < count; ++i) {
+                if (m_sectionNames[i].empty()) {
+                    continue;
+                }
+                bookmarkLabels[static_cast<int>(m_sectionStarts[i])] =
+                    QString::fromStdString(m_sectionNames[i]);
+            }
+        }
+        for (int i = 0; i < frameNames.size(); ++i) {
+            const cv::Mat* image = m_frameStore->at(i);
+            if (!image || image->empty()) {
+                continue;
+            }
+            cv::Mat base = applyDynamicColors(i, *image, false);
+            cv::Mat composed = applyBackgroundComposite(i, base, false);
+            cv::Mat hdComposed;
+            if (hasHdFrame(i) && i < static_cast<int>(m_frameExtraFrames.size())) {
+                const cv::Mat& hdFrame = m_frameExtraFrames[static_cast<std::size_t>(i)];
+                if (!hdFrame.empty()) {
+                    cv::Mat hdBase = applyDynamicColors(i, hdFrame, true);
+                    hdComposed = applyBackgroundComposite(i, hdBase, true);
+                }
+            }
+            cv::Mat previewMat = BuildBackgroundPreview(composed,
+                                                        hdComposed,
+                                                        cv::Scalar(gap.blue(), gap.green(), gap.red()));
+            if (previewMat.empty()) {
+                continue;
+            }
+            cv::Mat rgb;
+            cv::cvtColor(previewMat, rgb, cv::COLOR_BGR2RGB);
+            QImage previewImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888);
+            const QSize iconSize = hasHdFrame(i)
+                ? QSize(kPreviewIconWidthHd, kPreviewIconHeightHd)
+                : QSize(kPreviewIconWidth, kPreviewIconHeight);
+            QPixmap pixmap = QPixmap::fromImage(previewImage.copy());
+            pixmap = pixmap.scaled(iconSize, Qt::KeepAspectRatio, Qt::FastTransformation);
+
+            auto* item = new QListWidgetItem();
+            item->setIcon(QIcon(pixmap));
+            QString label = frameNames[i];
+            const auto bookmarkIt = bookmarkLabels.find(i);
+            if (bookmarkIt != bookmarkLabels.end()) {
+                label = QString("%1 - %2").arg(label, bookmarkIt->second);
+            }
+            item->setText(label);
+            item->setData(kPreviewIconSizeRole, pixmap.size());
+            {
+                const int padding = 6;
+                const int textHeight = m_framesList->fontMetrics().height() + 4;
+                const int gap = 2;
+                const int width = pixmap.width() + padding * 2;
+                const int height = pixmap.height() + textHeight + padding * 2 + gap;
+                item->setSizeHint(QSize(width, height));
+            }
+            item->setData(Qt::UserRole, i);
+            item->setData(Qt::UserRole + 1, QStringLiteral("frame"));
+            m_framesList->addItem(item);
+        }
         if (m_framesList->currentRow() < 0 && m_framesList->count() > 0) {
             m_framesList->setCurrentRow(0);
         } else if (m_framesList->currentRow() >= 0) {
@@ -6890,6 +7009,72 @@ void MainWindow::updateSelectionFromLists()
     }
 
     refreshBackgroundList();
+}
+
+bool MainWindow::eventFilter(QObject* obj, QEvent* event)
+{
+    if (m_framePreviewList &&
+        (obj == m_framePreviewList || obj == m_framePreviewList->viewport())) {
+        if (event->type() == QEvent::DragEnter) {
+            auto* dragEvent = static_cast<QDragEnterEvent*>(event);
+            QString kind;
+            int index = -1;
+            if (m_previewSelectedOnly && ExtractListDrop(dragEvent->mimeData(), kind, index) &&
+                kind == "frame") {
+                dragEvent->setDropAction(Qt::CopyAction);
+                dragEvent->acceptProposedAction();
+                return true;
+            }
+            dragEvent->ignore();
+            return true;
+        }
+        if (event->type() == QEvent::DragMove) {
+            auto* dragEvent = static_cast<QDragMoveEvent*>(event);
+            QString kind;
+            int index = -1;
+            if (m_previewSelectedOnly && ExtractListDrop(dragEvent->mimeData(), kind, index) &&
+                kind == "frame") {
+                dragEvent->setDropAction(Qt::CopyAction);
+                dragEvent->acceptProposedAction();
+                return true;
+            }
+            dragEvent->ignore();
+            return true;
+        }
+        if (event->type() == QEvent::Drop) {
+            auto* dropEvent = static_cast<QDropEvent*>(event);
+            QString kind;
+            int index = -1;
+            if (!m_previewSelectedOnly || !ExtractListDrop(dropEvent->mimeData(), kind, index) ||
+                kind != "frame") {
+                dropEvent->ignore();
+                return true;
+            }
+            const int count = m_frameStore ? m_frameStore->count() : 0;
+            if (index < 0 || index >= count) {
+                dropEvent->ignore();
+                return true;
+            }
+            if (m_framePreviewList) {
+                QSignalBlocker blocker(m_framePreviewList);
+                m_framePreviewList->clearSelection();
+            }
+            if (std::find(m_previewSelectedFrames.begin(),
+                          m_previewSelectedFrames.end(),
+                          index) == m_previewSelectedFrames.end()) {
+                m_previewSelectedFrames.push_back(index);
+                std::sort(m_previewSelectedFrames.begin(), m_previewSelectedFrames.end());
+                m_previewSelectedFrames.erase(std::unique(m_previewSelectedFrames.begin(),
+                                                          m_previewSelectedFrames.end()),
+                                              m_previewSelectedFrames.end());
+            }
+            refreshFramePreviews();
+            dropEvent->setDropAction(Qt::CopyAction);
+            dropEvent->acceptProposedAction();
+            return true;
+        }
+    }
+    return QMainWindow::eventFilter(obj, event);
 }
 
 void MainWindow::showImageForPath(const QString& path)
