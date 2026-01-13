@@ -800,8 +800,8 @@ bool LoadLegacyProject(const std::string& path,
     out.background_frames_x.reserve(n_backgrounds);
     out.frame_refs.reserve(n_frames);
     out.frame_dynamic_colors.reserve(n_frames);
-    out.frame_dynamic_mask_ids.assign(n_frames, 255);
-    out.dynamic_masks.resize(MAX_DYNA_SETS_PER_FRAMEN);
+    out.frame_dynamic_mask_maps.resize(n_frames);
+    out.frame_dynamic_mask_maps_x.resize(n_frames);
     for (uint32_t index = 0; index < n_frames; ++index) {
         const std::size_t offset = static_cast<std::size_t>(index) * frame_width * frame_height;
         const uint16_t* frame_data = frames_565.data() + offset;
@@ -816,11 +816,12 @@ bool LoadLegacyProject(const std::string& path,
                                              cols_data,
                                              ref_data,
                                              no_colors));
+        const uint8_t* mask_data_x = nullptr;
         if (!frames_x_565.empty() && frame_width_x > 0 && frame_height_x > 0 && index < extra_frame.size() &&
             extra_frame[index] != 0) {
             const std::size_t offset_x = static_cast<std::size_t>(index) * frame_width_x * frame_height_x;
             const uint16_t* frame_data_x = frames_x_565.data() + offset_x;
-            const uint8_t* mask_data_x = dyna_masks_x.empty() ? nullptr : dyna_masks_x.data() + offset_x;
+            mask_data_x = dyna_masks_x.empty() ? nullptr : dyna_masks_x.data() + offset_x;
             const uint16_t* cols_data_x = dyna_cols_x.empty() ? nullptr :
                 dyna_cols_x.data() + static_cast<std::size_t>(index) * MAX_DYNA_SETS_PER_FRAMEN * no_colors;
             const uint8_t* ref_data_x = nullptr;
@@ -846,30 +847,21 @@ bool LoadLegacyProject(const std::string& path,
             out.frames_x.emplace_back();
         }
 
-        if (mask_data) {
-            uint8_t selected_set = 255;
+        if (frame_width > 0 && frame_height > 0) {
+            cv::Mat map(static_cast<int>(frame_height), static_cast<int>(frame_width), CV_8UC1, cv::Scalar(255));
             const std::size_t pixels = static_cast<std::size_t>(frame_width) * frame_height;
-            for (std::size_t i = 0; i < pixels; ++i) {
-                const uint8_t value = mask_data[i];
-                if (value != 255) {
-                    selected_set = value;
-                    break;
-                }
+            if (mask_data) {
+                std::memcpy(map.data, mask_data, pixels);
             }
-            if (selected_set != 255 && selected_set < MAX_DYNA_SETS_PER_FRAMEN) {
-                out.frame_dynamic_mask_ids[index] = selected_set;
-                cv::Mat dynMask(static_cast<int>(frame_height), static_cast<int>(frame_width), CV_8UC1, cv::Scalar(0));
-                for (std::size_t i = 0; i < pixels; ++i) {
-                    if (mask_data[i] == selected_set) {
-                        dynMask.data[i] = 1;
-                    }
-                }
-                if (out.dynamic_masks[selected_set].empty()) {
-                    out.dynamic_masks[selected_set] = dynMask;
-                } else {
-                    cv::bitwise_or(out.dynamic_masks[selected_set], dynMask, out.dynamic_masks[selected_set]);
-                }
+            out.frame_dynamic_mask_maps[index] = map;
+        }
+        if (frame_width_x > 0 && frame_height_x > 0) {
+            cv::Mat map_x(static_cast<int>(frame_height_x), static_cast<int>(frame_width_x), CV_8UC1, cv::Scalar(255));
+            const std::size_t pixels_x = static_cast<std::size_t>(frame_width_x) * frame_height_x;
+            if (mask_data_x) {
+                std::memcpy(map_x.data, mask_data_x, pixels_x);
             }
+            out.frame_dynamic_mask_maps_x[index] = map_x;
         }
         if (ref_data) {
             cv::Mat refMat(static_cast<int>(frame_height), static_cast<int>(frame_width), CV_8UC1);

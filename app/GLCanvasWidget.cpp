@@ -513,7 +513,7 @@ void GLCanvasWidget::mousePressEvent(QMouseEvent* event)
     emit imageHovered(x, y, onImage);
     update();
     if (onImage) {
-        emit imageClicked(x, y, event->button());
+        emit imageClicked(x, y, event->button(), event->modifiers());
     }
     QOpenGLWidget::mousePressEvent(event);
 }
@@ -539,7 +539,7 @@ void GLCanvasWidget::mouseMoveEvent(QMouseEvent* event)
         int x = 0;
         int y = 0;
         if (MapToImage(event->pos(), m_image, m_zoom, m_pan, size(), x, y)) {
-            emit imageDragged(x, y, event->buttons());
+            emit imageDragged(x, y, event->buttons(), event->modifiers());
         }
     }
     QOpenGLWidget::mouseMoveEvent(event);
@@ -559,7 +559,7 @@ void GLCanvasWidget::mouseReleaseEvent(QMouseEvent* event)
     emit imageHovered(x, y, onImage);
     update();
     if (onImage) {
-        emit imageReleased(x, y, event->button());
+        emit imageReleased(x, y, event->button(), event->modifiers());
     }
     QOpenGLWidget::mouseReleaseEvent(event);
 }

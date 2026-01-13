@@ -101,10 +101,12 @@ private:
     void updatePreviewFilterState();
     std::vector<int> buildPreviewFrameIndices() const;
     void refreshAllPreviews();
-    cv::Mat buildPreviewFrame(const cv::Mat& colorized,
+    cv::Mat buildPreviewFrame(int index,
+                              const cv::Mat& colorized,
                               const cv::Mat& reference,
                               const cv::Mat& hdFrame) const;
     cv::Mat buildReferenceForSize(int index, const cv::Size& target) const;
+    cv::Mat applyDynamicColors(int index, const cv::Mat& frame, bool useHd) const;
     cv::Mat applyBackgroundComposite(int index, const cv::Mat& frame, bool useHd) const;
     cv::Mat applyBackgroundCompositeWithMask(int index,
                                              const cv::Mat& frame,
@@ -161,6 +163,8 @@ private:
     cv::Mat buildMaskIconImage(const cv::Mat& mask, const cv::Vec3b& color) const;
     void applyMaskListOrder();
     void applyDynamicMaskListOrder();
+    bool dynamicMapHasSet(const cv::Mat& map, int setId) const;
+    cv::Mat buildDynamicMaskFromMap(const cv::Mat& map, int setId) const;
     void updateFrameCanvasImage(int index);
     void updateBackgroundCanvasImage(int index);
     bool hasHdBackground(int index) const;
@@ -170,21 +174,23 @@ private:
     void setCurrentFrameMaskId(int id);
     void setCurrentFrameDynamicMaskId(int id);
     cv::Mat* activeComparisonMask();
-    cv::Mat* activeDynamicMask();
+    cv::Mat* activeDynamicMaskMap(int frameIndex);
     cv::Mat* activeBackgroundMask(int index);
     void swapMaskEntries(int a, int b);
     void swapDynamicMaskEntries(int a, int b);
     void persistRecentFiles();
-    void handleToolPress(bool isFrame, int x, int y, Qt::MouseButton button);
-    void handleToolDrag(bool isFrame, int x, int y, Qt::MouseButtons buttons);
-    void handleToolRelease(bool isFrame, int x, int y, Qt::MouseButton button);
-    void handleBackgroundToolPress(int x, int y, Qt::MouseButton button);
-    void handleBackgroundToolDrag(int x, int y, Qt::MouseButtons buttons);
-    void handleBackgroundToolRelease(int x, int y, Qt::MouseButton button);
+    void handleToolPress(bool isFrame, int x, int y, Qt::MouseButton button, Qt::KeyboardModifiers modifiers);
+    void handleToolDrag(bool isFrame, int x, int y, Qt::MouseButtons buttons, Qt::KeyboardModifiers modifiers);
+    void handleToolRelease(bool isFrame, int x, int y, Qt::MouseButton button, Qt::KeyboardModifiers modifiers);
+    void handleBackgroundToolPress(int x, int y, Qt::MouseButton button, Qt::KeyboardModifiers modifiers);
+    void handleBackgroundToolDrag(int x, int y, Qt::MouseButtons buttons, Qt::KeyboardModifiers modifiers);
+    void handleBackgroundToolRelease(int x, int y, Qt::MouseButton button, Qt::KeyboardModifiers modifiers);
     void applyToolToImage(cv::Mat& image, DrawTool tool, const QPoint& start, const QPoint& end, bool erase);
     void applyMagicFill(cv::Mat& image, int x, int y);
     void pickColorFromImage(const cv::Mat& image, int x, int y);
     cv::Scalar currentDrawColor(bool erase) const;
+    void applyToolToDynamicMask(cv::Mat& map, int setId, DrawTool tool, const QPoint& start, const QPoint& end, bool erase);
+    void applyDynamicMaskFill(cv::Mat& map, int setId, int x, int y, bool erase);
     void initPalette();
     void refreshPaletteList();
     int reducedSlotCount() const;
@@ -194,6 +200,7 @@ private:
     QColor dynamicSlotColor(int slot) const;
     void setReducedSlotColor(int setIndex, int slot, const QColor& color);
     void setDynamicSlotColor(int frameIndex, int setIndex, int slot, const QColor& color);
+    void applyDynamicColorsToFrame(int frameIndex);
     void refreshReducedPaletteUI();
     void refreshReducedPaletteButtons();
     void refreshDynamicPaletteUI();
@@ -229,6 +236,7 @@ private:
     class QToolButton* m_previewFilterButton;
     class QToolButton* m_previewFilterClearButton;
     class QToolButton* m_previewHdButton;
+    class QToolButton* m_previewMaskOverlayButton;
     class QToolButton* m_previewRefreshButton;
     class QListWidget* m_maskList;
     class QToolButton* m_maskMoveUp;
@@ -241,6 +249,7 @@ private:
     class QLabel* m_backgroundAssignLabel;
     class QComboBox* m_frameMaskAssign;
     class QComboBox* m_frameDynamicMaskAssign;
+    class QPushButton* m_frameDynamicCopyButton;
     class QComboBox* m_frameBackgroundAssign;
     class QCheckBox* m_shapeCompToggle;
     class QComboBox* m_hdSourceCombo;
@@ -296,7 +305,8 @@ private:
     std::vector<cv::Mat> m_frameRefs;
     std::vector<std::vector<uint16_t>> m_frameDynamicColors;
     std::vector<cv::Mat> m_compMasks;
-    std::vector<cv::Mat> m_dynamicMasks;
+    std::vector<cv::Mat> m_frameDynamicMaskMaps;
+    std::vector<cv::Mat> m_frameDynamicMaskMapsX;
     std::vector<cv::Mat> m_backgroundFramesX;
     std::vector<uint8_t> m_backgroundExtraFlags;
     std::vector<uint16_t> m_frameBackgroundIds;
@@ -305,7 +315,6 @@ private:
     std::vector<cv::Mat> m_frameExtraFrames;
     std::vector<uint8_t> m_frameExtraFlags;
     std::vector<uint8_t> m_frameCompMaskIds;
-    std::vector<uint8_t> m_frameDynamicMaskIds;
     std::vector<uint8_t> m_frameShapeCompModes;
 
     bool m_drawPointEnabled = false;
@@ -326,6 +335,7 @@ private:
     bool m_previewFilterEnabled = false;
     PreviewFilterKind m_previewFilterKind = PreviewFilterKind::None;
     bool m_previewHdOnly = false;
+    bool m_previewMaskOverlayEnabled = false;
     class QAction* m_undoAction;
     class QAction* m_redoAction;
     DrawTool m_drawTool = DrawTool::Point;

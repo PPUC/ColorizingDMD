@@ -25,6 +25,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QInputDialog>
 #include <QSettings>
 #include <QSpinBox>
 #include <QStatusBar>
@@ -46,6 +47,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cctype>
+#include <cstring>
 
 #include <opencv2/imgproc.hpp>
 
@@ -73,6 +75,9 @@ constexpr int kPreviewIconWidthHd = kPreviewIconWidth * 2;
 constexpr int kPreviewIconHeightHd = kPreviewIconHeight * 2;
 constexpr int kPreviewItemWidthHd = kPreviewIconWidthHd + 12;
 constexpr int kPreviewItemHeightHd = kPreviewIconHeightHd + 28;
+constexpr int kDynamicColorStripWidth = 64;
+constexpr int kDynamicMaskIconWidth = kPreviewIconWidth + kDynamicColorStripWidth + 8;
+constexpr int kDynamicMaskItemWidth = kDynamicMaskIconWidth + 12;
 constexpr int kPaletteSwatchSize = 26;
 constexpr int kPaletteItemSize = 32;
 constexpr int kReducedPaletteCount = 64;
@@ -320,6 +325,7 @@ public:
         const QFontMetrics metrics(opt.font);
         const int padding = 6;
         const int textHeight = metrics.height() + 4;
+        const int gap = 2;
         QRect contentRect = opt.rect.adjusted(padding, padding, -padding, -padding);
         const QSize iconSize = index.data(kPreviewIconSizeRole).toSize().isValid()
             ? index.data(kPreviewIconSizeRole).toSize()
@@ -328,9 +334,9 @@ public:
         QRect iconRect(iconX,
                        contentRect.top(),
                        iconSize.width(),
-                       std::max(0, contentRect.height() - textHeight - 2));
+                       iconSize.height());
         QRect textRect(iconRect.left(),
-                       contentRect.bottom() - textHeight + 1,
+                       iconRect.bottom() + gap,
                        iconRect.width(),
                        textHeight);
 
@@ -355,11 +361,12 @@ public:
         const QFontMetrics metrics(option.font);
         const int padding = 6;
         const int textHeight = metrics.height() + 4;
+        const int gap = 2;
         const QSize iconSize = index.data(kPreviewIconSizeRole).toSize().isValid()
             ? index.data(kPreviewIconSizeRole).toSize()
             : option.decorationSize.isValid() ? option.decorationSize : QSize(kPreviewIconWidth, kPreviewIconHeight);
-        const int height = iconSize.height() + textHeight + padding * 2;
-        const int width = std::max(iconSize.width() + padding * 2, kPreviewItemWidth);
+        const int height = iconSize.height() + textHeight + padding * 2 + gap;
+        const int width = iconSize.width() + padding * 2;
         return QSize(width, height);
     }
 };
@@ -754,9 +761,9 @@ MainWindow::MainWindow(QWidget* parent)
         m_frameRefs.clear();
         m_frameDynamicColors.clear();
         m_compMasks.clear();
-        m_dynamicMasks.clear();
         m_frameCompMaskIds.clear();
-        m_frameDynamicMaskIds.clear();
+        m_frameDynamicMaskMaps.clear();
+        m_frameDynamicMaskMapsX.clear();
         m_frameShapeCompModes.clear();
         m_noColors = 64;
         resetUndoStacks();
@@ -913,8 +920,11 @@ MainWindow::MainWindow(QWidget* parent)
             if (row >= 0 && row < static_cast<int>(m_frameCompMaskIds.size())) {
                 m_frameCompMaskIds.erase(m_frameCompMaskIds.begin() + row);
             }
-            if (row >= 0 && row < static_cast<int>(m_frameDynamicMaskIds.size())) {
-                m_frameDynamicMaskIds.erase(m_frameDynamicMaskIds.begin() + row);
+            if (row >= 0 && row < static_cast<int>(m_frameDynamicMaskMaps.size())) {
+                m_frameDynamicMaskMaps.erase(m_frameDynamicMaskMaps.begin() + row);
+            }
+            if (row >= 0 && row < static_cast<int>(m_frameDynamicMaskMapsX.size())) {
+                m_frameDynamicMaskMapsX.erase(m_frameDynamicMaskMapsX.begin() + row);
             }
             ensureUndoStacksSize();
         } else if (m_spritesList->hasFocus()) {
@@ -1037,7 +1047,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_maskList->setAcceptDrops(false);
     m_maskList->setDropIndicatorShown(false);
     m_maskList->setIconSize(QSize(kPreviewIconWidth, kPreviewIconHeight));
-    m_maskList->setGridSize(QSize(kPreviewItemWidth, kPreviewItemHeight));
+    m_maskList->setGridSize(QSize());
     m_maskList->setSpacing(6);
     m_maskList->setItemDelegate(new ToolPreviewDelegate(m_maskList));
     m_maskMoveUp = new QToolButton(masksTab);
@@ -1069,8 +1079,8 @@ MainWindow::MainWindow(QWidget* parent)
     m_dynamicMaskList->setDragEnabled(true);
     m_dynamicMaskList->setAcceptDrops(false);
     m_dynamicMaskList->setDropIndicatorShown(false);
-    m_dynamicMaskList->setIconSize(QSize(kPreviewIconWidth, kPreviewIconHeight));
-    m_dynamicMaskList->setGridSize(QSize(kPreviewItemWidth, kPreviewItemHeight));
+    m_dynamicMaskList->setIconSize(QSize(kDynamicMaskIconWidth, kPreviewIconHeight));
+    m_dynamicMaskList->setGridSize(QSize());
     m_dynamicMaskList->setSpacing(6);
     m_dynamicMaskList->setItemDelegate(new ToolPreviewDelegate(m_dynamicMaskList));
     m_dynamicMaskMoveUp = new QToolButton(dynamicMasksTab);
@@ -1328,6 +1338,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_spriteMetaLabel = new QLabel("-", inspectorWidget);
     m_frameMaskAssign = new QComboBox(inspectorWidget);
     m_frameDynamicMaskAssign = new QComboBox(inspectorWidget);
+    m_frameDynamicCopyButton = new QPushButton("Copy to frame...", inspectorWidget);
     m_frameBackgroundAssign = new QComboBox(inspectorWidget);
     m_backgroundAssignLabel = new QLabel("Background", inspectorWidget);
     m_shapeCompToggle = new QCheckBox("Shape comparison", inspectorWidget);
@@ -1350,6 +1361,7 @@ MainWindow::MainWindow(QWidget* parent)
     inspectorLayout->addRow("Sprite info", m_spriteMetaLabel);
     inspectorLayout->addRow("Mask", m_frameMaskAssign);
     inspectorLayout->addRow("Dynamic mask", m_frameDynamicMaskAssign);
+    inspectorLayout->addRow("Dynamic copy", m_frameDynamicCopyButton);
     inspectorLayout->addRow(m_backgroundAssignLabel, m_frameBackgroundAssign);
     inspectorLayout->addRow("Shape compare", m_shapeCompToggle);
     inspectorLayout->addRow("HD source", m_hdSourceCombo);
@@ -1385,6 +1397,13 @@ MainWindow::MainWindow(QWidget* parent)
     m_previewHdButton->setCheckable(true);
     m_previewHdButton->setToolTip("Show only frames with HD data");
     previewBar->addWidget(m_previewHdButton);
+    m_previewMaskOverlayButton = new QToolButton(previewWidget);
+    m_previewMaskOverlayButton->setText("Masks");
+    m_previewMaskOverlayButton->setCheckable(true);
+    m_previewMaskOverlayButton->setToolTip("Overlay masks on preview originals");
+    m_previewMaskOverlayButton->setChecked(true);
+    m_previewMaskOverlayEnabled = true;
+    previewBar->addWidget(m_previewMaskOverlayButton);
     m_previewRefreshButton = new QToolButton(previewWidget);
     m_previewRefreshButton->setText("Refresh");
     m_previewRefreshButton->setToolTip("Refresh preview thumbnails");
@@ -1552,6 +1571,18 @@ MainWindow::MainWindow(QWidget* parent)
                 cv::resize(sdMask, hdMask, resized.size(), 0.0, 0.0, cv::INTER_NEAREST);
             }
         }
+        if (index >= 0) {
+            if (m_frameDynamicMaskMapsX.size() <= static_cast<std::size_t>(index)) {
+                m_frameDynamicMaskMapsX.resize(static_cast<std::size_t>(index + 1));
+            }
+            if (index < static_cast<int>(m_frameDynamicMaskMaps.size())) {
+                const cv::Mat& sdMap = m_frameDynamicMaskMaps[static_cast<std::size_t>(index)];
+                cv::Mat& hdMap = m_frameDynamicMaskMapsX[static_cast<std::size_t>(index)];
+                if (!sdMap.empty() && (hdMap.empty() || hdMap.size() != resized.size())) {
+                    cv::resize(sdMap, hdMap, resized.size(), 0.0, 0.0, cv::INTER_NEAREST);
+                }
+            }
+        }
         if (index < static_cast<int>(m_frameHdUndoStacks.size())) {
             m_frameHdUndoStacks[static_cast<std::size_t>(index)] = UndoStack{};
         }
@@ -1607,6 +1638,9 @@ MainWindow::MainWindow(QWidget* parent)
         if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::Mask) {
             updatePreviewFilterState();
         }
+        if (m_previewMaskOverlayEnabled && m_maskMode == MaskMode::Comparison) {
+            refreshFramePreviews();
+        }
     });
     connect(m_frameDynamicMaskAssign, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         setCurrentFrameDynamicMaskId(m_frameDynamicMaskAssign->currentData().toInt());
@@ -1616,6 +1650,55 @@ MainWindow::MainWindow(QWidget* parent)
         if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::DynamicMask) {
             updatePreviewFilterState();
         }
+        if (m_previewMaskOverlayEnabled && m_maskMode == MaskMode::Dynamic) {
+            refreshFramePreviews();
+        }
+    });
+    connect(m_frameDynamicCopyButton, &QPushButton::clicked, this, [this]() {
+        const int frameCount = m_frameStore ? m_frameStore->count() : 0;
+        const int sourceIndex = m_framesList ? m_framesList->currentRow() : -1;
+        if (frameCount <= 0 || sourceIndex < 0) {
+            return;
+        }
+        bool ok = false;
+        const int targetDisplay = QInputDialog::getInt(this,
+                                                       "Copy Dynamic Masks",
+                                                       "Copy to frame number (1-based):",
+                                                       sourceIndex + 1,
+                                                       1,
+                                                       frameCount,
+                                                       1,
+                                                       &ok);
+        if (!ok) {
+            return;
+        }
+        const int targetIndex = targetDisplay - 1;
+        if (targetIndex < 0 || targetIndex >= frameCount || targetIndex == sourceIndex) {
+            return;
+        }
+        ensureMaskDataSize();
+        if (sourceIndex < static_cast<int>(m_frameDynamicMaskMaps.size()) &&
+            targetIndex < static_cast<int>(m_frameDynamicMaskMaps.size())) {
+            const cv::Mat& sourceMap = m_frameDynamicMaskMaps[static_cast<std::size_t>(sourceIndex)];
+            m_frameDynamicMaskMaps[static_cast<std::size_t>(targetIndex)] = sourceMap.clone();
+        }
+        if (sourceIndex < static_cast<int>(m_frameDynamicMaskMapsX.size()) &&
+            targetIndex < static_cast<int>(m_frameDynamicMaskMapsX.size())) {
+            const cv::Mat& sourceMapX = m_frameDynamicMaskMapsX[static_cast<std::size_t>(sourceIndex)];
+            m_frameDynamicMaskMapsX[static_cast<std::size_t>(targetIndex)] = sourceMapX.clone();
+        }
+        if (sourceIndex < static_cast<int>(m_frameDynamicColors.size()) &&
+            targetIndex < static_cast<int>(m_frameDynamicColors.size())) {
+            m_frameDynamicColors[static_cast<std::size_t>(targetIndex)] =
+                m_frameDynamicColors[static_cast<std::size_t>(sourceIndex)];
+        }
+        updateFramePreviewAt(targetIndex);
+        if (m_framesList && m_framesList->currentRow() == targetIndex) {
+            updateMaskPreviewForFrame(targetIndex);
+            refreshDynamicPaletteButtons();
+            updateDynamicMaskPreviewIcons();
+        }
+        statusBar()->showMessage(QString("Copied dynamic data to frame %1").arg(targetDisplay), 2000);
     });
     connect(m_frameBackgroundAssign, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         const int row = m_framesList ? m_framesList->currentRow() : -1;
@@ -1638,12 +1721,24 @@ MainWindow::MainWindow(QWidget* parent)
         if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::Mask) {
             updatePreviewFilterState();
         }
+        if (m_previewMaskOverlayEnabled && m_maskMode == MaskMode::Comparison) {
+            refreshFramePreviews();
+        }
     });
     connect(m_dynamicMaskList, &QListWidget::currentRowChanged, this, [this](int) {
+        if (m_frameDynamicMaskAssign) {
+            QSignalBlocker blocker(m_frameDynamicMaskAssign);
+            const int selected = m_dynamicMaskList ? m_dynamicMaskList->currentRow() : -1;
+            m_frameDynamicMaskAssign->setCurrentIndex(selected >= 0 ? selected + 1 : 0);
+        }
         syncDynamicSetSelection();
+        refreshDynamicPaletteButtons();
         updateMaskPreviewForFrame(m_framesList->currentRow());
         if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::DynamicMask) {
             updatePreviewFilterState();
+        }
+        if (m_previewMaskOverlayEnabled && m_maskMode == MaskMode::Dynamic) {
+            refreshFramePreviews();
         }
     });
     connect(m_backgroundList, &QListWidget::currentRowChanged, this, [this](int) {
@@ -1696,7 +1791,6 @@ MainWindow::MainWindow(QWidget* parent)
         }
     });
     connect(m_maskClearButton, &QPushButton::clicked, this, [this]() {
-        const int maskId = m_maskList->currentRow();
         if (cv::Mat* mask = activeComparisonMask()) {
             const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
             pushMaskUndoSnapshot(MaskMode::Comparison, frameIndex);
@@ -1706,14 +1800,27 @@ MainWindow::MainWindow(QWidget* parent)
         }
     });
     connect(m_dynamicMaskClearButton, &QPushButton::clicked, this, [this]() {
-        const int maskId = m_dynamicMaskList->currentRow();
-        if (cv::Mat* mask = activeDynamicMask()) {
-            const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
-            pushMaskUndoSnapshot(MaskMode::Dynamic, frameIndex);
-            mask->setTo(cv::Scalar(0));
-            updateDynamicMaskPreviewIcons();
-            updateMaskPreviewForFrame(m_framesList->currentRow());
+        const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
+        const int setId = currentFrameDynamicMaskId();
+        if (frameIndex < 0 || setId < 0) {
+            return;
         }
+        cv::Mat* map = activeDynamicMaskMap(frameIndex);
+        if (!map || map->empty()) {
+            return;
+        }
+        pushMaskUndoSnapshot(MaskMode::Dynamic, frameIndex);
+        const uint8_t target = static_cast<uint8_t>(setId);
+        for (int y = 0; y < map->rows; ++y) {
+            uint8_t* row = map->ptr<uint8_t>(y);
+            for (int x = 0; x < map->cols; ++x) {
+                if (row[x] == target) {
+                    row[x] = 255;
+                }
+            }
+        }
+        updateDynamicMaskPreviewIcons();
+        updateMaskPreviewForFrame(m_framesList->currentRow());
     });
 
     connect(m_bookmarksCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
@@ -1771,6 +1878,9 @@ MainWindow::MainWindow(QWidget* parent)
                 m_frameJump->setValue(m_framesList->currentRow());
             }
             updateMetadataForFrame(m_framesList->currentRow());
+            if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::DynamicMask) {
+                updatePreviewFilterState();
+            }
         } else {
             updateSelectionFromLists();
         }
@@ -1803,14 +1913,14 @@ MainWindow::MainWindow(QWidget* parent)
         }
     });
 
-    connect(m_framesCanvas->canvas(), &GLCanvasWidget::imageClicked, this, [this](int x, int y, Qt::MouseButton button) {
-        handleToolPress(true, x, y, button);
+    connect(m_framesCanvas->canvas(), &GLCanvasWidget::imageClicked, this, [this](int x, int y, Qt::MouseButton button, Qt::KeyboardModifiers modifiers) {
+        handleToolPress(true, x, y, button, modifiers);
     });
-    connect(m_framesCanvas->canvas(), &GLCanvasWidget::imageDragged, this, [this](int x, int y, Qt::MouseButtons buttons) {
-        handleToolDrag(true, x, y, buttons);
+    connect(m_framesCanvas->canvas(), &GLCanvasWidget::imageDragged, this, [this](int x, int y, Qt::MouseButtons buttons, Qt::KeyboardModifiers modifiers) {
+        handleToolDrag(true, x, y, buttons, modifiers);
     });
-    connect(m_framesCanvas->canvas(), &GLCanvasWidget::imageReleased, this, [this](int x, int y, Qt::MouseButton button) {
-        handleToolRelease(true, x, y, button);
+    connect(m_framesCanvas->canvas(), &GLCanvasWidget::imageReleased, this, [this](int x, int y, Qt::MouseButton button, Qt::KeyboardModifiers modifiers) {
+        handleToolRelease(true, x, y, button, modifiers);
     });
     connect(m_framesCanvas->canvas(), &GLCanvasWidget::imageHovered, this, [this](int x, int y, bool onImage) {
         if (!onImage) {
@@ -1959,7 +2069,7 @@ MainWindow::MainWindow(QWidget* parent)
             if (m_dynamicMaskList) {
                 m_dynamicMaskList->setCurrentRow(index);
             }
-            statusBar()->showMessage(QString("Assigned dynamic mask %1").arg(index), 2000);
+            statusBar()->showMessage(QString("Selected dynamic mask %1").arg(index), 2000);
         }
         if (kind == "background") {
             const int row = m_framesList->currentRow();
@@ -1979,23 +2089,23 @@ MainWindow::MainWindow(QWidget* parent)
         }
         updateMaskPreviewForFrame(m_framesList->currentRow());
     });
-    connect(m_spritesCanvas->canvas(), &GLCanvasWidget::imageClicked, this, [this](int x, int y, Qt::MouseButton button) {
-        handleToolPress(false, x, y, button);
+    connect(m_spritesCanvas->canvas(), &GLCanvasWidget::imageClicked, this, [this](int x, int y, Qt::MouseButton button, Qt::KeyboardModifiers modifiers) {
+        handleToolPress(false, x, y, button, modifiers);
     });
-    connect(m_spritesCanvas->canvas(), &GLCanvasWidget::imageDragged, this, [this](int x, int y, Qt::MouseButtons buttons) {
-        handleToolDrag(false, x, y, buttons);
+    connect(m_spritesCanvas->canvas(), &GLCanvasWidget::imageDragged, this, [this](int x, int y, Qt::MouseButtons buttons, Qt::KeyboardModifiers modifiers) {
+        handleToolDrag(false, x, y, buttons, modifiers);
     });
-    connect(m_spritesCanvas->canvas(), &GLCanvasWidget::imageReleased, this, [this](int x, int y, Qt::MouseButton button) {
-        handleToolRelease(false, x, y, button);
+    connect(m_spritesCanvas->canvas(), &GLCanvasWidget::imageReleased, this, [this](int x, int y, Qt::MouseButton button, Qt::KeyboardModifiers modifiers) {
+        handleToolRelease(false, x, y, button, modifiers);
     });
-    connect(m_backgroundsCanvas->canvas(), &GLCanvasWidget::imageClicked, this, [this](int x, int y, Qt::MouseButton button) {
-        handleBackgroundToolPress(x, y, button);
+    connect(m_backgroundsCanvas->canvas(), &GLCanvasWidget::imageClicked, this, [this](int x, int y, Qt::MouseButton button, Qt::KeyboardModifiers modifiers) {
+        handleBackgroundToolPress(x, y, button, modifiers);
     });
-    connect(m_backgroundsCanvas->canvas(), &GLCanvasWidget::imageDragged, this, [this](int x, int y, Qt::MouseButtons buttons) {
-        handleBackgroundToolDrag(x, y, buttons);
+    connect(m_backgroundsCanvas->canvas(), &GLCanvasWidget::imageDragged, this, [this](int x, int y, Qt::MouseButtons buttons, Qt::KeyboardModifiers modifiers) {
+        handleBackgroundToolDrag(x, y, buttons, modifiers);
     });
-    connect(m_backgroundsCanvas->canvas(), &GLCanvasWidget::imageReleased, this, [this](int x, int y, Qt::MouseButton button) {
-        handleBackgroundToolRelease(x, y, button);
+    connect(m_backgroundsCanvas->canvas(), &GLCanvasWidget::imageReleased, this, [this](int x, int y, Qt::MouseButton button, Qt::KeyboardModifiers modifiers) {
+        handleBackgroundToolRelease(x, y, button, modifiers);
     });
 
     connect(m_framesCanvas, &CanvasWidget::fitRequested, this, [this]() {
@@ -2075,6 +2185,10 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(m_previewHdButton, &QToolButton::toggled, this, [this](bool enabled) {
         m_previewHdOnly = enabled;
+        refreshFramePreviews();
+    });
+    connect(m_previewMaskOverlayButton, &QToolButton::toggled, this, [this](bool enabled) {
+        m_previewMaskOverlayEnabled = enabled;
         refreshFramePreviews();
     });
     connect(m_previewRefreshButton, &QToolButton::clicked, this, [this]() {
@@ -2269,7 +2383,10 @@ MainWindow::MainWindow(QWidget* parent)
             cancelPaletteSetSlot();
         }
         m_dynamicSetIndex = index;
+        setCurrentFrameDynamicMaskId(index);
+        updateMaskPreviewForFrame(m_framesList ? m_framesList->currentRow() : -1);
         refreshDynamicPaletteButtons();
+        updateDynamicMaskPreviewIcons();
     });
     connect(m_reducedAssignButton, &QPushButton::clicked, this, [this]() {
         startReducedSetSlot();
@@ -2338,9 +2455,9 @@ void MainWindow::openProjectFile(const QString& filename)
             m_frameRefs.clear();
             m_frameDynamicColors.clear();
             m_compMasks.clear();
-            m_dynamicMasks.clear();
             m_frameCompMaskIds.clear();
-            m_frameDynamicMaskIds.clear();
+            m_frameDynamicMaskMaps.clear();
+            m_frameDynamicMaskMapsX.clear();
             m_frameShapeCompModes.clear();
             m_frameExtraFrames.clear();
             m_frameExtraFlags.clear();
@@ -2404,9 +2521,9 @@ void MainWindow::openProjectFile(const QString& filename)
         m_frameRefs.clear();
         m_frameDynamicColors.clear();
         m_compMasks.clear();
-        m_dynamicMasks.clear();
         m_frameCompMaskIds.clear();
-        m_frameDynamicMaskIds.clear();
+        m_frameDynamicMaskMaps.clear();
+        m_frameDynamicMaskMapsX.clear();
         m_frameShapeCompModes.clear();
         m_frameExtraFrames.clear();
         m_frameExtraFlags.clear();
@@ -2432,9 +2549,9 @@ void MainWindow::openProjectFile(const QString& filename)
         m_frameRefs = legacy.frame_refs;
         m_frameDynamicColors = legacy.frame_dynamic_colors;
         m_compMasks = legacy.comp_masks;
-        m_dynamicMasks = legacy.dynamic_masks;
+        m_frameDynamicMaskMaps = legacy.frame_dynamic_mask_maps;
+        m_frameDynamicMaskMapsX = legacy.frame_dynamic_mask_maps_x;
         m_frameCompMaskIds = legacy.frame_comp_mask_ids;
-        m_frameDynamicMaskIds = legacy.frame_dynamic_mask_ids;
         m_frameShapeCompModes = legacy.frame_shape_comp_modes;
         m_frameExtraFrames = legacy.frames_x;
         m_frameExtraFlags = legacy.frame_extra_flags;
@@ -2513,9 +2630,9 @@ void MainWindow::openProjectFile(const QString& filename)
     m_frameRefs.clear();
     m_frameDynamicColors.clear();
     m_compMasks.clear();
-    m_dynamicMasks.clear();
     m_frameCompMaskIds.clear();
-    m_frameDynamicMaskIds.clear();
+    m_frameDynamicMaskMaps.clear();
+    m_frameDynamicMaskMapsX.clear();
     m_frameShapeCompModes.clear();
     m_frameExtraFrames.clear();
     m_frameExtraFlags.clear();
@@ -2621,8 +2738,8 @@ LegacyProject MainWindow::buildLegacyProject(const QString& baseName) const
     project.comp_masks = m_compMasks;
     project.frame_comp_mask_ids = m_frameCompMaskIds;
     project.frame_shape_comp_modes = m_frameShapeCompModes;
-    project.dynamic_masks = m_dynamicMasks;
-    project.frame_dynamic_mask_ids = m_frameDynamicMaskIds;
+    project.frame_dynamic_mask_maps = m_frameDynamicMaskMaps;
+    project.frame_dynamic_mask_maps_x = m_frameDynamicMaskMapsX;
     project.frame_dynamic_colors = m_frameDynamicColors;
     project.frames_x = m_frameExtraFrames;
     project.frame_extra_flags.assign(static_cast<std::size_t>(frameCount), 0);
@@ -2753,8 +2870,8 @@ void MainWindow::updatePreviewFilterState()
             break;
         case PreviewFilterKind::DynamicMask:
             label = "Filter: Dynamic";
-            if (m_dynamicMaskList && m_dynamicMaskList->currentRow() < 0) {
-                statusBar()->showMessage("Select a dynamic mask to filter frames.", 2000);
+            if (!m_framesList || m_framesList->currentRow() < 0) {
+                statusBar()->showMessage("Select a frame to filter dynamic masks.", 2000);
             }
             break;
         case PreviewFilterKind::Background:
@@ -2812,12 +2929,32 @@ std::vector<int> MainWindow::buildPreviewFrameIndices() const
             break;
         }
         case PreviewFilterKind::DynamicMask: {
-            const int selected = m_dynamicMaskList ? m_dynamicMaskList->currentRow() : -1;
-            if (selected < 0) {
+            const int referenceIndex = m_framesList ? m_framesList->currentRow() : -1;
+            if (referenceIndex < 0 || referenceIndex >= static_cast<int>(m_frameDynamicMaskMaps.size())) {
                 break;
             }
-            for (int i = 0; i < count && i < static_cast<int>(m_frameDynamicMaskIds.size()); ++i) {
-                if (m_frameDynamicMaskIds[static_cast<std::size_t>(i)] == selected) {
+            const auto signatureForMap = [](const cv::Mat& map) -> uint32_t {
+                if (map.empty()) {
+                    return 0;
+                }
+                uint32_t signature = 0;
+                for (int y = 0; y < map.rows; ++y) {
+                    const uint8_t* row = map.ptr<uint8_t>(y);
+                    for (int x = 0; x < map.cols; ++x) {
+                        const uint8_t value = row[x];
+                        if (value < MAX_DYNA_SETS_PER_FRAMEN) {
+                            signature |= (1u << value);
+                        }
+                    }
+                }
+                return signature;
+            };
+            const uint32_t referenceSignature =
+                signatureForMap(m_frameDynamicMaskMaps[static_cast<std::size_t>(referenceIndex)]);
+            for (int i = 0; i < count && i < static_cast<int>(m_frameDynamicMaskMaps.size()); ++i) {
+                const uint32_t signature =
+                    signatureForMap(m_frameDynamicMaskMaps[static_cast<std::size_t>(i)]);
+                if (signature == referenceSignature) {
                     indices.push_back(i);
                 }
             }
@@ -2908,12 +3045,14 @@ void MainWindow::refreshFramePreviews()
         if (i >= 0 && i < static_cast<int>(m_frameExtraFrames.size())) {
             hdFrame = m_frameExtraFrames[static_cast<std::size_t>(i)];
         }
-        cv::Mat composed = applyBackgroundComposite(i, *image, false);
+        cv::Mat base = applyDynamicColors(i, *image, false);
+        cv::Mat composed = applyBackgroundComposite(i, base, false);
         cv::Mat hdComposed;
         if (!hdFrame.empty()) {
-            hdComposed = applyBackgroundComposite(i, hdFrame, true);
+            cv::Mat hdBase = applyDynamicColors(i, hdFrame, true);
+            hdComposed = applyBackgroundComposite(i, hdBase, true);
         }
-        cv::Mat previewMat = buildPreviewFrame(composed, reference, hdComposed);
+        cv::Mat previewMat = buildPreviewFrame(i, composed, reference, hdComposed);
         cv::Mat rgb;
         cv::cvtColor(previewMat, rgb, cv::COLOR_BGR2RGB);
         QImage previewImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888);
@@ -2961,12 +3100,14 @@ void MainWindow::updateFramePreviewAt(int index)
     if (index >= 0 && index < static_cast<int>(m_frameExtraFrames.size())) {
         hdFrame = m_frameExtraFrames[static_cast<std::size_t>(index)];
     }
-    cv::Mat composed = applyBackgroundComposite(index, *image, false);
+    cv::Mat base = applyDynamicColors(index, *image, false);
+    cv::Mat composed = applyBackgroundComposite(index, base, false);
     cv::Mat hdComposed;
     if (!hdFrame.empty()) {
-        hdComposed = applyBackgroundComposite(index, hdFrame, true);
+        cv::Mat hdBase = applyDynamicColors(index, hdFrame, true);
+        hdComposed = applyBackgroundComposite(index, hdBase, true);
     }
-    cv::Mat previewMat = buildPreviewFrame(composed, reference, hdComposed);
+    cv::Mat previewMat = buildPreviewFrame(index, composed, reference, hdComposed);
     cv::Mat rgb;
     cv::cvtColor(previewMat, rgb, cv::COLOR_BGR2RGB);
     QImage previewImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888);
@@ -2981,13 +3122,39 @@ void MainWindow::updateFramePreviewAt(int index)
     m_framePreviewList->doItemsLayout();
 }
 
-cv::Mat MainWindow::buildPreviewFrame(const cv::Mat& colorized,
+cv::Mat MainWindow::buildPreviewFrame(int index,
+                                      const cv::Mat& colorized,
                                       const cv::Mat& reference,
                                       const cv::Mat& hdFrame) const
 {
     cv::Mat color = EnsureBgr(colorized);
     cv::Mat hd = EnsureBgr(hdFrame);
     cv::Mat original = buildOriginalFrame(reference);
+    if (m_previewMaskOverlayEnabled && m_maskMode != MaskMode::None && !original.empty()) {
+        if (m_maskMode == MaskMode::Comparison) {
+            if (index >= 0 && index < static_cast<int>(m_frameCompMaskIds.size())) {
+                const uint8_t maskId = m_frameCompMaskIds[static_cast<std::size_t>(index)];
+                if (maskId != 255 && maskId < m_compMasks.size()) {
+                    const cv::Mat& mask = m_compMasks[static_cast<std::size_t>(maskId)];
+                    if (MaskHasContent(mask)) {
+                        original = buildMaskPreview(original, mask, cv::Vec3b(200, 0, 200));
+                    }
+                }
+            }
+        } else if (m_maskMode == MaskMode::Dynamic) {
+            const int setId = currentFrameDynamicMaskId();
+            const cv::Mat* map = nullptr;
+            if (index >= 0 && index < static_cast<int>(m_frameDynamicMaskMaps.size())) {
+                map = &m_frameDynamicMaskMaps[static_cast<std::size_t>(index)];
+            }
+            if (setId >= 0 && map && !map->empty()) {
+                cv::Mat mask = buildDynamicMaskFromMap(*map, setId);
+                if (MaskHasContent(mask)) {
+                    original = buildMaskPreview(original, mask, cv::Vec3b(0, 200, 255));
+                }
+            }
+        }
+    }
     if (color.empty() && hd.empty() && original.empty()) {
         return cv::Mat();
     }
@@ -3084,6 +3251,69 @@ cv::Mat MainWindow::buildReferenceForSize(int index, const cv::Size& target) con
     cv::Mat resized;
     cv::resize(ref, resized, target, 0.0, 0.0, cv::INTER_NEAREST);
     return resized;
+}
+
+cv::Mat MainWindow::applyDynamicColors(int index, const cv::Mat& frame, bool useHd) const
+{
+    cv::Mat output = EnsureBgr(frame);
+    if (output.empty() || index < 0 || index >= static_cast<int>(m_frameDynamicColors.size())) {
+        return output;
+    }
+    const std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(index)];
+    const int stride = dynamicColorsPerSet(colors);
+    if (stride <= 0) {
+        return output;
+    }
+    const cv::Mat* map = nullptr;
+    if (useHd && index < static_cast<int>(m_frameDynamicMaskMapsX.size())) {
+        map = &m_frameDynamicMaskMapsX[static_cast<std::size_t>(index)];
+    }
+    if ((!map || map->empty()) && index < static_cast<int>(m_frameDynamicMaskMaps.size())) {
+        map = &m_frameDynamicMaskMaps[static_cast<std::size_t>(index)];
+    }
+    if (!map || map->empty()) {
+        return output;
+    }
+    cv::Mat mapScaled;
+    if (map->size() != output.size()) {
+        cv::resize(*map, mapScaled, output.size(), 0.0, 0.0, cv::INTER_NEAREST);
+    } else {
+        mapScaled = *map;
+    }
+    cv::Mat ref = buildReferenceForSize(index, output.size());
+    if (ref.empty()) {
+        return output;
+    }
+    if (ref.type() != CV_8UC1) {
+        cv::Mat gray;
+        cv::cvtColor(EnsureBgr(ref), gray, cv::COLOR_BGR2GRAY);
+        ref = gray;
+    }
+    int levels = m_noColors > 0 ? static_cast<int>(m_noColors) : 64;
+    levels = std::max(1, levels);
+    const int maxLevel = std::max(1, levels - 1);
+    for (int y = 0; y < output.rows; ++y) {
+        cv::Vec3b* row = output.ptr<cv::Vec3b>(y);
+        const uint8_t* mrow = mapScaled.ptr<uint8_t>(y);
+        const uint8_t* rrow = ref.ptr<uint8_t>(y);
+        for (int x = 0; x < output.cols; ++x) {
+            const int setId = static_cast<int>(mrow[x]);
+            if (setId < 0 || setId >= MAX_DYNA_SETS_PER_FRAMEN) {
+                continue;
+            }
+            int slot = static_cast<int>(rrow[x]);
+            if (levels > stride) {
+                slot = (slot * (stride - 1) + maxLevel / 2) / maxLevel;
+            }
+            slot = std::clamp(slot, 0, stride - 1);
+            const std::size_t offset = static_cast<std::size_t>(setId) * stride +
+                static_cast<std::size_t>(slot);
+            if (offset < colors.size()) {
+                row[x] = Rgb565ToBgr(colors[offset]);
+            }
+        }
+    }
+    return output;
 }
 
 cv::Mat MainWindow::applyBackgroundComposite(int index, const cv::Mat& frame, bool useHd) const
@@ -3231,9 +3461,10 @@ void MainWindow::updateFrameCanvasImage(int index)
         m_framesCanvas->setImage(cv::Mat());
         return;
     }
+    cv::Mat base = applyDynamicColors(index, *image, m_useHdFrame);
     cv::Mat composed = m_showBackgroundLayer
-        ? applyBackgroundComposite(index, *image, m_useHdFrame)
-        : EnsureBgr(*image);
+        ? applyBackgroundComposite(index, base, m_useHdFrame)
+        : base;
     cv::Mat reference = buildOriginalPreviewForIndex(index);
     cv::Mat original = buildOriginalFrame(reference);
     if (original.empty() || !m_showOriginalFrame) {
@@ -3372,17 +3603,8 @@ void MainWindow::ensureMaskDataSize()
     if (m_compMasks.size() != MAX_MASKS) {
         m_compMasks.resize(MAX_MASKS);
     }
-    if (m_dynamicMasks.size() != MAX_DYNA_SETS_PER_FRAMEN) {
-        m_dynamicMasks.resize(MAX_DYNA_SETS_PER_FRAMEN);
-    }
     for (int i = 0; i < MAX_MASKS; ++i) {
         cv::Mat& mask = m_compMasks[static_cast<std::size_t>(i)];
-        if (width > 0 && height > 0 && (mask.empty() || mask.cols != width || mask.rows != height)) {
-            mask = cv::Mat(height, width, CV_8UC1, cv::Scalar(0));
-        }
-    }
-    for (int i = 0; i < MAX_DYNA_SETS_PER_FRAMEN; ++i) {
-        cv::Mat& mask = m_dynamicMasks[static_cast<std::size_t>(i)];
         if (width > 0 && height > 0 && (mask.empty() || mask.cols != width || mask.rows != height)) {
             mask = cv::Mat(height, width, CV_8UC1, cv::Scalar(0));
         }
@@ -3391,14 +3613,52 @@ void MainWindow::ensureMaskDataSize()
     m_frameRefs.resize(static_cast<std::size_t>(frameCount));
     m_frameDynamicColors.resize(static_cast<std::size_t>(frameCount));
     m_frameCompMaskIds.resize(static_cast<std::size_t>(frameCount), 255);
-    m_frameDynamicMaskIds.resize(static_cast<std::size_t>(frameCount), 255);
+    if (m_frameDynamicMaskMaps.size() != static_cast<std::size_t>(frameCount)) {
+        m_frameDynamicMaskMaps.resize(static_cast<std::size_t>(frameCount));
+    }
+    if (m_frameDynamicMaskMapsX.size() != static_cast<std::size_t>(frameCount)) {
+        m_frameDynamicMaskMapsX.resize(static_cast<std::size_t>(frameCount));
+    }
     m_frameShapeCompModes.resize(static_cast<std::size_t>(frameCount), 0);
+
+    cv::Size hdSize;
+    for (const auto& hd : m_frameExtraFrames) {
+        if (!hd.empty()) {
+            hdSize = hd.size();
+            break;
+        }
+    }
 
     for (int i = 0; i < frameCount; ++i) {
         if (const cv::Mat* frame = m_frameStore->at(i)) {
             cv::Mat& ref = m_frameRefs[static_cast<std::size_t>(i)];
             if (ref.empty() || ref.rows != frame->rows || ref.cols != frame->cols) {
                 ref = buildReferenceFrame(*frame);
+            }
+        }
+        if (width > 0 && height > 0) {
+            cv::Mat& map = m_frameDynamicMaskMaps[static_cast<std::size_t>(i)];
+            if (map.empty()) {
+                map = cv::Mat(height, width, CV_8UC1, cv::Scalar(255));
+            } else if (map.cols != width || map.rows != height) {
+                cv::Mat resized;
+                cv::resize(map, resized, cv::Size(width, height), 0.0, 0.0, cv::INTER_NEAREST);
+                map = resized;
+            }
+        }
+        if (hdSize.width > 0 && hdSize.height > 0) {
+            cv::Mat& mapX = m_frameDynamicMaskMapsX[static_cast<std::size_t>(i)];
+            if (mapX.empty()) {
+                const cv::Mat& map = m_frameDynamicMaskMaps[static_cast<std::size_t>(i)];
+                if (!map.empty()) {
+                    cv::resize(map, mapX, hdSize, 0.0, 0.0, cv::INTER_NEAREST);
+                } else {
+                    mapX = cv::Mat(hdSize.height, hdSize.width, CV_8UC1, cv::Scalar(255));
+                }
+            } else if (mapX.cols != hdSize.width || mapX.rows != hdSize.height) {
+                cv::Mat resized;
+                cv::resize(mapX, resized, hdSize, 0.0, 0.0, cv::INTER_NEAREST);
+                mapX = resized;
             }
         }
         std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(i)];
@@ -3420,6 +3680,9 @@ void MainWindow::ensureMaskDataSize()
     const bool hasFrames = frameCount > 0 && m_framesList && !(frameCount == 1 && m_framesList->item(0)->text().startsWith("No frames"));
     m_frameMaskAssign->setEnabled(hasFrames);
     m_frameDynamicMaskAssign->setEnabled(hasFrames);
+    if (m_frameDynamicCopyButton) {
+        m_frameDynamicCopyButton->setEnabled(hasFrames);
+    }
     m_shapeCompToggle->setEnabled(hasFrames);
     if (m_framesCanvas) {
         m_framesCanvas->setMaskButtonsEnabled(hasFrames);
@@ -3558,9 +3821,10 @@ void MainWindow::updateMaskPreviewForFrame(int index)
     cv::Mat reference = buildOriginalPreviewForIndex(index);
     const QColor gap = m_framesCanvas->palette().color(QPalette::Window);
     const cv::Scalar gapColor(gap.blue(), gap.green(), gap.red());
-    cv::Mat base = m_showBackgroundLayer
-        ? applyBackgroundComposite(index, *frame, m_useHdFrame)
-        : EnsureBgr(*frame);
+    cv::Mat base = applyDynamicColors(index, *frame, m_useHdFrame);
+    if (m_showBackgroundLayer) {
+        base = applyBackgroundComposite(index, base, m_useHdFrame);
+    }
     cv::Mat topPreview = base;
     bool hasTopMask = false;
     bool hasBottomMask = false;
@@ -3602,16 +3866,20 @@ void MainWindow::updateMaskPreviewForFrame(int index)
     }
 
     cv::Mat bottomPreview;
+    cv::Mat dynamicMask;
     QColor bottomOutlineColor;
     if (m_showOriginalFrame) {
         cv::Mat original = buildOriginalFrame(reference);
         if (m_maskMode == MaskMode::Dynamic) {
-            const int maskId = currentFrameDynamicMaskId();
-            if (maskId >= 0 && maskId < static_cast<int>(m_dynamicMasks.size())) {
-                const cv::Mat& mask = m_dynamicMasks[static_cast<std::size_t>(maskId)];
-                bottomPreview = buildMaskPreview(original, mask, cv::Vec3b(0, 200, 255));
-                hasBottomMask = true;
-                bottomOutlineColor = QColor(255, 200, 0);
+            const int setId = currentFrameDynamicMaskId();
+            cv::Mat* map = activeDynamicMaskMap(index);
+            if (setId >= 0 && map && !map->empty()) {
+                dynamicMask = buildDynamicMaskFromMap(*map, setId);
+                if (!dynamicMask.empty()) {
+                    bottomPreview = buildMaskPreview(original, dynamicMask, cv::Vec3b(0, 200, 255));
+                    hasBottomMask = MaskHasContent(dynamicMask);
+                    bottomOutlineColor = QColor(255, 200, 0);
+                }
             }
         } else if (m_maskMode == MaskMode::Comparison) {
             const int maskId = currentFrameMaskId();
@@ -3642,9 +3910,16 @@ void MainWindow::updateMaskPreviewForFrame(int index)
     }
 
     if (hasBottomMask && m_maskMode != MaskMode::None) {
-        const cv::Mat* mask = (m_maskMode == MaskMode::Dynamic)
-            ? (currentFrameDynamicMaskId() >= 0 ? &m_dynamicMasks[static_cast<std::size_t>(currentFrameDynamicMaskId())] : nullptr)
-            : (currentFrameMaskId() >= 0 ? &m_compMasks[static_cast<std::size_t>(currentFrameMaskId())] : nullptr);
+        const cv::Mat* mask = nullptr;
+        if (m_maskMode == MaskMode::Dynamic) {
+            if (!dynamicMask.empty()) {
+                mask = &dynamicMask;
+            }
+        } else if (m_maskMode == MaskMode::Comparison) {
+            if (currentFrameMaskId() >= 0) {
+                mask = &m_compMasks[static_cast<std::size_t>(currentFrameMaskId())];
+            }
+        }
         if (mask && !mask->empty()) {
             m_framesCanvas->canvas()->setMaskOutline(*mask, bottomOutlineColor, bottomRegion);
         }
@@ -3700,6 +3975,9 @@ void MainWindow::setMaskMode(MaskMode mode)
         }
     }
     updateMaskPreviewForFrame(m_framesList ? m_framesList->currentRow() : -1);
+    if (m_previewMaskOverlayEnabled) {
+        refreshFramePreviews();
+    }
 }
 
 void MainWindow::refreshMaskCombos()
@@ -3716,7 +3994,10 @@ void MainWindow::refreshMaskCombos()
         auto* item = new QListWidgetItem(QString("Mask %1").arg(i));
         item->setData(Qt::UserRole, i);
         item->setData(Qt::UserRole + 1, QStringLiteral("mask"));
-        item->setSizeHint(QSize(kPreviewItemWidth, kPreviewItemHeight));
+        const QSize hint = m_maskList->gridSize().isValid()
+            ? m_maskList->gridSize()
+            : QSize(kPreviewIconWidth + 12, kPreviewIconHeight + 24);
+        item->setSizeHint(hint);
         m_maskList->addItem(item);
     }
 
@@ -3754,7 +4035,10 @@ void MainWindow::refreshDynamicMaskCombos()
         auto* item = new QListWidgetItem(QString("Dynamic %1").arg(i));
         item->setData(Qt::UserRole, i);
         item->setData(Qt::UserRole + 1, QStringLiteral("dynamic"));
-        item->setSizeHint(QSize(kPreviewItemWidth, kPreviewItemHeight));
+        const QSize hint = m_dynamicMaskList->gridSize().isValid()
+            ? m_dynamicMaskList->gridSize()
+            : QSize(kDynamicMaskIconWidth + 12, kPreviewIconHeight + 24);
+        item->setSizeHint(hint);
         m_dynamicMaskList->addItem(item);
     }
 
@@ -3798,18 +4082,79 @@ cv::Mat MainWindow::buildMaskIconImage(const cv::Mat& mask, const cv::Vec3b& col
     return output;
 }
 
+bool MainWindow::dynamicMapHasSet(const cv::Mat& map, int setId) const
+{
+    if (map.empty() || setId < 0 || setId >= MAX_DYNA_SETS_PER_FRAMEN) {
+        return false;
+    }
+    for (int y = 0; y < map.rows; ++y) {
+        const uint8_t* row = map.ptr<uint8_t>(y);
+        for (int x = 0; x < map.cols; ++x) {
+            if (row[x] == static_cast<uint8_t>(setId)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+cv::Mat MainWindow::buildDynamicMaskFromMap(const cv::Mat& map, int setId) const
+{
+    if (map.empty() || setId < 0 || setId >= MAX_DYNA_SETS_PER_FRAMEN) {
+        return cv::Mat();
+    }
+    cv::Mat mask(map.rows, map.cols, CV_8UC1, cv::Scalar(0));
+    const uint8_t target = static_cast<uint8_t>(setId);
+    for (int y = 0; y < map.rows; ++y) {
+        const uint8_t* src = map.ptr<uint8_t>(y);
+        uint8_t* dst = mask.ptr<uint8_t>(y);
+        for (int x = 0; x < map.cols; ++x) {
+            if (src[x] == target) {
+                dst[x] = 1;
+            }
+        }
+    }
+    return mask;
+}
+
 void MainWindow::updateMaskPreviewIcons()
 {
     if (!m_maskList) {
         return;
     }
     const cv::Vec3b color(200, 0, 200);
+    const int padding = 6;
+    const int textHeight = m_maskList->fontMetrics().height() + 4;
+    const int gap = 2;
+    const int width = kPreviewIconWidth;
+    int height = kPreviewIconHeight;
+    if (!m_compMasks.empty()) {
+        const cv::Mat& first = m_compMasks.front();
+        if (!first.empty() && first.cols > 0) {
+            height = std::max(1, static_cast<int>(
+                std::lround(static_cast<double>(width) * first.rows / first.cols)));
+        }
+    } else if (m_frameStore && m_frameStore->count() > 0) {
+        if (const cv::Mat* frame = m_frameStore->at(0)) {
+            if (frame && frame->cols > 0) {
+                height = std::max(1, static_cast<int>(
+                    std::lround(static_cast<double>(width) * frame->rows / frame->cols)));
+            }
+        }
+    }
+    m_maskList->setIconSize(QSize(width, height));
+    m_maskList->setGridSize(QSize(width + padding * 2,
+                                  height + textHeight + padding * 2 + gap));
     for (int i = 0; i < m_maskList->count() && i < static_cast<int>(m_compMasks.size()); ++i) {
         const cv::Mat& mask = m_compMasks[static_cast<std::size_t>(i)];
         cv::Mat iconMat = buildMaskIconImage(mask, color);
         if (iconMat.empty()) {
             if (QListWidgetItem* item = m_maskList->item(i)) {
                 item->setIcon(QIcon());
+                item->setData(kPreviewIconSizeRole, QSize(width, height));
+                const int hintWidth = width + padding * 2;
+                const int hintHeight = height + textHeight + padding * 2 + gap;
+                item->setSizeHint(QSize(hintWidth, hintHeight));
             }
             continue;
         }
@@ -3817,9 +4162,13 @@ void MainWindow::updateMaskPreviewIcons()
         cv::cvtColor(iconMat, rgb, cv::COLOR_BGR2RGB);
         QImage iconImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888);
         QPixmap pixmap = QPixmap::fromImage(iconImage.copy());
-        pixmap = pixmap.scaled(kPreviewIconWidthHd, kPreviewIconHeightHd, Qt::KeepAspectRatio, Qt::FastTransformation);
+        pixmap = pixmap.scaled(QSize(width, height), Qt::IgnoreAspectRatio, Qt::FastTransformation);
         if (QListWidgetItem* item = m_maskList->item(i)) {
             item->setIcon(QIcon(pixmap));
+            item->setData(kPreviewIconSizeRole, pixmap.size());
+            const int hintWidth = pixmap.width() + padding * 2;
+            const int hintHeight = pixmap.height() + textHeight + padding * 2 + gap;
+            item->setSizeHint(QSize(hintWidth, hintHeight));
         }
     }
 }
@@ -3829,23 +4178,90 @@ void MainWindow::updateDynamicMaskPreviewIcons()
     if (!m_dynamicMaskList) {
         return;
     }
+    const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
+    const cv::Mat* map = (frameIndex >= 0 && frameIndex < static_cast<int>(m_frameDynamicMaskMaps.size()))
+        ? &m_frameDynamicMaskMaps[static_cast<std::size_t>(frameIndex)]
+        : nullptr;
+    const std::vector<uint16_t>* colors = (frameIndex >= 0 && frameIndex < static_cast<int>(m_frameDynamicColors.size()))
+        ? &m_frameDynamicColors[static_cast<std::size_t>(frameIndex)]
+        : nullptr;
+    const int colorsPerSet = colors ? dynamicColorsPerSet(*colors) : 0;
+    int previewHeight = kPreviewIconHeight;
+    if (map && !map->empty() && map->cols > 0) {
+        previewHeight = std::max(1, static_cast<int>(
+            std::lround(static_cast<double>(kPreviewIconWidth) * map->rows / map->cols)));
+    } else {
+        previewHeight = std::max(1, kPreviewIconWidth / 4);
+    }
+    const int padding = 6;
+    const int textHeight = m_dynamicMaskList->fontMetrics().height() + 4;
+    const int gap = 2;
+    m_dynamicMaskList->setGridSize(QSize(kDynamicMaskIconWidth + padding * 2,
+                                         previewHeight + textHeight + padding * 2 + gap));
     const cv::Vec3b color(0, 200, 255);
-    for (int i = 0; i < m_dynamicMaskList->count() && i < static_cast<int>(m_dynamicMasks.size()); ++i) {
-        const cv::Mat& mask = m_dynamicMasks[static_cast<std::size_t>(i)];
-        cv::Mat iconMat = buildMaskIconImage(mask, color);
-        if (iconMat.empty()) {
-            if (QListWidgetItem* item = m_dynamicMaskList->item(i)) {
-                item->setIcon(QIcon());
+    for (int i = 0; i < m_dynamicMaskList->count() && i < MAX_DYNA_SETS_PER_FRAMEN; ++i) {
+        cv::Mat iconMat;
+        if (map && !map->empty()) {
+            cv::Mat mask = buildDynamicMaskFromMap(*map, i);
+            if (MaskHasContent(mask)) {
+                iconMat = buildMaskIconImage(mask, color);
             }
-            continue;
         }
-        cv::Mat rgb;
-        cv::cvtColor(iconMat, rgb, cv::COLOR_BGR2RGB);
-        QImage iconImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888);
-        QPixmap pixmap = QPixmap::fromImage(iconImage.copy());
-        pixmap = pixmap.scaled(kPreviewIconWidth, kPreviewIconHeight, Qt::KeepAspectRatio, Qt::FastTransformation);
+        QPixmap pixmap(kDynamicMaskIconWidth, previewHeight);
+        pixmap.fill(Qt::transparent);
+        QRect maskRect(0, 0, kPreviewIconWidth, previewHeight);
+        QPainter painter(&pixmap);
+        if (!iconMat.empty()) {
+            cv::Mat rgb;
+            cv::cvtColor(iconMat, rgb, cv::COLOR_BGR2RGB);
+            QImage iconImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888);
+            QPixmap maskPixmap = QPixmap::fromImage(iconImage.copy());
+            const QPixmap scaled = maskPixmap.scaled(kPreviewIconWidth,
+                                                     previewHeight,
+                                                     Qt::IgnoreAspectRatio,
+                                                     Qt::FastTransformation);
+            const QPoint topLeft(0, 0);
+            painter.drawPixmap(topLeft, scaled);
+            maskRect = QRect(topLeft, scaled.size());
+        } else {
+            painter.fillRect(0, 0, kPreviewIconWidth, previewHeight, QColor(24, 24, 24));
+        }
+        if (colorsPerSet > 0 && colors && colors->size() >= static_cast<std::size_t>((i + 1) * colorsPerSet)) {
+            const int cols = (colorsPerSet <= 4) ? colorsPerSet : 8;
+            const int rows = (colorsPerSet <= 4) ? 1 : 2;
+            const int stripX = kPreviewIconWidth + 8;
+            const int stripWidth = kDynamicColorStripWidth;
+            const int cellWidth = std::max(1, stripWidth / std::max(1, cols));
+            const int stripHeight = maskRect.height();
+            const int stripTop = maskRect.top();
+            const int cellHeight = std::max(1, stripHeight / std::max(1, rows));
+            painter.setPen(QColor(0, 0, 0));
+            for (int slot = 0; slot < colorsPerSet; ++slot) {
+                const int row = (colorsPerSet <= 4) ? 0 : (slot / cols);
+                const int col = (colorsPerSet <= 4) ? slot : (slot % cols);
+                if (row >= rows) {
+                    break;
+                }
+                const std::size_t colorIndex = static_cast<std::size_t>(i) * colorsPerSet +
+                    static_cast<std::size_t>(slot);
+                const uint16_t value = (*colors)[colorIndex];
+                const cv::Vec3b bgr = Rgb565ToBgr(value);
+                const QColor swatch(bgr[2], bgr[1], bgr[0]);
+                const int x = stripX + col * cellWidth;
+                const int y = stripTop + row * cellHeight;
+                painter.fillRect(QRect(x, y, cellWidth, cellHeight), swatch);
+                painter.drawRect(QRect(x, y, cellWidth, cellHeight));
+            }
+        }
         if (QListWidgetItem* item = m_dynamicMaskList->item(i)) {
             item->setIcon(QIcon(pixmap));
+            item->setData(kPreviewIconSizeRole, pixmap.size());
+            const int padding = 6;
+            const int textHeight = m_dynamicMaskList->fontMetrics().height() + 4;
+            const int gap = 2;
+            const int hintWidth = pixmap.width() + padding * 2;
+            const int hintHeight = pixmap.height() + textHeight + padding * 2 + gap;
+            item->setSizeHint(QSize(hintWidth, hintHeight));
         }
     }
 }
@@ -3881,7 +4297,10 @@ void MainWindow::applyMaskListOrder()
             item->setText(QString("Mask %1").arg(i));
             item->setData(Qt::UserRole, i);
             item->setData(Qt::UserRole + 1, QStringLiteral("mask"));
-            item->setSizeHint(QSize(kPreviewItemWidth, kPreviewItemHeight));
+            const QSize hint = m_maskList->gridSize().isValid()
+                ? m_maskList->gridSize()
+                : QSize(kPreviewIconWidth + 12, kPreviewIconHeight + 24);
+            item->setSizeHint(hint);
         }
     }
     updateMaskPreviewIcons();
@@ -3903,22 +4322,63 @@ void MainWindow::applyDynamicMaskListOrder()
     m_dynamicMaskReorderActive = true;
     const int count = m_dynamicMaskList->count();
     std::vector<int> mapping(static_cast<std::size_t>(count), -1);
-    std::vector<cv::Mat> reordered(m_dynamicMasks.size());
-    for (int i = 0; i < count && i < static_cast<int>(m_dynamicMasks.size()); ++i) {
+    for (int i = 0; i < count; ++i) {
         QListWidgetItem* item = m_dynamicMaskList->item(i);
         const int oldIndex = item ? item->data(Qt::UserRole).toInt() : i;
-        if (oldIndex >= 0 && oldIndex < static_cast<int>(m_dynamicMasks.size())) {
-            reordered[static_cast<std::size_t>(i)] = m_dynamicMasks[static_cast<std::size_t>(oldIndex)];
+        if (oldIndex >= 0 && oldIndex < count) {
             mapping[static_cast<std::size_t>(oldIndex)] = i;
         }
     }
-    if (!reordered.empty()) {
-        m_dynamicMasks = std::move(reordered);
-    }
-    for (auto& id : m_frameDynamicMaskIds) {
-        if (id != 255 && id < mapping.size() && mapping[id] >= 0) {
-            id = static_cast<uint8_t>(mapping[id]);
+    for (auto& map : m_frameDynamicMaskMaps) {
+        if (map.empty()) {
+            continue;
         }
+        for (int y = 0; y < map.rows; ++y) {
+            uint8_t* row = map.ptr<uint8_t>(y);
+            for (int x = 0; x < map.cols; ++x) {
+                const uint8_t value = row[x];
+                if (value == 255) {
+                    continue;
+                }
+                if (value < mapping.size() && mapping[value] >= 0) {
+                    row[x] = static_cast<uint8_t>(mapping[value]);
+                }
+            }
+        }
+    }
+    for (auto& map : m_frameDynamicMaskMapsX) {
+        if (map.empty()) {
+            continue;
+        }
+        for (int y = 0; y < map.rows; ++y) {
+            uint8_t* row = map.ptr<uint8_t>(y);
+            for (int x = 0; x < map.cols; ++x) {
+                const uint8_t value = row[x];
+                if (value == 255) {
+                    continue;
+                }
+                if (value < mapping.size() && mapping[value] >= 0) {
+                    row[x] = static_cast<uint8_t>(mapping[value]);
+                }
+            }
+        }
+    }
+    for (auto& colors : m_frameDynamicColors) {
+        const int colorsPerSet = dynamicColorsPerSet(colors);
+        if (colorsPerSet <= 0 || colors.size() < static_cast<std::size_t>(MAX_DYNA_SETS_PER_FRAMEN * colorsPerSet)) {
+            continue;
+        }
+        std::vector<uint16_t> reordered(colors.size(), 0);
+        for (int oldIndex = 0; oldIndex < count; ++oldIndex) {
+            const int newIndex = mapping[static_cast<std::size_t>(oldIndex)];
+            if (newIndex < 0 || newIndex >= count) {
+                continue;
+            }
+            const std::size_t src = static_cast<std::size_t>(oldIndex) * colorsPerSet;
+            const std::size_t dst = static_cast<std::size_t>(newIndex) * colorsPerSet;
+            std::memcpy(reordered.data() + dst, colors.data() + src, colorsPerSet * sizeof(uint16_t));
+        }
+        colors.swap(reordered);
     }
     for (int i = 0; i < count; ++i) {
         QListWidgetItem* item = m_dynamicMaskList->item(i);
@@ -3926,15 +4386,18 @@ void MainWindow::applyDynamicMaskListOrder()
             item->setText(QString("Dynamic %1").arg(i));
             item->setData(Qt::UserRole, i);
             item->setData(Qt::UserRole + 1, QStringLiteral("dynamic"));
-            item->setSizeHint(QSize(kPreviewItemWidth, kPreviewItemHeight));
+            const QSize hint = m_dynamicMaskList->gridSize().isValid()
+                ? m_dynamicMaskList->gridSize()
+                : QSize(kDynamicMaskIconWidth + 12, kPreviewIconHeight + 24);
+            item->setSizeHint(hint);
         }
     }
     updateDynamicMaskPreviewIcons();
-    if (m_framesList && m_framesList->currentRow() >= 0) {
-        const int row = m_framesList->currentRow();
+    refreshDynamicPaletteButtons();
+    if (m_frameDynamicMaskAssign) {
+        const int selected = currentFrameDynamicMaskId();
         QSignalBlocker blocker(m_frameDynamicMaskAssign);
-        const uint8_t value = m_frameDynamicMaskIds[static_cast<std::size_t>(row)];
-        m_frameDynamicMaskAssign->setCurrentIndex(value == 255 ? 0 : value + 1);
+        m_frameDynamicMaskAssign->setCurrentIndex(selected >= 0 ? selected + 1 : 0);
     }
     updateMaskPreviewForFrame(m_framesList->currentRow());
     m_dynamicMaskReorderActive = false;
@@ -3952,12 +4415,16 @@ int MainWindow::currentFrameMaskId() const
 
 int MainWindow::currentFrameDynamicMaskId() const
 {
-    const int row = m_framesList ? m_framesList->currentRow() : -1;
-    if (row < 0 || row >= static_cast<int>(m_frameDynamicMaskIds.size())) {
-        return -1;
+    if (m_dynamicMaskList && m_dynamicMaskList->currentRow() >= 0) {
+        return m_dynamicMaskList->currentRow();
     }
-    const uint8_t value = m_frameDynamicMaskIds[static_cast<std::size_t>(row)];
-    return value == 255 ? -1 : static_cast<int>(value);
+    if (m_frameDynamicMaskAssign) {
+        const int id = m_frameDynamicMaskAssign->currentData().toInt();
+        if (id >= 0 && id < MAX_DYNA_SETS_PER_FRAMEN) {
+            return id;
+        }
+    }
+    return -1;
 }
 
 void MainWindow::setCurrentFrameMaskId(int id)
@@ -3972,12 +4439,15 @@ void MainWindow::setCurrentFrameMaskId(int id)
 
 void MainWindow::setCurrentFrameDynamicMaskId(int id)
 {
-    const int row = m_framesList ? m_framesList->currentRow() : -1;
-    if (row < 0 || row >= static_cast<int>(m_frameDynamicMaskIds.size())) {
-        return;
+    const int clamped = (id >= 0 && id < MAX_DYNA_SETS_PER_FRAMEN) ? id : -1;
+    if (m_dynamicMaskList) {
+        QSignalBlocker blocker(m_dynamicMaskList);
+        m_dynamicMaskList->setCurrentRow(clamped);
     }
-    const uint8_t value = (id < 0) ? 255 : static_cast<uint8_t>(id);
-    m_frameDynamicMaskIds[static_cast<std::size_t>(row)] = value;
+    if (m_frameDynamicMaskAssign) {
+        QSignalBlocker blocker(m_frameDynamicMaskAssign);
+        m_frameDynamicMaskAssign->setCurrentIndex(clamped >= 0 ? clamped + 1 : 0);
+    }
 }
 
 cv::Mat* MainWindow::activeComparisonMask()
@@ -3989,13 +4459,12 @@ cv::Mat* MainWindow::activeComparisonMask()
     return &m_compMasks[static_cast<std::size_t>(id)];
 }
 
-cv::Mat* MainWindow::activeDynamicMask()
+cv::Mat* MainWindow::activeDynamicMaskMap(int frameIndex)
 {
-    const int id = m_dynamicMaskList ? m_dynamicMaskList->currentRow() : -1;
-    if (id < 0 || id >= static_cast<int>(m_dynamicMasks.size())) {
+    if (frameIndex < 0 || frameIndex >= static_cast<int>(m_frameDynamicMaskMaps.size())) {
         return nullptr;
     }
-    return &m_dynamicMasks[static_cast<std::size_t>(id)];
+    return &m_frameDynamicMaskMaps[static_cast<std::size_t>(frameIndex)];
 }
 
 cv::Mat* MainWindow::activeBackgroundMask(int index)
@@ -4037,23 +4506,57 @@ void MainWindow::swapMaskEntries(int a, int b)
 
 void MainWindow::swapDynamicMaskEntries(int a, int b)
 {
-    if (a < 0 || b < 0 || a >= static_cast<int>(m_dynamicMasks.size()) || b >= static_cast<int>(m_dynamicMasks.size())) {
+    if (a < 0 || b < 0 || a >= MAX_DYNA_SETS_PER_FRAMEN || b >= MAX_DYNA_SETS_PER_FRAMEN) {
         return;
     }
-    std::swap(m_dynamicMasks[static_cast<std::size_t>(a)], m_dynamicMasks[static_cast<std::size_t>(b)]);
-    for (auto& id : m_frameDynamicMaskIds) {
-        if (id == a) {
-            id = static_cast<uint8_t>(b);
-        } else if (id == b) {
-            id = static_cast<uint8_t>(a);
+    for (auto& map : m_frameDynamicMaskMaps) {
+        if (map.empty()) {
+            continue;
+        }
+        for (int y = 0; y < map.rows; ++y) {
+            uint8_t* row = map.ptr<uint8_t>(y);
+            for (int x = 0; x < map.cols; ++x) {
+                if (row[x] == a) {
+                    row[x] = static_cast<uint8_t>(b);
+                } else if (row[x] == b) {
+                    row[x] = static_cast<uint8_t>(a);
+                }
+            }
+        }
+    }
+    for (auto& map : m_frameDynamicMaskMapsX) {
+        if (map.empty()) {
+            continue;
+        }
+        for (int y = 0; y < map.rows; ++y) {
+            uint8_t* row = map.ptr<uint8_t>(y);
+            for (int x = 0; x < map.cols; ++x) {
+                if (row[x] == a) {
+                    row[x] = static_cast<uint8_t>(b);
+                } else if (row[x] == b) {
+                    row[x] = static_cast<uint8_t>(a);
+                }
+            }
+        }
+    }
+    for (auto& colors : m_frameDynamicColors) {
+        const int colorsPerSet = dynamicColorsPerSet(colors);
+        if (colorsPerSet <= 0 ||
+            colors.size() < static_cast<std::size_t>(MAX_DYNA_SETS_PER_FRAMEN * colorsPerSet)) {
+            continue;
+        }
+        const std::size_t aOffset = static_cast<std::size_t>(a) * colorsPerSet;
+        const std::size_t bOffset = static_cast<std::size_t>(b) * colorsPerSet;
+        for (int i = 0; i < colorsPerSet; ++i) {
+            std::swap(colors[aOffset + i], colors[bOffset + i]);
         }
     }
     updateDynamicMaskPreviewIcons();
-    if (m_framesList && m_framesList->currentRow() >= 0) {
-        const int row = m_framesList->currentRow();
+    refreshDynamicPaletteButtons();
+    if (m_frameDynamicMaskAssign) {
+        const int selected = currentFrameDynamicMaskId();
         QSignalBlocker blocker(m_frameDynamicMaskAssign);
-        const uint8_t value = m_frameDynamicMaskIds[static_cast<std::size_t>(row)];
-        m_frameDynamicMaskAssign->setCurrentIndex(value == 255 ? 0 : value + 1);
+        m_frameDynamicMaskAssign->setCurrentIndex(selected >= 0 ? selected + 1 : 0);
     }
     updateMaskPreviewForFrame(m_framesList->currentRow());
 }
@@ -4110,6 +4613,68 @@ void MainWindow::applyMaskFill(cv::Mat& mask, int x, int y, bool erase)
     }
     cv::Mat floodMask(mask.rows + 2, mask.cols + 2, CV_8UC1, cv::Scalar(0));
     cv::floodFill(mask, floodMask, cv::Point(x, y), cv::Scalar(value), nullptr, cv::Scalar(0), cv::Scalar(0), 4);
+}
+
+void MainWindow::applyToolToDynamicMask(cv::Mat& map,
+                                        int setId,
+                                        DrawTool tool,
+                                        const QPoint& start,
+                                        const QPoint& end,
+                                        bool erase)
+{
+    if (map.empty() || setId < 0 || setId >= MAX_DYNA_SETS_PER_FRAMEN) {
+        return;
+    }
+    const uint8_t value = erase ? 255 : static_cast<uint8_t>(setId);
+    if (tool == DrawTool::Point) {
+        if (start.x() >= 0 && start.x() < map.cols && start.y() >= 0 && start.y() < map.rows) {
+            map.at<uint8_t>(start.y(), start.x()) = value;
+        }
+        return;
+    }
+    if (tool == DrawTool::Line) {
+        cv::line(map, cv::Point(start.x(), start.y()), cv::Point(end.x(), end.y()), cv::Scalar(value), 1);
+        return;
+    }
+    if (tool == DrawTool::Rect || tool == DrawTool::RectFill) {
+        const cv::Point tl(std::min(start.x(), end.x()), std::min(start.y(), end.y()));
+        const cv::Point br(std::max(start.x(), end.x()), std::max(start.y(), end.y()));
+        const int thickness = (tool == DrawTool::RectFill) ? -1 : 1;
+        cv::rectangle(map, cv::Rect(tl, br), cv::Scalar(value), thickness);
+        return;
+    }
+    if (tool == DrawTool::Circle || tool == DrawTool::CircleFill) {
+        const int dx = end.x() - start.x();
+        const int dy = end.y() - start.y();
+        const int radius = static_cast<int>(std::sqrt(dx * dx + dy * dy));
+        const int thickness = (tool == DrawTool::CircleFill) ? -1 : 1;
+        cv::circle(map, cv::Point(start.x(), start.y()), radius, cv::Scalar(value), thickness);
+        return;
+    }
+    if (tool == DrawTool::Ellipse || tool == DrawTool::EllipseFill) {
+        const cv::Point center((start.x() + end.x()) / 2, (start.y() + end.y()) / 2);
+        const cv::Size axes(std::abs(end.x() - start.x()) / 2, std::abs(end.y() - start.y()) / 2);
+        const int thickness = (tool == DrawTool::EllipseFill) ? -1 : 1;
+        cv::ellipse(map, center, axes, 0.0, 0.0, 360.0, cv::Scalar(value), thickness);
+        return;
+    }
+}
+
+void MainWindow::applyDynamicMaskFill(cv::Mat& map, int setId, int x, int y, bool erase)
+{
+    if (map.empty() || setId < 0 || setId >= MAX_DYNA_SETS_PER_FRAMEN) {
+        return;
+    }
+    if (x < 0 || y < 0 || x >= map.cols || y >= map.rows) {
+        return;
+    }
+    const uint8_t value = erase ? 255 : static_cast<uint8_t>(setId);
+    const uint8_t target = map.at<uint8_t>(y, x);
+    if (target == value) {
+        return;
+    }
+    cv::Mat floodMask(map.rows + 2, map.cols + 2, CV_8UC1, cv::Scalar(0));
+    cv::floodFill(map, floodMask, cv::Point(x, y), cv::Scalar(value), nullptr, cv::Scalar(0), cv::Scalar(0), 4);
 }
 
 void MainWindow::resetUndoStacks()
@@ -4214,11 +4779,13 @@ void MainWindow::pushMaskUndoSnapshot(MaskMode mode, int index)
             state.mask_index = maskId;
         }
     } else if (mode == MaskMode::Dynamic) {
-        const int maskId = m_dynamicMaskList ? m_dynamicMaskList->currentRow() : -1;
-        if (maskId >= 0 && maskId < static_cast<int>(m_dynamicMasks.size())) {
-            state.mask = m_dynamicMasks[static_cast<std::size_t>(maskId)].clone();
-            state.mask_kind = MaskKind::Dynamic;
-            state.mask_index = maskId;
+        if (index >= 0 && index < static_cast<int>(m_frameDynamicMaskMaps.size())) {
+            const cv::Mat& map = m_frameDynamicMaskMaps[static_cast<std::size_t>(index)];
+            if (!map.empty()) {
+                state.mask = map.clone();
+                state.mask_kind = MaskKind::Dynamic;
+                state.mask_index = index;
+            }
         }
     }
     if (state.mask.empty()) {
@@ -4514,11 +5081,10 @@ bool MainWindow::undoMaskEdit(MaskMode mode)
             current.mask_index = maskId;
         }
     } else if (mode == MaskMode::Dynamic) {
-        const int maskId = m_dynamicMaskList ? m_dynamicMaskList->currentRow() : -1;
-        if (maskId >= 0 && maskId < static_cast<int>(m_dynamicMasks.size())) {
-            current.mask = m_dynamicMasks[static_cast<std::size_t>(maskId)].clone();
+        if (index >= 0 && index < static_cast<int>(m_frameDynamicMaskMaps.size())) {
+            current.mask = m_frameDynamicMaskMaps[static_cast<std::size_t>(index)].clone();
             current.mask_kind = MaskKind::Dynamic;
-            current.mask_index = maskId;
+            current.mask_index = index;
         }
     }
     if (!current.mask.empty()) {
@@ -4531,8 +5097,8 @@ bool MainWindow::undoMaskEdit(MaskMode mode)
         m_compMasks[static_cast<std::size_t>(previous.mask_index)] = previous.mask.clone();
         updateMaskPreviewIcons();
     } else if (previous.mask_kind == MaskKind::Dynamic &&
-               previous.mask_index >= 0 && previous.mask_index < static_cast<int>(m_dynamicMasks.size())) {
-        m_dynamicMasks[static_cast<std::size_t>(previous.mask_index)] = previous.mask.clone();
+               previous.mask_index >= 0 && previous.mask_index < static_cast<int>(m_frameDynamicMaskMaps.size())) {
+        m_frameDynamicMaskMaps[static_cast<std::size_t>(previous.mask_index)] = previous.mask.clone();
         updateDynamicMaskPreviewIcons();
     }
     updateMaskPreviewForFrame(index);
@@ -4567,11 +5133,10 @@ bool MainWindow::redoMaskEdit(MaskMode mode)
             current.mask_index = maskId;
         }
     } else if (mode == MaskMode::Dynamic) {
-        const int maskId = m_dynamicMaskList ? m_dynamicMaskList->currentRow() : -1;
-        if (maskId >= 0 && maskId < static_cast<int>(m_dynamicMasks.size())) {
-            current.mask = m_dynamicMasks[static_cast<std::size_t>(maskId)].clone();
+        if (index >= 0 && index < static_cast<int>(m_frameDynamicMaskMaps.size())) {
+            current.mask = m_frameDynamicMaskMaps[static_cast<std::size_t>(index)].clone();
             current.mask_kind = MaskKind::Dynamic;
-            current.mask_index = maskId;
+            current.mask_index = index;
         }
     }
     if (!current.mask.empty()) {
@@ -4587,8 +5152,8 @@ bool MainWindow::redoMaskEdit(MaskMode mode)
         m_compMasks[static_cast<std::size_t>(next.mask_index)] = next.mask.clone();
         updateMaskPreviewIcons();
     } else if (next.mask_kind == MaskKind::Dynamic &&
-               next.mask_index >= 0 && next.mask_index < static_cast<int>(m_dynamicMasks.size())) {
-        m_dynamicMasks[static_cast<std::size_t>(next.mask_index)] = next.mask.clone();
+               next.mask_index >= 0 && next.mask_index < static_cast<int>(m_frameDynamicMaskMaps.size())) {
+        m_frameDynamicMaskMaps[static_cast<std::size_t>(next.mask_index)] = next.mask.clone();
         updateDynamicMaskPreviewIcons();
     }
     updateMaskPreviewForFrame(index);
@@ -5016,6 +5581,11 @@ bool MainWindow::undoPaletteEdit()
                 std::copy_n(previous.values.begin(), previous.values.size(), colors.begin() + offset);
             }
             refreshDynamicPaletteButtons();
+            updateDynamicMaskPreviewIcons();
+            updateFramePreviewAt(previous.frame_index);
+            if (m_framesList && previous.frame_index == m_framesList->currentRow()) {
+                updateFrameCanvasImage(previous.frame_index);
+            }
         }
     }
     updateUndoActions();
@@ -5097,6 +5667,11 @@ bool MainWindow::redoPaletteEdit()
                 std::copy_n(next.values.begin(), next.values.size(), colors.begin() + offset);
             }
             refreshDynamicPaletteButtons();
+            updateDynamicMaskPreviewIcons();
+            updateFramePreviewAt(next.frame_index);
+            if (m_framesList && next.frame_index == m_framesList->currentRow()) {
+                updateFrameCanvasImage(next.frame_index);
+            }
         }
     }
     updateUndoActions();
@@ -5204,6 +5779,11 @@ void MainWindow::setDynamicSlotColor(int frameIndex, int setIndex, int slot, con
     }
     const cv::Vec3b bgr(color.blue(), color.green(), color.red());
     colors[offset] = BgrToRgb565(bgr);
+    updateDynamicMaskPreviewIcons();
+    updateFramePreviewAt(frameIndex);
+    if (m_framesList && frameIndex == m_framesList->currentRow()) {
+        updateFrameCanvasImage(frameIndex);
+    }
 }
 
 void MainWindow::refreshReducedPaletteUI()
@@ -5706,8 +6286,15 @@ void MainWindow::refreshBackgroundList()
         auto* item = new QListWidgetItem();
         item->setIcon(QIcon(pixmap));
         item->setText(QString("BG %1").arg(i));
-        item->setData(kPreviewIconSizeRole, iconSize);
-        item->setSizeHint(PreviewItemSizeForIcon(iconSize, m_backgroundList->font()));
+        item->setData(kPreviewIconSizeRole, pixmap.size());
+        {
+            const int padding = 6;
+            const int textHeight = m_backgroundList->fontMetrics().height() + 4;
+            const int gap = 2;
+            const int width = pixmap.width() + padding * 2;
+            const int height = pixmap.height() + textHeight + padding * 2 + gap;
+            item->setSizeHint(QSize(width, height));
+        }
         item->setData(Qt::UserRole, i);
         item->setData(Qt::UserRole + 1, QStringLiteral("background"));
         m_backgroundList->addItem(item);
@@ -5903,10 +6490,10 @@ void MainWindow::showFrameAtIndex(int index)
             const int maskId = m_frameCompMaskIds[static_cast<std::size_t>(index)];
             m_frameMaskAssign->setCurrentIndex(maskId == 255 ? 0 : maskId + 1);
         }
-        if (m_frameDynamicMaskAssign && index >= 0 && index < static_cast<int>(m_frameDynamicMaskIds.size())) {
+        if (m_frameDynamicMaskAssign) {
             QSignalBlocker blockAssign(m_frameDynamicMaskAssign);
-            const int maskId = m_frameDynamicMaskIds[static_cast<std::size_t>(index)];
-            m_frameDynamicMaskAssign->setCurrentIndex(maskId == 255 ? 0 : maskId + 1);
+            const int selected = currentFrameDynamicMaskId();
+            m_frameDynamicMaskAssign->setCurrentIndex(selected >= 0 ? selected + 1 : 0);
         }
         if (m_frameBackgroundAssign && index >= 0 && index < static_cast<int>(m_frameBackgroundIds.size())) {
             QSignalBlocker blockAssign(m_frameBackgroundAssign);
@@ -5929,6 +6516,7 @@ void MainWindow::showFrameAtIndex(int index)
         }
         updateHdControlsForContext();
         updateMaskPreviewForFrame(index);
+        updateDynamicMaskPreviewIcons();
         syncDynamicSetSelection();
         refreshDynamicPaletteButtons();
     } else {
@@ -5992,7 +6580,11 @@ void MainWindow::populateBookmarks(const std::vector<uint32_t>& frameStarts,
     }
 }
 
-void MainWindow::handleToolPress(bool isFrame, int x, int y, Qt::MouseButton button)
+void MainWindow::handleToolPress(bool isFrame,
+                                 int x,
+                                 int y,
+                                 Qt::MouseButton button,
+                                 Qt::KeyboardModifiers modifiers)
 {
     if (!m_drawPointEnabled) {
         return;
@@ -6081,6 +6673,7 @@ void MainWindow::handleToolPress(bool isFrame, int x, int y, Qt::MouseButton but
         if (m_frameDrawOnMask) {
             ensureMaskDataSize();
             cv::Mat* mask = nullptr;
+            int dynamicSetId = -1;
             if (m_maskMode == MaskMode::Comparison) {
                 const int assigned = currentFrameMaskId();
                 const int selected = m_maskList->currentRow();
@@ -6090,13 +6683,12 @@ void MainWindow::handleToolPress(bool isFrame, int x, int y, Qt::MouseButton but
                 }
                 mask = activeComparisonMask();
             } else if (m_maskMode == MaskMode::Dynamic) {
-                const int assigned = currentFrameDynamicMaskId();
-                const int selected = m_dynamicMaskList->currentRow();
-                if (assigned < 0 || assigned != selected) {
-                    statusBar()->showMessage("Assign the selected dynamic mask to this frame before editing.", 2000);
+                dynamicSetId = currentFrameDynamicMaskId();
+                if (dynamicSetId < 0) {
+                    statusBar()->showMessage("Select a dynamic mask to edit.", 2000);
                     return;
                 }
-                mask = activeDynamicMask();
+                mask = activeDynamicMaskMap(index);
             }
             if (!mask || mask->empty()) {
                 return;
@@ -6114,13 +6706,28 @@ void MainWindow::handleToolPress(bool isFrame, int x, int y, Qt::MouseButton but
                     m_frameUndoActive = true;
                 }
                 if (m_drawTool == DrawTool::MagicFill) {
-                    applyMaskFill(*mask, mappedX, mappedY, button == Qt::RightButton);
+                    if (m_maskMode == MaskMode::Dynamic) {
+                        const bool erase = (button == Qt::RightButton) || modifiers.testFlag(Qt::ShiftModifier);
+                        applyDynamicMaskFill(*mask, dynamicSetId, mappedX, mappedY, erase);
+                    } else {
+                        applyMaskFill(*mask, mappedX, mappedY, button == Qt::RightButton);
+                    }
                 } else {
-                    applyToolToMask(*mask,
-                                    DrawTool::Point,
-                                    QPoint(mappedX, mappedY),
-                                    QPoint(mappedX, mappedY),
-                                    button == Qt::RightButton);
+                    if (m_maskMode == MaskMode::Dynamic) {
+                        const bool erase = (button == Qt::RightButton) || modifiers.testFlag(Qt::ShiftModifier);
+                        applyToolToDynamicMask(*mask,
+                                               dynamicSetId,
+                                               DrawTool::Point,
+                                               QPoint(mappedX, mappedY),
+                                               QPoint(mappedX, mappedY),
+                                               erase);
+                    } else {
+                        applyToolToMask(*mask,
+                                        DrawTool::Point,
+                                        QPoint(mappedX, mappedY),
+                                        QPoint(mappedX, mappedY),
+                                        button == Qt::RightButton);
+                    }
                 }
                 if (m_maskMode == MaskMode::Comparison) {
                     updateMaskPreviewIcons();
@@ -6198,7 +6805,11 @@ void MainWindow::handleToolPress(bool isFrame, int x, int y, Qt::MouseButton but
     }
 }
 
-void MainWindow::handleToolDrag(bool isFrame, int x, int y, Qt::MouseButtons buttons)
+void MainWindow::handleToolDrag(bool isFrame,
+                                int x,
+                                int y,
+                                Qt::MouseButtons buttons,
+                                Qt::KeyboardModifiers modifiers)
 {
     if (!m_drawPointEnabled) {
         return;
@@ -6236,9 +6847,10 @@ void MainWindow::handleToolDrag(bool isFrame, int x, int y, Qt::MouseButtons but
         cv::Mat previewMask = mask->clone();
         const bool erase = buttons.testFlag(Qt::RightButton);
         applyToolToMask(previewMask, m_drawTool, m_frameStart, QPoint(x, y), erase);
-        cv::Mat base = m_showBackgroundLayer
-            ? applyBackgroundComposite(index, *frameImage, m_useHdFrame)
-            : EnsureBgr(*frameImage);
+        cv::Mat base = applyDynamicColors(index, *frameImage, m_useHdFrame);
+        if (m_showBackgroundLayer) {
+            base = applyBackgroundComposite(index, base, m_useHdFrame);
+        }
         cv::Mat topPreview = buildMaskPreview(base, previewMask, cv::Vec3b(60, 200, 120));
         QRect outlineRegion;
         if (m_showOriginalFrame) {
@@ -6283,6 +6895,7 @@ void MainWindow::handleToolDrag(bool isFrame, int x, int y, Qt::MouseButtons but
         y -= (layout.topHeight + gap);
         cv::Mat* mask = nullptr;
         cv::Vec3b color(200, 0, 200);
+        int dynamicSetId = -1;
         if (m_maskMode == MaskMode::Comparison) {
             const int assigned = currentFrameMaskId();
             const int selected = m_maskList->currentRow();
@@ -6292,12 +6905,11 @@ void MainWindow::handleToolDrag(bool isFrame, int x, int y, Qt::MouseButtons but
             mask = activeComparisonMask();
             color = cv::Vec3b(200, 0, 200);
         } else if (m_maskMode == MaskMode::Dynamic) {
-            const int assigned = currentFrameDynamicMaskId();
-            const int selected = m_dynamicMaskList->currentRow();
-            if (assigned < 0 || assigned != selected) {
+            dynamicSetId = currentFrameDynamicMaskId();
+            if (dynamicSetId < 0) {
                 return;
             }
-            mask = activeDynamicMask();
+            mask = activeDynamicMaskMap(index);
             color = cv::Vec3b(0, 200, 255);
         }
         if (!mask || mask->empty()) {
@@ -6312,14 +6924,20 @@ void MainWindow::handleToolDrag(bool isFrame, int x, int y, Qt::MouseButtons but
             y /= scaleY;
         }
         if (m_drawTool == DrawTool::Point) {
-            const bool erase = buttons.testFlag(Qt::RightButton);
-            applyToolToMask(*mask, DrawTool::Point, QPoint(x, y), QPoint(x, y), erase);
+            const bool erase = buttons.testFlag(Qt::RightButton) ||
+                (m_maskMode == MaskMode::Dynamic && modifiers.testFlag(Qt::ShiftModifier));
+            if (m_maskMode == MaskMode::Dynamic) {
+                applyToolToDynamicMask(*mask, dynamicSetId, DrawTool::Point, QPoint(x, y), QPoint(x, y), erase);
+            } else {
+                applyToolToMask(*mask, DrawTool::Point, QPoint(x, y), QPoint(x, y), erase);
+            }
             if (m_maskMode == MaskMode::Comparison) {
                 updateMaskPreviewIcons();
                 m_framesCanvas->canvas()->setMaskOutline(*mask, QColor(200, 0, 200));
             } else {
+                cv::Mat outlineMask = buildDynamicMaskFromMap(*mask, dynamicSetId);
                 updateDynamicMaskPreviewIcons();
-                m_framesCanvas->canvas()->setMaskOutline(*mask, QColor(255, 200, 0));
+                m_framesCanvas->canvas()->setMaskOutline(outlineMask, QColor(255, 200, 0));
             }
             updateMaskPreviewForFrame(index);
             return;
@@ -6327,15 +6945,24 @@ void MainWindow::handleToolDrag(bool isFrame, int x, int y, Qt::MouseButtons but
         if (!m_frameHasStart) {
             return;
         }
-        cv::Mat previewMask = mask->clone();
-        const bool erase = buttons.testFlag(Qt::RightButton);
-        applyToolToMask(previewMask, m_drawTool, m_frameStart, QPoint(x, y), erase);
+        cv::Mat previewMask;
+        cv::Mat previewMap = mask->clone();
+        const bool erase = buttons.testFlag(Qt::RightButton) ||
+            (m_maskMode == MaskMode::Dynamic && modifiers.testFlag(Qt::ShiftModifier));
+        if (m_maskMode == MaskMode::Dynamic) {
+            applyToolToDynamicMask(previewMap, dynamicSetId, m_drawTool, m_frameStart, QPoint(x, y), erase);
+            previewMask = buildDynamicMaskFromMap(previewMap, dynamicSetId);
+        } else {
+            previewMask = previewMap;
+            applyToolToMask(previewMask, m_drawTool, m_frameStart, QPoint(x, y), erase);
+        }
         if (const cv::Mat* frame = activeFrameImage(index, false)) {
             const QColor gap = m_framesCanvas->palette().color(QPalette::Window);
             const cv::Scalar gapColor(gap.blue(), gap.green(), gap.red());
-            const cv::Mat base = m_showBackgroundLayer
-                ? applyBackgroundComposite(index, *frame, m_useHdFrame)
-                : EnsureBgr(*frame);
+            cv::Mat base = applyDynamicColors(index, *frame, m_useHdFrame);
+            if (m_showBackgroundLayer) {
+                base = applyBackgroundComposite(index, base, m_useHdFrame);
+            }
             cv::Mat preview = buildCombinedMaskPreview(base, reference, previewMask, color, gapColor);
             m_framesCanvas->canvas()->setPreviewImage(preview);
             QRect outlineRegion;
@@ -6391,9 +7018,11 @@ void MainWindow::handleToolDrag(bool isFrame, int x, int y, Qt::MouseButtons but
     if (isFrame) {
         cv::Mat reference = buildOriginalPreviewForIndex(m_framesList->currentRow());
         cv::Mat original = m_showOriginalFrame ? buildOriginalFrame(reference) : cv::Mat();
+        const int frameIndex = m_framesList->currentRow();
+        cv::Mat previewBase = applyDynamicColors(frameIndex, preview, m_useHdFrame);
         cv::Mat composed = m_showBackgroundLayer
-            ? applyBackgroundComposite(m_framesList->currentRow(), preview, m_useHdFrame)
-            : EnsureBgr(preview);
+            ? applyBackgroundComposite(frameIndex, previewBase, m_useHdFrame)
+            : previewBase;
         if (original.empty()) {
             m_framesCanvas->canvas()->setPreviewImage(composed);
         } else {
@@ -6409,7 +7038,11 @@ void MainWindow::handleToolDrag(bool isFrame, int x, int y, Qt::MouseButtons but
     }
 }
 
-void MainWindow::handleToolRelease(bool isFrame, int x, int y, Qt::MouseButton button)
+void MainWindow::handleToolRelease(bool isFrame,
+                                   int x,
+                                   int y,
+                                   Qt::MouseButton button,
+                                   Qt::KeyboardModifiers modifiers)
 {
     if (!m_drawPointEnabled) {
         return;
@@ -6490,6 +7123,7 @@ void MainWindow::handleToolRelease(bool isFrame, int x, int y, Qt::MouseButton b
         x -= layout.bottomX;
         y -= (layout.topHeight + gap);
         cv::Mat* mask = nullptr;
+        int dynamicSetId = -1;
         if (m_maskMode == MaskMode::Comparison) {
             const int assigned = currentFrameMaskId();
             const int selected = m_maskList->currentRow();
@@ -6499,13 +7133,12 @@ void MainWindow::handleToolRelease(bool isFrame, int x, int y, Qt::MouseButton b
             }
             mask = activeComparisonMask();
         } else if (m_maskMode == MaskMode::Dynamic) {
-            const int assigned = currentFrameDynamicMaskId();
-            const int selected = m_dynamicMaskList->currentRow();
-            if (assigned < 0 || assigned != selected) {
+            dynamicSetId = currentFrameDynamicMaskId();
+            if (dynamicSetId < 0) {
                 m_frameHasStart = false;
                 return;
             }
-            mask = activeDynamicMask();
+            mask = activeDynamicMaskMap(index);
         }
         if (!mask || mask->empty()) {
             m_frameHasStart = false;
@@ -6519,8 +7152,13 @@ void MainWindow::handleToolRelease(bool isFrame, int x, int y, Qt::MouseButton b
         if (scaleY > 1) {
             y /= scaleY;
         }
-        const bool erase = (m_frameStartButton == Qt::RightButton || button == Qt::RightButton);
-        applyToolToMask(*mask, m_drawTool, m_frameStart, QPoint(x, y), erase);
+        const bool erase = (m_frameStartButton == Qt::RightButton || button == Qt::RightButton ||
+                            (m_maskMode == MaskMode::Dynamic && modifiers.testFlag(Qt::ShiftModifier)));
+        if (m_maskMode == MaskMode::Dynamic) {
+            applyToolToDynamicMask(*mask, dynamicSetId, m_drawTool, m_frameStart, QPoint(x, y), erase);
+        } else {
+            applyToolToMask(*mask, m_drawTool, m_frameStart, QPoint(x, y), erase);
+        }
         m_frameHasStart = false;
         m_framesCanvas->canvas()->clearPreviewImage();
         if (m_maskMode == MaskMode::Comparison) {
@@ -6586,7 +7224,10 @@ void MainWindow::handleToolRelease(bool isFrame, int x, int y, Qt::MouseButton b
     }
 }
 
-void MainWindow::handleBackgroundToolPress(int x, int y, Qt::MouseButton button)
+void MainWindow::handleBackgroundToolPress(int x,
+                                           int y,
+                                           Qt::MouseButton button,
+                                           Qt::KeyboardModifiers /*modifiers*/)
 {
     if (!m_drawPointEnabled || !m_backgroundStore) {
         return;
@@ -6619,7 +7260,10 @@ void MainWindow::handleBackgroundToolPress(int x, int y, Qt::MouseButton button)
     updateBackgroundCanvasImage(index);
 }
 
-void MainWindow::handleBackgroundToolDrag(int x, int y, Qt::MouseButtons buttons)
+void MainWindow::handleBackgroundToolDrag(int x,
+                                          int y,
+                                          Qt::MouseButtons buttons,
+                                          Qt::KeyboardModifiers /*modifiers*/)
 {
     if (!m_drawPointEnabled || !m_backgroundStore) {
         return;
@@ -6648,7 +7292,10 @@ void MainWindow::handleBackgroundToolDrag(int x, int y, Qt::MouseButtons buttons
     m_backgroundsCanvas->canvas()->setPreviewImage(preview);
 }
 
-void MainWindow::handleBackgroundToolRelease(int x, int y, Qt::MouseButton button)
+void MainWindow::handleBackgroundToolRelease(int x,
+                                             int y,
+                                             Qt::MouseButton button,
+                                             Qt::KeyboardModifiers /*modifiers*/)
 {
     if (!m_drawPointEnabled || !m_backgroundStore) {
         return;

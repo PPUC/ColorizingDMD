@@ -265,17 +265,53 @@ bool SaveLegacyProject(const std::string& crom_path,
                 }
             }
         }
-        if (index < project.frame_dynamic_mask_ids.size()) {
-            const uint8_t dyn_id = project.frame_dynamic_mask_ids[index];
-            if (dyn_id < MAX_DYNA_SETS_PER_FRAMEN && dyn_id < project.dynamic_masks.size()) {
-                const cv::Mat& mask = project.dynamic_masks[dyn_id];
-                if (!mask.empty() && mask.rows == static_cast<int>(frame_height) && mask.cols == static_cast<int>(frame_width)) {
-                    for (uint32_t y = 0; y < frame_height; ++y) {
-                        const uint8_t* mrow = mask.ptr<uint8_t>(static_cast<int>(y));
-                        for (uint32_t x = 0; x < frame_width; ++x) {
-                            if (mrow[x]) {
-                                dyna_masks[offset + y * frame_width + x] = dyn_id;
-                            }
+        if (index < project.frame_dynamic_mask_maps.size()) {
+            const cv::Mat& map = project.frame_dynamic_mask_maps[static_cast<std::size_t>(index)];
+            if (!map.empty()) {
+                cv::Mat scaled = map;
+                if (map.rows != static_cast<int>(frame_height) || map.cols != static_cast<int>(frame_width)) {
+                    cv::resize(map, scaled, cv::Size(frame_width, frame_height), 0.0, 0.0, cv::INTER_NEAREST);
+                }
+                for (uint32_t y = 0; y < frame_height; ++y) {
+                    const uint8_t* mrow = scaled.ptr<uint8_t>(static_cast<int>(y));
+                    for (uint32_t x = 0; x < frame_width; ++x) {
+                        const uint8_t value = mrow[x];
+                        if (value < MAX_DYNA_SETS_PER_FRAMEN) {
+                            dyna_masks[offset + y * frame_width + x] = value;
+                        }
+                    }
+                }
+            }
+        }
+        if (frame_width_x > 0 && frame_height_x > 0) {
+            const std::size_t offset_x = static_cast<std::size_t>(index) * frame_width_x * frame_height_x;
+            const cv::Mat* map_x = nullptr;
+            if (index < project.frame_dynamic_mask_maps_x.size()) {
+                const cv::Mat& candidate = project.frame_dynamic_mask_maps_x[static_cast<std::size_t>(index)];
+                if (!candidate.empty()) {
+                    map_x = &candidate;
+                }
+            }
+            cv::Mat scaled_x;
+            if (map_x) {
+                if (map_x->rows != static_cast<int>(frame_height_x) || map_x->cols != static_cast<int>(frame_width_x)) {
+                    cv::resize(*map_x, scaled_x, cv::Size(frame_width_x, frame_height_x), 0.0, 0.0, cv::INTER_NEAREST);
+                    map_x = &scaled_x;
+                }
+            } else if (index < project.frame_dynamic_mask_maps.size()) {
+                const cv::Mat& map = project.frame_dynamic_mask_maps[static_cast<std::size_t>(index)];
+                if (!map.empty()) {
+                    cv::resize(map, scaled_x, cv::Size(frame_width_x, frame_height_x), 0.0, 0.0, cv::INTER_NEAREST);
+                    map_x = &scaled_x;
+                }
+            }
+            if (map_x && !map_x->empty()) {
+                for (uint32_t y = 0; y < frame_height_x; ++y) {
+                    const uint8_t* mrow = map_x->ptr<uint8_t>(static_cast<int>(y));
+                    for (uint32_t x = 0; x < frame_width_x; ++x) {
+                        const uint8_t value = mrow[x];
+                        if (value < MAX_DYNA_SETS_PER_FRAMEN) {
+                            dyna_masks_x[offset_x + y * frame_width_x + x] = value;
                         }
                     }
                 }

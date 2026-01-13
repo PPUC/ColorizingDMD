@@ -29,9 +29,9 @@ public:
     void scaleZoom(double factor);
 
 signals:
-    void imageClicked(int x, int y, Qt::MouseButton button);
-    void imageDragged(int x, int y, Qt::MouseButtons buttons);
-    void imageReleased(int x, int y, Qt::MouseButton button);
+    void imageClicked(int x, int y, Qt::MouseButton button, Qt::KeyboardModifiers modifiers);
+    void imageDragged(int x, int y, Qt::MouseButtons buttons, Qt::KeyboardModifiers modifiers);
+    void imageReleased(int x, int y, Qt::MouseButton button, Qt::KeyboardModifiers modifiers);
     void maskDropped(const QString& kind, int index);
     void imageHovered(int x, int y, bool onImage);
 
