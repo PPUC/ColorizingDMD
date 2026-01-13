@@ -48,6 +48,7 @@
 #include <cmath>
 #include <cctype>
 #include <cstring>
+#include <unordered_set>
 
 #include <opencv2/imgproc.hpp>
 
@@ -88,6 +89,7 @@ constexpr int kFrameIndexRole = Qt::UserRole + 1;
 constexpr int kFrameDurationRole = Qt::UserRole + 2;
 constexpr int kPreviewIconSizeRole = Qt::UserRole + 3;
 constexpr int kPaletteDisabledRole = Qt::UserRole + 4;
+constexpr int kPreviewSecondarySelectedRole = Qt::UserRole + 5;
 
 cv::Mat EnsureBgr(const cv::Mat& source);
 uint16_t BgrToRgb565(const cv::Vec3b& color);
@@ -153,6 +155,18 @@ cv::Mat BuildStackedFrames(const std::vector<cv::Mat>& frames, const cv::Scalar&
         y += frame.rows + kFrameGapPixels;
     }
     return combined;
+}
+
+QPoint ScalePointToSize(const QPoint& point, const QSize& from, const QSize& to)
+{
+    if (from.width() <= 0 || from.height() <= 0 || to.width() <= 0 || to.height() <= 0) {
+        return point;
+    }
+    const int x = std::clamp(static_cast<int>(std::llround(
+        static_cast<double>(point.x()) * to.width() / from.width())), 0, to.width() - 1);
+    const int y = std::clamp(static_cast<int>(std::llround(
+        static_cast<double>(point.y()) * to.height() / from.height())), 0, to.height() - 1);
+    return QPoint(x, y);
 }
 
 cv::Mat BuildDisplayOriginal(const cv::Mat& original, const cv::Size& topSize)
@@ -251,7 +265,15 @@ public:
         initStyleOption(&opt, index);
         QStyle* style = opt.widget ? opt.widget->style() : QApplication::style();
 
+        const bool secondarySelected = index.data(kPreviewSecondarySelectedRole).toBool();
+        const bool primarySelected = opt.state.testFlag(QStyle::State_Selected) && !secondarySelected;
+        opt.state &= ~QStyle::State_Selected;
         style->drawPrimitive(QStyle::PE_PanelItemViewItem, &opt, painter, opt.widget);
+        if (primarySelected) {
+            painter->fillRect(opt.rect, opt.palette.highlight().color());
+        } else if (secondarySelected) {
+            painter->fillRect(opt.rect, QColor(140, 190, 255, 160));
+        }
         painter->setClipRect(opt.rect);
 
         const QFontMetrics metrics(opt.font);
@@ -1254,15 +1276,18 @@ MainWindow::MainWindow(QWidget* parent)
             cancelPaletteGradient();
         }
         if (m_dynamicSetSlotActive) {
-            const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
-            if (frameIndex >= 0 && frameIndex < static_cast<int>(m_frameDynamicColors.size())) {
-                const QColor current(static_cast<int>(m_drawColor[2]),
-                                     static_cast<int>(m_drawColor[1]),
-                                     static_cast<int>(m_drawColor[0]));
+            const std::vector<int> targets = targetFrameIndices();
+            const QColor current(static_cast<int>(m_drawColor[2]),
+                                 static_cast<int>(m_drawColor[1]),
+                                 static_cast<int>(m_drawColor[0]));
+            for (int frameIndex : targets) {
+                if (frameIndex < 0 || frameIndex >= static_cast<int>(m_frameDynamicColors.size())) {
+                    continue;
+                }
                 pushDynamicUndoSnapshot(frameIndex, m_dynamicSetIndex);
                 setDynamicSlotColor(frameIndex, m_dynamicSetIndex, row, current);
-                refreshDynamicPaletteButtons();
             }
+            refreshDynamicPaletteButtons();
             cancelPaletteSetSlot();
             return;
         }
@@ -1392,6 +1417,11 @@ MainWindow::MainWindow(QWidget* parent)
     m_previewFilterClearButton->setText("All");
     m_previewFilterClearButton->setToolTip("Show all frames in preview");
     previewBar->addWidget(m_previewFilterClearButton);
+    m_previewSelectedButton = new QToolButton(previewWidget);
+    m_previewSelectedButton->setText("Selected");
+    m_previewSelectedButton->setCheckable(true);
+    m_previewSelectedButton->setToolTip("Show only selected frames");
+    previewBar->addWidget(m_previewSelectedButton);
     m_previewHdButton = new QToolButton(previewWidget);
     m_previewHdButton->setText("HD");
     m_previewHdButton->setCheckable(true);
@@ -1415,7 +1445,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_framePreviewList->setFlow(QListView::LeftToRight);
     m_framePreviewList->setWrapping(false);
     m_framePreviewList->setMovement(QListView::Static);
-    m_framePreviewList->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_framePreviewList->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_framePreviewList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
     m_framePreviewList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_framePreviewList->setResizeMode(QListView::Adjust);
@@ -1467,11 +1497,13 @@ MainWindow::MainWindow(QWidget* parent)
         updateFrameJumpRange();
     });
     connect(m_shapeCompToggle, &QCheckBox::toggled, this, [this](bool enabled) {
-        const int row = m_framesList ? m_framesList->currentRow() : -1;
-        if (row < 0 || row >= static_cast<int>(m_frameShapeCompModes.size())) {
-            return;
+        const std::vector<int> targets = targetFrameIndices();
+        for (int row : targets) {
+            if (row < 0 || row >= static_cast<int>(m_frameShapeCompModes.size())) {
+                continue;
+            }
+            m_frameShapeCompModes[static_cast<std::size_t>(row)] = enabled ? 1 : 0;
         }
-        m_frameShapeCompModes[static_cast<std::size_t>(row)] = enabled ? 1 : 0;
     });
     connect(m_hdCreateButton, &QPushButton::clicked, this, [this]() {
         if (m_canvasTabs && m_canvasTabs->currentWidget() == m_backgroundsCanvas) {
@@ -1515,63 +1547,66 @@ MainWindow::MainWindow(QWidget* parent)
             statusBar()->showMessage("HD background created.", 2000);
             return;
         }
-        const int index = m_framesList ? m_framesList->currentRow() : -1;
-        if (index < 0 || index >= m_frameStore->count()) {
+        const int frameCount = m_frameStore ? m_frameStore->count() : 0;
+        if (frameCount <= 0) {
             return;
         }
-        if (hasHdFrame(index)) {
-            statusBar()->showMessage("HD already exists for this frame.", 2000);
+        const std::vector<int> targets = targetFrameIndices();
+        if (targets.empty()) {
             return;
         }
-        if (m_frameExtraFrames.size() < static_cast<std::size_t>(m_frameStore->count())) {
-            m_frameExtraFrames.resize(static_cast<std::size_t>(m_frameStore->count()));
+        if (m_frameExtraFrames.size() < static_cast<std::size_t>(frameCount)) {
+            m_frameExtraFrames.resize(static_cast<std::size_t>(frameCount));
         }
-        if (m_frameExtraFlags.size() < static_cast<std::size_t>(m_frameStore->count())) {
-            m_frameExtraFlags.resize(static_cast<std::size_t>(m_frameStore->count()), 0);
+        if (m_frameExtraFlags.size() < static_cast<std::size_t>(frameCount)) {
+            m_frameExtraFlags.resize(static_cast<std::size_t>(frameCount), 0);
         }
-
-        cv::Mat source;
         const int sourceMode = m_hdSourceCombo ? m_hdSourceCombo->currentData().toInt() : 0;
-        if (sourceMode == 1) {
-            cv::Mat reference = buildOriginalPreviewForIndex(index);
-            source = buildOriginalFrame(reference);
-        } else {
-            if (const cv::Mat* frame = m_frameStore->at(index)) {
-                source = EnsureBgr(*frame);
-            }
-        }
-        if (source.empty()) {
-            statusBar()->showMessage("HD create failed: missing source frame.", 3000);
-            return;
-        }
-
         const int interpolation = m_hdScaleCombo ? m_hdScaleCombo->currentData().toInt() : cv::INTER_NEAREST;
-        cv::Mat resized;
-        if (interpolation == -1) {
-            resized = Scale2xBgr(source);
-        } else {
-            const cv::Size targetSize(source.cols * 2, source.rows * 2);
-            cv::resize(source, resized, targetSize, 0.0, 0.0, interpolation);
-            if (interpolation == cv::INTER_LINEAR || interpolation == cv::INTER_CUBIC) {
-                resized = AdjustBrightnessToSource(source, resized);
+        bool createdAny = false;
+        for (int index : targets) {
+            if (index < 0 || index >= frameCount) {
+                continue;
             }
-        }
-        if (resized.empty()) {
-            statusBar()->showMessage("HD create failed: upscale produced empty frame.", 3000);
-            return;
-        }
-        m_frameExtraFrames[static_cast<std::size_t>(index)] = resized;
-        m_frameExtraFlags[static_cast<std::size_t>(index)] = 1;
-        ensureBackgroundDataSize();
-        if (index >= 0 && index < static_cast<int>(m_frameBackgroundMasks.size()) &&
-            index < static_cast<int>(m_frameBackgroundMasksX.size())) {
-            const cv::Mat& sdMask = m_frameBackgroundMasks[static_cast<std::size_t>(index)];
-            cv::Mat& hdMask = m_frameBackgroundMasksX[static_cast<std::size_t>(index)];
-            if (!sdMask.empty() && (hdMask.empty() || hdMask.size() != resized.size())) {
-                cv::resize(sdMask, hdMask, resized.size(), 0.0, 0.0, cv::INTER_NEAREST);
+            if (hasHdFrame(index)) {
+                continue;
             }
-        }
-        if (index >= 0) {
+            cv::Mat source;
+            if (sourceMode == 1) {
+                cv::Mat reference = buildOriginalPreviewForIndex(index);
+                source = buildOriginalFrame(reference);
+            } else {
+                if (const cv::Mat* frame = m_frameStore->at(index)) {
+                    source = EnsureBgr(*frame);
+                }
+            }
+            if (source.empty()) {
+                continue;
+            }
+            cv::Mat resized;
+            if (interpolation == -1) {
+                resized = Scale2xBgr(source);
+            } else {
+                const cv::Size targetSize(source.cols * 2, source.rows * 2);
+                cv::resize(source, resized, targetSize, 0.0, 0.0, interpolation);
+                if (interpolation == cv::INTER_LINEAR || interpolation == cv::INTER_CUBIC) {
+                    resized = AdjustBrightnessToSource(source, resized);
+                }
+            }
+            if (resized.empty()) {
+                continue;
+            }
+            m_frameExtraFrames[static_cast<std::size_t>(index)] = resized;
+            m_frameExtraFlags[static_cast<std::size_t>(index)] = 1;
+            ensureBackgroundDataSize();
+            if (index < static_cast<int>(m_frameBackgroundMasks.size()) &&
+                index < static_cast<int>(m_frameBackgroundMasksX.size())) {
+                const cv::Mat& sdMask = m_frameBackgroundMasks[static_cast<std::size_t>(index)];
+                cv::Mat& hdMask = m_frameBackgroundMasksX[static_cast<std::size_t>(index)];
+                if (!sdMask.empty() && (hdMask.empty() || hdMask.size() != resized.size())) {
+                    cv::resize(sdMask, hdMask, resized.size(), 0.0, 0.0, cv::INTER_NEAREST);
+                }
+            }
             if (m_frameDynamicMaskMapsX.size() <= static_cast<std::size_t>(index)) {
                 m_frameDynamicMaskMapsX.resize(static_cast<std::size_t>(index + 1));
             }
@@ -1582,13 +1617,19 @@ MainWindow::MainWindow(QWidget* parent)
                     cv::resize(sdMap, hdMap, resized.size(), 0.0, 0.0, cv::INTER_NEAREST);
                 }
             }
+            if (index < static_cast<int>(m_frameHdUndoStacks.size())) {
+                m_frameHdUndoStacks[static_cast<std::size_t>(index)] = UndoStack{};
+            }
+            updateFramePreviewAt(index);
+            createdAny = true;
         }
-        if (index < static_cast<int>(m_frameHdUndoStacks.size())) {
-            m_frameHdUndoStacks[static_cast<std::size_t>(index)] = UndoStack{};
+        const int current = m_framesList ? m_framesList->currentRow() : -1;
+        if (current >= 0 && hasHdFrame(current)) {
+            setHdMode(true);
         }
-        setHdMode(true);
-        updateFramePreviewAt(index);
-        statusBar()->showMessage("HD frame created.", 2000);
+        if (createdAny) {
+            statusBar()->showMessage("HD frame created.", 2000);
+        }
     });
     connect(m_hdDeleteButton, &QPushButton::clicked, this, [this]() {
         if (m_canvasTabs && m_canvasTabs->currentWidget() == m_backgroundsCanvas) {
@@ -1614,26 +1655,50 @@ MainWindow::MainWindow(QWidget* parent)
             statusBar()->showMessage("HD background deleted.", 2000);
             return;
         }
-        const int index = m_framesList ? m_framesList->currentRow() : -1;
-        if (index < 0 || index >= static_cast<int>(m_frameExtraFrames.size())) {
+        const int frameCount = m_frameStore ? m_frameStore->count() : 0;
+        if (frameCount <= 0) {
             return;
         }
-        if (m_frameExtraFrames[static_cast<std::size_t>(index)].empty()) {
+        const std::vector<int> targets = targetFrameIndices();
+        if (targets.empty()) {
             return;
         }
-        m_frameExtraFrames[static_cast<std::size_t>(index)] = cv::Mat();
-        if (index < static_cast<int>(m_frameExtraFlags.size())) {
-            m_frameExtraFlags[static_cast<std::size_t>(index)] = 0;
+        bool deletedAny = false;
+        for (int index : targets) {
+            if (index < 0 || index >= static_cast<int>(m_frameExtraFrames.size())) {
+                continue;
+            }
+            if (m_frameExtraFrames[static_cast<std::size_t>(index)].empty()) {
+                continue;
+            }
+            m_frameExtraFrames[static_cast<std::size_t>(index)] = cv::Mat();
+            if (index < static_cast<int>(m_frameExtraFlags.size())) {
+                m_frameExtraFlags[static_cast<std::size_t>(index)] = 0;
+            }
+            if (index < static_cast<int>(m_frameHdUndoStacks.size())) {
+                m_frameHdUndoStacks[static_cast<std::size_t>(index)] = UndoStack{};
+            }
+            updateFramePreviewAt(index);
+            deletedAny = true;
         }
-        if (index < static_cast<int>(m_frameHdUndoStacks.size())) {
-            m_frameHdUndoStacks[static_cast<std::size_t>(index)] = UndoStack{};
+        const int current = m_framesList ? m_framesList->currentRow() : -1;
+        if (current >= 0 && !hasHdFrame(current)) {
+            setHdMode(false);
         }
-        setHdMode(false);
-        updateFramePreviewAt(index);
-        statusBar()->showMessage("HD frame deleted.", 2000);
+        if (deletedAny) {
+            statusBar()->showMessage("HD frame deleted.", 2000);
+        }
     });
     connect(m_frameMaskAssign, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
-        setCurrentFrameMaskId(m_frameMaskAssign->currentData().toInt());
+        const int id = m_frameMaskAssign->currentData().toInt();
+        const std::vector<int> targets = targetFrameIndices();
+        for (int row : targets) {
+            if (row < 0 || row >= static_cast<int>(m_frameCompMaskIds.size())) {
+                continue;
+            }
+            m_frameCompMaskIds[static_cast<std::size_t>(row)] = id >= 0 ? static_cast<uint8_t>(id) : 255;
+            updateFramePreviewAt(row);
+        }
         updateMaskPreviewForFrame(m_framesList->currentRow());
         if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::Mask) {
             updatePreviewFilterState();
@@ -1701,17 +1766,19 @@ MainWindow::MainWindow(QWidget* parent)
         statusBar()->showMessage(QString("Copied dynamic data to frame %1").arg(targetDisplay), 2000);
     });
     connect(m_frameBackgroundAssign, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
-        const int row = m_framesList ? m_framesList->currentRow() : -1;
-        if (row < 0) {
-            return;
-        }
-        if (row >= static_cast<int>(m_frameBackgroundIds.size())) {
+        const int id = m_frameBackgroundAssign->currentData().toInt();
+        const std::vector<int> targets = targetFrameIndices();
+        if (!targets.empty() && m_frameBackgroundIds.size() < static_cast<std::size_t>(m_frameStore->count())) {
             m_frameBackgroundIds.resize(static_cast<std::size_t>(m_frameStore->count()), 0xffff);
         }
-        const int id = m_frameBackgroundAssign->currentData().toInt();
-        m_frameBackgroundIds[static_cast<std::size_t>(row)] = id >= 0 ? static_cast<uint16_t>(id) : 0xffff;
-        updateFrameCanvasImage(row);
-        updateFramePreviewAt(row);
+        for (int row : targets) {
+            if (row < 0 || row >= static_cast<int>(m_frameBackgroundIds.size())) {
+                continue;
+            }
+            m_frameBackgroundIds[static_cast<std::size_t>(row)] = id >= 0 ? static_cast<uint16_t>(id) : 0xffff;
+            updateFramePreviewAt(row);
+        }
+        updateFrameCanvasImage(m_framesList ? m_framesList->currentRow() : -1);
         if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::Background) {
             updatePreviewFilterState();
         }
@@ -1796,28 +1863,32 @@ MainWindow::MainWindow(QWidget* parent)
             pushMaskUndoSnapshot(MaskMode::Comparison, frameIndex);
             mask->setTo(cv::Scalar(0));
             updateMaskPreviewIcons();
+            updatePreviewsForMaskId(m_maskList ? m_maskList->currentRow() : -1);
             updateMaskPreviewForFrame(m_framesList->currentRow());
         }
     });
     connect(m_dynamicMaskClearButton, &QPushButton::clicked, this, [this]() {
-        const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
         const int setId = currentFrameDynamicMaskId();
-        if (frameIndex < 0 || setId < 0) {
+        if (setId < 0) {
             return;
         }
-        cv::Mat* map = activeDynamicMaskMap(frameIndex);
-        if (!map || map->empty()) {
-            return;
-        }
-        pushMaskUndoSnapshot(MaskMode::Dynamic, frameIndex);
+        const std::vector<int> targets = targetFrameIndices();
         const uint8_t target = static_cast<uint8_t>(setId);
-        for (int y = 0; y < map->rows; ++y) {
-            uint8_t* row = map->ptr<uint8_t>(y);
-            for (int x = 0; x < map->cols; ++x) {
-                if (row[x] == target) {
-                    row[x] = 255;
+        for (int frameIndex : targets) {
+            cv::Mat* map = activeDynamicMaskMap(frameIndex);
+            if (!map || map->empty()) {
+                continue;
+            }
+            pushMaskUndoSnapshot(MaskMode::Dynamic, frameIndex);
+            for (int y = 0; y < map->rows; ++y) {
+                uint8_t* row = map->ptr<uint8_t>(y);
+                for (int x = 0; x < map->cols; ++x) {
+                    if (row[x] == target) {
+                        row[x] = 255;
+                    }
                 }
             }
+            updateFramePreviewAt(frameIndex);
         }
         updateDynamicMaskPreviewIcons();
         updateMaskPreviewForFrame(m_framesList->currentRow());
@@ -1853,11 +1924,106 @@ MainWindow::MainWindow(QWidget* parent)
         if (frameIndex < 0 || frameIndex >= m_framesList->count()) {
             return;
         }
+        if (m_previewSelectedFrames.size() > 1 &&
+            std::find(m_previewSelectedFrames.begin(),
+                      m_previewSelectedFrames.end(),
+                      frameIndex) != m_previewSelectedFrames.end()) {
+            QSignalBlocker blocker(m_framePreviewList);
+            for (int i = 0; i < m_framePreviewList->count(); ++i) {
+                QListWidgetItem* restore = m_framePreviewList->item(i);
+                if (!restore) {
+                    continue;
+                }
+                const int restoreIndex = restore->data(kFrameIndexRole).toInt();
+                const bool selected = std::find(m_previewSelectedFrames.begin(),
+                                                m_previewSelectedFrames.end(),
+                                                restoreIndex) != m_previewSelectedFrames.end();
+                restore->setSelected(selected);
+            }
+        }
         QSignalBlocker blocker(m_framesList);
         m_framesList->setCurrentRow(frameIndex);
         showFrameAtIndex(frameIndex);
         updateMetadataForFrame(frameIndex);
         updateUndoActions();
+    });
+    connect(m_framePreviewList, &QListWidget::itemPressed, this, [this](QListWidgetItem* item) {
+        if (!item) {
+            m_restorePreviewSelection = false;
+            return;
+        }
+        const Qt::KeyboardModifiers mods = QApplication::keyboardModifiers();
+        if (mods == Qt::NoModifier) {
+            const std::vector<int> selected = selectedPreviewFrameIndices();
+            if (selected.size() > 1 && item->isSelected()) {
+                m_restorePreviewSelection = true;
+                m_restorePreviewCurrent = item->data(kFrameIndexRole).toInt();
+                m_restorePreviewSelectionIndices = selected;
+                return;
+            }
+        }
+        m_restorePreviewSelection = false;
+    });
+    connect(m_framePreviewList, &QListWidget::itemSelectionChanged, this, [this]() {
+        if (m_restorePreviewSelection) {
+            QSignalBlocker blocker(m_framePreviewList);
+            for (int row = 0; row < m_framePreviewList->count(); ++row) {
+                QListWidgetItem* item = m_framePreviewList->item(row);
+                if (!item) {
+                    continue;
+                }
+                const int frameIndex = item->data(kFrameIndexRole).toInt();
+                const bool selected = std::find(m_restorePreviewSelectionIndices.begin(),
+                                                m_restorePreviewSelectionIndices.end(),
+                                                frameIndex) != m_restorePreviewSelectionIndices.end();
+                item->setSelected(selected);
+                if (selected && frameIndex == m_restorePreviewCurrent) {
+                    m_framePreviewList->setCurrentRow(row);
+                }
+            }
+            m_restorePreviewSelection = false;
+        }
+        const std::vector<int> newSelection = selectedPreviewFrameIndices();
+        const bool previewHasFocus = m_framePreviewList->hasFocus() || m_framePreviewList->viewport()->hasFocus();
+        if (!previewHasFocus && m_previewSelectedFrames.size() > 1 && newSelection.size() <= 1) {
+            const int candidate = newSelection.empty() ? -1 : newSelection.front();
+            if (candidate >= 0 &&
+                std::find(m_previewSelectedFrames.begin(),
+                          m_previewSelectedFrames.end(),
+                          candidate) != m_previewSelectedFrames.end()) {
+                QSignalBlocker blocker(m_framePreviewList);
+                for (int row = 0; row < m_framePreviewList->count(); ++row) {
+                    QListWidgetItem* item = m_framePreviewList->item(row);
+                    if (!item) {
+                        continue;
+                    }
+                    const int frameIndex = item->data(kFrameIndexRole).toInt();
+                    item->setSelected(std::find(m_previewSelectedFrames.begin(),
+                                                m_previewSelectedFrames.end(),
+                                                frameIndex) != m_previewSelectedFrames.end());
+                }
+            } else if (candidate < 0) {
+                QSignalBlocker blocker(m_framePreviewList);
+                for (int row = 0; row < m_framePreviewList->count(); ++row) {
+                    QListWidgetItem* item = m_framePreviewList->item(row);
+                    if (!item) {
+                        continue;
+                    }
+                    const int frameIndex = item->data(kFrameIndexRole).toInt();
+                    item->setSelected(std::find(m_previewSelectedFrames.begin(),
+                                                m_previewSelectedFrames.end(),
+                                                frameIndex) != m_previewSelectedFrames.end());
+                }
+            } else {
+                m_previewSelectedFrames = newSelection;
+            }
+        } else {
+            m_previewSelectedFrames = newSelection;
+        }
+        updatePreviewSelectionStyles();
+        if (m_previewSelectedOnly) {
+            refreshFramePreviews();
+        }
     });
 
     // Drag-reorder disabled; up/down buttons apply ordering changes.
@@ -2056,6 +2222,14 @@ MainWindow::MainWindow(QWidget* parent)
             if (index < 0 || index >= MAX_MASKS) {
                 return;
             }
+            const std::vector<int> targets = targetFrameIndices();
+            for (int row : targets) {
+                if (row < 0 || row >= static_cast<int>(m_frameCompMaskIds.size())) {
+                    continue;
+                }
+                m_frameCompMaskIds[static_cast<std::size_t>(row)] = static_cast<uint8_t>(index);
+                updateFramePreviewAt(row);
+            }
             m_frameMaskAssign->setCurrentIndex(index + 1);
             if (m_maskList) {
                 m_maskList->setCurrentRow(index);
@@ -2072,20 +2246,25 @@ MainWindow::MainWindow(QWidget* parent)
             statusBar()->showMessage(QString("Selected dynamic mask %1").arg(index), 2000);
         }
         if (kind == "background") {
-            const int row = m_framesList->currentRow();
             if (index < 0 || index >= m_backgroundList->count()) {
                 return;
             }
-            if (row >= static_cast<int>(m_frameBackgroundIds.size())) {
+            const std::vector<int> targets = targetFrameIndices();
+            if (!targets.empty() && m_frameBackgroundIds.size() < static_cast<std::size_t>(m_frameStore->count())) {
                 m_frameBackgroundIds.resize(static_cast<std::size_t>(m_frameStore->count()), 0xffff);
             }
-            m_frameBackgroundIds[static_cast<std::size_t>(row)] = static_cast<uint16_t>(index);
+            for (int row : targets) {
+                if (row < 0 || row >= static_cast<int>(m_frameBackgroundIds.size())) {
+                    continue;
+                }
+                m_frameBackgroundIds[static_cast<std::size_t>(row)] = static_cast<uint16_t>(index);
+                updateFramePreviewAt(row);
+            }
             if (m_frameBackgroundAssign) {
                 m_frameBackgroundAssign->setCurrentIndex(index + 1);
             }
             statusBar()->showMessage(QString("Assigned background %1").arg(index), 2000);
-            updateFrameCanvasImage(row);
-            updateFramePreviewAt(row);
+            updateFrameCanvasImage(m_framesList->currentRow());
         }
         updateMaskPreviewForFrame(m_framesList->currentRow());
     });
@@ -2181,7 +2360,15 @@ MainWindow::MainWindow(QWidget* parent)
         if (m_previewFilterButton) {
             m_previewFilterButton->setChecked(false);
         }
+        if (m_previewSelectedButton) {
+            m_previewSelectedButton->setChecked(false);
+        }
+        m_previewSelectedOnly = false;
         updatePreviewFilterState();
+    });
+    connect(m_previewSelectedButton, &QToolButton::toggled, this, [this](bool enabled) {
+        m_previewSelectedOnly = enabled;
+        refreshFramePreviews();
     });
     connect(m_previewHdButton, &QToolButton::toggled, this, [this](bool enabled) {
         m_previewHdOnly = enabled;
@@ -2805,8 +2992,101 @@ void MainWindow::refreshFramePreviewSelection()
     const int row = previewRowForFrame(m_framesList->currentRow());
     if (row >= 0) {
         m_framePreviewList->setCurrentRow(row);
+        if (QListWidgetItem* item = m_framePreviewList->item(row)) {
+            if (!item->isSelected()) {
+                item->setSelected(true);
+            }
+        }
     } else {
         m_framePreviewList->setCurrentRow(-1);
+    }
+    if (m_previewSelectedFrames.size() > 1) {
+        for (int i = 0; i < m_framePreviewList->count(); ++i) {
+            QListWidgetItem* item = m_framePreviewList->item(i);
+            if (!item) {
+                continue;
+            }
+            const int frameIndex = item->data(kFrameIndexRole).toInt();
+            const bool selected = std::find(m_previewSelectedFrames.begin(),
+                                            m_previewSelectedFrames.end(),
+                                            frameIndex) != m_previewSelectedFrames.end();
+            item->setSelected(selected);
+        }
+    }
+    updatePreviewSelectionStyles();
+    const std::vector<int> currentSelection = selectedPreviewFrameIndices();
+    if (!currentSelection.empty()) {
+        m_previewSelectedFrames = currentSelection;
+    }
+}
+
+void MainWindow::updatePreviewSelectionStyles()
+{
+    if (!m_framePreviewList) {
+        return;
+    }
+    const int currentRow = m_framePreviewList->currentRow();
+    for (int row = 0; row < m_framePreviewList->count(); ++row) {
+        QListWidgetItem* item = m_framePreviewList->item(row);
+        if (!item) {
+            continue;
+        }
+        const bool selected = item->isSelected();
+        const bool secondary = selected && row != currentRow;
+        item->setData(kPreviewSecondarySelectedRole, secondary);
+    }
+    m_framePreviewList->viewport()->update();
+}
+
+std::vector<int> MainWindow::selectedPreviewFrameIndices() const
+{
+    std::vector<int> indices;
+    if (!m_framePreviewList) {
+        return indices;
+    }
+    const auto items = m_framePreviewList->selectedItems();
+    indices.reserve(static_cast<std::size_t>(items.size()));
+    for (const QListWidgetItem* item : items) {
+        if (!item) {
+            continue;
+        }
+        const QVariant frameData = item->data(kFrameIndexRole);
+        if (!frameData.isValid()) {
+            continue;
+        }
+        indices.push_back(frameData.toInt());
+    }
+    std::sort(indices.begin(), indices.end());
+    indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+    return indices;
+}
+
+std::vector<int> MainWindow::targetFrameIndices() const
+{
+    std::vector<int> indices = selectedPreviewFrameIndices();
+    if (indices.empty() && !m_previewSelectedFrames.empty()) {
+        indices = m_previewSelectedFrames;
+    }
+    if (!indices.empty()) {
+        return indices;
+    }
+    const int current = m_framesList ? m_framesList->currentRow() : -1;
+    if (current >= 0) {
+        indices.push_back(current);
+    }
+    return indices;
+}
+
+void MainWindow::updatePreviewsForMaskId(int maskId)
+{
+    if (maskId < 0) {
+        return;
+    }
+    const int count = m_frameStore ? m_frameStore->count() : 0;
+    for (int i = 0; i < count && i < static_cast<int>(m_frameCompMaskIds.size()); ++i) {
+        if (m_frameCompMaskIds[static_cast<std::size_t>(i)] == static_cast<uint8_t>(maskId)) {
+            updateFramePreviewAt(i);
+        }
     }
 }
 
@@ -2898,10 +3178,30 @@ std::vector<int> MainWindow::buildPreviewFrameIndices() const
     if (count <= 0) {
         return indices;
     }
+    std::unordered_set<int> selectedFrames;
+    if (m_previewSelectedOnly) {
+        selectedFrames.reserve(m_previewSelectedFrames.size());
+        for (int index : m_previewSelectedFrames) {
+            selectedFrames.insert(index);
+        }
+    }
+    if (m_previewSelectedOnly && selectedFrames.empty()) {
+        return indices;
+    }
     if (!m_previewFilterEnabled || m_previewFilterKind == PreviewFilterKind::None) {
         indices.reserve(static_cast<std::size_t>(count));
         for (int i = 0; i < count; ++i) {
             indices.push_back(i);
+        }
+        if (m_previewSelectedOnly && !selectedFrames.empty()) {
+            std::vector<int> filtered;
+            filtered.reserve(indices.size());
+            for (int index : indices) {
+                if (selectedFrames.count(index) > 0) {
+                    filtered.push_back(index);
+                }
+            }
+            indices.swap(filtered);
         }
         if (m_previewHdOnly) {
             std::vector<int> filtered;
@@ -2980,6 +3280,16 @@ std::vector<int> MainWindow::buildPreviewFrameIndices() const
         case PreviewFilterKind::None:
             break;
     }
+    if (m_previewSelectedOnly && !selectedFrames.empty()) {
+        std::vector<int> filtered;
+        filtered.reserve(indices.size());
+        for (int index : indices) {
+            if (selectedFrames.count(index) > 0) {
+                filtered.push_back(index);
+            }
+        }
+        indices.swap(filtered);
+    }
     if (m_previewHdOnly && !indices.empty()) {
         std::vector<int> filtered;
         filtered.reserve(indices.size());
@@ -3015,6 +3325,13 @@ void MainWindow::refreshAllPreviews()
 
 void MainWindow::refreshFramePreviews()
 {
+    const std::vector<int> selectedBefore = selectedPreviewFrameIndices();
+    if (!selectedBefore.empty()) {
+        m_previewSelectedFrames = selectedBefore;
+    }
+    const std::vector<int>& restoreSelection =
+        selectedBefore.empty() ? m_previewSelectedFrames : selectedBefore;
+    std::unordered_set<int> selectedLookup(restoreSelection.begin(), restoreSelection.end());
     QSignalBlocker blocker(m_framePreviewList);
     m_framePreviewList->clear();
 
@@ -3074,10 +3391,14 @@ void MainWindow::refreshFramePreviews()
         }
         item->setData(kFrameDurationRole, duration);
         item->setToolTip(QString("Frame %1 (%2 ms)").arg(i).arg(duration));
+        if (!selectedLookup.empty() && selectedLookup.count(i) > 0) {
+            item->setSelected(true);
+        }
         m_framePreviewList->addItem(item);
     }
 
     refreshFramePreviewSelection();
+    updatePreviewSelectionStyles();
     m_framePreviewList->doItemsLayout();
 }
 
@@ -4851,87 +5172,119 @@ void MainWindow::pushBackgroundMaskUndoSnapshot(int index)
 
 bool MainWindow::undoEdit(bool isFrame)
 {
-    const int index = isFrame ? m_framesList->currentRow() : m_spritesList->currentRow();
-    std::vector<UndoStack>* stacks = nullptr;
-    if (isFrame) {
-        if (m_useHdFrame && hasHdFrame(index)) {
-            stacks = &m_frameHdUndoStacks;
+    const auto undoAtIndex = [&](int index) -> bool {
+        std::vector<UndoStack>* stacks = nullptr;
+        if (isFrame) {
+            if (m_useHdFrame && hasHdFrame(index)) {
+                stacks = &m_frameHdUndoStacks;
+            } else {
+                stacks = &m_frameUndoStacks;
+            }
         } else {
-            stacks = &m_frameUndoStacks;
+            stacks = &m_spriteUndoStacks;
         }
-    } else {
-        stacks = &m_spriteUndoStacks;
+        if (!stacks || index < 0 || index >= static_cast<int>(stacks->size())) {
+            return false;
+        }
+        UndoStack& stack = (*stacks)[static_cast<std::size_t>(index)];
+        if (stack.undo.empty()) {
+            return false;
+        }
+        cv::Mat* image = isFrame ? activeFrameImage(index, true) : m_spriteStore->atMutable(index);
+        if (!image || image->empty()) {
+            return false;
+        }
+        UndoState current;
+        current.image = image->clone();
+        stack.redo.push_back(std::move(current));
+        UndoState previous = stack.undo.back();
+        stack.undo.pop_back();
+        *image = previous.image.clone();
+        if (isFrame) {
+            updateFramePreviewAt(index);
+        } else {
+            m_spritesCanvas->setImage(*image);
+        }
+        return true;
+    };
+    if (!isFrame) {
+        const int index = m_spritesList->currentRow();
+        const bool handled = undoAtIndex(index);
+        updateUndoActions();
+        return handled;
     }
-    if (!stacks || index < 0 || index >= static_cast<int>(stacks->size())) {
-        return false;
+    const std::vector<int> targets = targetFrameIndices();
+    bool handled = false;
+    for (int index : targets) {
+        handled = undoAtIndex(index) || handled;
     }
-    UndoStack& stack = (*stacks)[static_cast<std::size_t>(index)];
-    if (stack.undo.empty()) {
-        return false;
-    }
-    cv::Mat* image = isFrame ? activeFrameImage(index, true) : m_spriteStore->atMutable(index);
-    if (!image || image->empty()) {
-        return false;
-    }
-    UndoState current;
-    current.image = image->clone();
-    stack.redo.push_back(std::move(current));
-    UndoState previous = stack.undo.back();
-    stack.undo.pop_back();
-    *image = previous.image.clone();
-    if (isFrame) {
-        updateFrameCanvasImage(index);
-        updateFramePreviewAt(index);
-        updateMaskPreviewForFrame(index);
-    } else {
-        m_spritesCanvas->setImage(*image);
+    const int current = m_framesList ? m_framesList->currentRow() : -1;
+    if (current >= 0) {
+        updateFrameCanvasImage(current);
+        updateMaskPreviewForFrame(current);
     }
     updateUndoActions();
-    return true;
+    return handled;
 }
 
 bool MainWindow::redoEdit(bool isFrame)
 {
-    const int index = isFrame ? m_framesList->currentRow() : m_spritesList->currentRow();
-    std::vector<UndoStack>* stacks = nullptr;
-    if (isFrame) {
-        if (m_useHdFrame && hasHdFrame(index)) {
-            stacks = &m_frameHdUndoStacks;
+    const auto redoAtIndex = [&](int index) -> bool {
+        std::vector<UndoStack>* stacks = nullptr;
+        if (isFrame) {
+            if (m_useHdFrame && hasHdFrame(index)) {
+                stacks = &m_frameHdUndoStacks;
+            } else {
+                stacks = &m_frameUndoStacks;
+            }
         } else {
-            stacks = &m_frameUndoStacks;
+            stacks = &m_spriteUndoStacks;
         }
-    } else {
-        stacks = &m_spriteUndoStacks;
+        if (!stacks || index < 0 || index >= static_cast<int>(stacks->size())) {
+            return false;
+        }
+        UndoStack& stack = (*stacks)[static_cast<std::size_t>(index)];
+        if (stack.redo.empty()) {
+            return false;
+        }
+        cv::Mat* image = isFrame ? activeFrameImage(index, true) : m_spriteStore->atMutable(index);
+        if (!image || image->empty()) {
+            return false;
+        }
+        UndoState current;
+        current.image = image->clone();
+        stack.undo.push_back(std::move(current));
+        if (stack.undo.size() > kMaxUndoDepth) {
+            stack.undo.erase(stack.undo.begin());
+        }
+        UndoState next = stack.redo.back();
+        stack.redo.pop_back();
+        *image = next.image.clone();
+        if (isFrame) {
+            updateFramePreviewAt(index);
+        } else {
+            m_spritesCanvas->setImage(*image);
+        }
+        return true;
+    };
+    if (!isFrame) {
+        const int index = m_spritesList->currentRow();
+        const bool handled = redoAtIndex(index);
+        updateUndoActions();
+        return handled;
     }
-    if (!stacks || index < 0 || index >= static_cast<int>(stacks->size())) {
-        return false;
+    const std::vector<int> targets = targetFrameIndices();
+    bool handled = false;
+    for (int index : targets) {
+        handled = redoAtIndex(index) || handled;
     }
-    UndoStack& stack = (*stacks)[static_cast<std::size_t>(index)];
-    if (stack.redo.empty()) {
-        return false;
-    }
-    cv::Mat* image = isFrame ? activeFrameImage(index, true) : m_spriteStore->atMutable(index);
-    if (!image || image->empty()) {
-        return false;
-    }
-    UndoState current;
-    current.image = image->clone();
-    stack.undo.push_back(std::move(current));
-    if (stack.undo.size() > kMaxUndoDepth) {
-        stack.undo.erase(stack.undo.begin());
-    }
-    UndoState next = stack.redo.back();
-    stack.redo.pop_back();
-    *image = next.image.clone();
-    if (isFrame) {
-        updateFrameCanvasImage(index);
-        updateFramePreviewAt(index);
-        updateMaskPreviewForFrame(index);
-    } else {
-        m_spritesCanvas->setImage(*image);
+    const int current = m_framesList ? m_framesList->currentRow() : -1;
+    if (current >= 0) {
+        updateFrameCanvasImage(current);
+        updateMaskPreviewForFrame(current);
     }
     updateUndoActions();
-    return true;
+    return handled;
 }
 
 bool MainWindow::undoBackgroundEdit()
@@ -5001,57 +5354,71 @@ bool MainWindow::redoBackgroundEdit()
 
 bool MainWindow::undoBackgroundMaskEdit()
 {
-    const int index = m_framesList ? m_framesList->currentRow() : -1;
-    if (index < 0 || index >= static_cast<int>(m_backgroundMaskUndoStacks.size())) {
-        return false;
+    const std::vector<int> targets = targetFrameIndices();
+    bool handled = false;
+    for (int index : targets) {
+        if (index < 0 || index >= static_cast<int>(m_backgroundMaskUndoStacks.size())) {
+            continue;
+        }
+        UndoStack& stack = m_backgroundMaskUndoStacks[static_cast<std::size_t>(index)];
+        if (stack.undo.empty()) {
+            continue;
+        }
+        cv::Mat* mask = activeBackgroundMask(index);
+        if (!mask || mask->empty()) {
+            continue;
+        }
+        UndoState current;
+        current.mask = mask->clone();
+        stack.redo.push_back(std::move(current));
+        UndoState previous = stack.undo.back();
+        stack.undo.pop_back();
+        *mask = previous.mask.clone();
+        updateFramePreviewAt(index);
+        handled = true;
     }
-    UndoStack& stack = m_backgroundMaskUndoStacks[static_cast<std::size_t>(index)];
-    if (stack.undo.empty()) {
-        return false;
+    const int current = m_framesList ? m_framesList->currentRow() : -1;
+    if (current >= 0) {
+        updateFrameCanvasImage(current);
     }
-    cv::Mat* mask = activeBackgroundMask(index);
-    if (!mask || mask->empty()) {
-        return false;
-    }
-    UndoState current;
-    current.mask = mask->clone();
-    stack.redo.push_back(std::move(current));
-    UndoState previous = stack.undo.back();
-    stack.undo.pop_back();
-    *mask = previous.mask.clone();
-    updateFrameCanvasImage(index);
-    updateFramePreviewAt(index);
     updateUndoActions();
-    return true;
+    return handled;
 }
 
 bool MainWindow::redoBackgroundMaskEdit()
 {
-    const int index = m_framesList ? m_framesList->currentRow() : -1;
-    if (index < 0 || index >= static_cast<int>(m_backgroundMaskUndoStacks.size())) {
-        return false;
+    const std::vector<int> targets = targetFrameIndices();
+    bool handled = false;
+    for (int index : targets) {
+        if (index < 0 || index >= static_cast<int>(m_backgroundMaskUndoStacks.size())) {
+            continue;
+        }
+        UndoStack& stack = m_backgroundMaskUndoStacks[static_cast<std::size_t>(index)];
+        if (stack.redo.empty()) {
+            continue;
+        }
+        cv::Mat* mask = activeBackgroundMask(index);
+        if (!mask || mask->empty()) {
+            continue;
+        }
+        UndoState current;
+        current.mask = mask->clone();
+        stack.undo.push_back(std::move(current));
+        if (stack.undo.size() > kMaxUndoDepth) {
+            stack.undo.erase(stack.undo.begin());
+        }
+        UndoState next = stack.redo.back();
+        stack.redo.pop_back();
+        *mask = next.mask.clone();
+        updateFramePreviewAt(index);
+        handled = true;
     }
-    UndoStack& stack = m_backgroundMaskUndoStacks[static_cast<std::size_t>(index)];
-    if (stack.redo.empty()) {
-        return false;
+    const int current = m_framesList ? m_framesList->currentRow() : -1;
+    if (current >= 0) {
+        updateFrameCanvasImage(current);
     }
-    cv::Mat* mask = activeBackgroundMask(index);
-    if (!mask || mask->empty()) {
-        return false;
-    }
-    UndoState current;
-    current.mask = mask->clone();
-    stack.undo.push_back(std::move(current));
-    if (stack.undo.size() > kMaxUndoDepth) {
-        stack.undo.erase(stack.undo.begin());
-    }
-    UndoState next = stack.redo.back();
-    stack.redo.pop_back();
-    *mask = next.mask.clone();
-    updateFrameCanvasImage(index);
-    updateFramePreviewAt(index);
     updateUndoActions();
-    return true;
+    return handled;
 }
 
 bool MainWindow::undoMaskEdit(MaskMode mode)
@@ -5065,45 +5432,73 @@ bool MainWindow::undoMaskEdit(MaskMode mode)
     } else {
         return false;
     }
-    if (index < 0 || index >= static_cast<int>(stacks->size())) {
-        return false;
-    }
-    UndoStack& stack = (*stacks)[static_cast<std::size_t>(index)];
-    if (stack.undo.empty()) {
-        return false;
-    }
-    UndoState current;
     if (mode == MaskMode::Comparison) {
+        if (index < 0 || index >= static_cast<int>(stacks->size())) {
+            return false;
+        }
+        UndoStack& stack = (*stacks)[static_cast<std::size_t>(index)];
+        if (stack.undo.empty()) {
+            return false;
+        }
+        UndoState current;
         const int maskId = m_maskList ? m_maskList->currentRow() : -1;
         if (maskId >= 0 && maskId < static_cast<int>(m_compMasks.size())) {
             current.mask = m_compMasks[static_cast<std::size_t>(maskId)].clone();
             current.mask_kind = MaskKind::Comparison;
             current.mask_index = maskId;
         }
-    } else if (mode == MaskMode::Dynamic) {
-        if (index >= 0 && index < static_cast<int>(m_frameDynamicMaskMaps.size())) {
-            current.mask = m_frameDynamicMaskMaps[static_cast<std::size_t>(index)].clone();
+        if (!current.mask.empty()) {
+            stack.redo.push_back(std::move(current));
+        }
+        UndoState previous = stack.undo.back();
+        stack.undo.pop_back();
+        if (previous.mask_kind == MaskKind::Comparison &&
+            previous.mask_index >= 0 && previous.mask_index < static_cast<int>(m_compMasks.size())) {
+            m_compMasks[static_cast<std::size_t>(previous.mask_index)] = previous.mask.clone();
+            updateMaskPreviewIcons();
+            updatePreviewsForMaskId(previous.mask_index);
+        }
+        updateMaskPreviewForFrame(index);
+        updateUndoActions();
+        return true;
+    }
+    const std::vector<int> targets = targetFrameIndices();
+    bool handled = false;
+    for (int frameIndex : targets) {
+        if (frameIndex < 0 || frameIndex >= static_cast<int>(stacks->size())) {
+            continue;
+        }
+        UndoStack& stack = (*stacks)[static_cast<std::size_t>(frameIndex)];
+        if (stack.undo.empty()) {
+            continue;
+        }
+        UndoState current;
+        if (frameIndex < static_cast<int>(m_frameDynamicMaskMaps.size())) {
+            current.mask = m_frameDynamicMaskMaps[static_cast<std::size_t>(frameIndex)].clone();
             current.mask_kind = MaskKind::Dynamic;
-            current.mask_index = index;
+            current.mask_index = frameIndex;
+        }
+        if (!current.mask.empty()) {
+            stack.redo.push_back(std::move(current));
+        }
+        UndoState previous = stack.undo.back();
+        stack.undo.pop_back();
+        if (previous.mask_kind == MaskKind::Dynamic &&
+            previous.mask_index >= 0 && previous.mask_index < static_cast<int>(m_frameDynamicMaskMaps.size())) {
+            m_frameDynamicMaskMaps[static_cast<std::size_t>(previous.mask_index)] = previous.mask.clone();
+            handled = true;
         }
     }
-    if (!current.mask.empty()) {
-        stack.redo.push_back(std::move(current));
-    }
-    UndoState previous = stack.undo.back();
-    stack.undo.pop_back();
-    if (previous.mask_kind == MaskKind::Comparison &&
-        previous.mask_index >= 0 && previous.mask_index < static_cast<int>(m_compMasks.size())) {
-        m_compMasks[static_cast<std::size_t>(previous.mask_index)] = previous.mask.clone();
-        updateMaskPreviewIcons();
-    } else if (previous.mask_kind == MaskKind::Dynamic &&
-               previous.mask_index >= 0 && previous.mask_index < static_cast<int>(m_frameDynamicMaskMaps.size())) {
-        m_frameDynamicMaskMaps[static_cast<std::size_t>(previous.mask_index)] = previous.mask.clone();
+    if (handled) {
         updateDynamicMaskPreviewIcons();
+        updateMaskPreviewForFrame(index);
+        const std::vector<int> targets = targetFrameIndices();
+        for (int frameIndex : targets) {
+            updateFramePreviewAt(frameIndex);
+        }
     }
-    updateMaskPreviewForFrame(index);
     updateUndoActions();
-    return true;
+    return handled;
 }
 
 bool MainWindow::redoMaskEdit(MaskMode mode)
@@ -5117,48 +5512,79 @@ bool MainWindow::redoMaskEdit(MaskMode mode)
     } else {
         return false;
     }
-    if (index < 0 || index >= static_cast<int>(stacks->size())) {
-        return false;
-    }
-    UndoStack& stack = (*stacks)[static_cast<std::size_t>(index)];
-    if (stack.redo.empty()) {
-        return false;
-    }
-    UndoState current;
     if (mode == MaskMode::Comparison) {
+        if (index < 0 || index >= static_cast<int>(stacks->size())) {
+            return false;
+        }
+        UndoStack& stack = (*stacks)[static_cast<std::size_t>(index)];
+        if (stack.redo.empty()) {
+            return false;
+        }
+        UndoState current;
         const int maskId = m_maskList ? m_maskList->currentRow() : -1;
         if (maskId >= 0 && maskId < static_cast<int>(m_compMasks.size())) {
             current.mask = m_compMasks[static_cast<std::size_t>(maskId)].clone();
             current.mask_kind = MaskKind::Comparison;
             current.mask_index = maskId;
         }
-    } else if (mode == MaskMode::Dynamic) {
-        if (index >= 0 && index < static_cast<int>(m_frameDynamicMaskMaps.size())) {
-            current.mask = m_frameDynamicMaskMaps[static_cast<std::size_t>(index)].clone();
+        if (!current.mask.empty()) {
+            stack.undo.push_back(std::move(current));
+        }
+        if (stack.undo.size() > kMaxUndoDepth) {
+            stack.undo.erase(stack.undo.begin());
+        }
+        UndoState next = stack.redo.back();
+        stack.redo.pop_back();
+        if (next.mask_kind == MaskKind::Comparison &&
+            next.mask_index >= 0 && next.mask_index < static_cast<int>(m_compMasks.size())) {
+            m_compMasks[static_cast<std::size_t>(next.mask_index)] = next.mask.clone();
+            updateMaskPreviewIcons();
+            updatePreviewsForMaskId(next.mask_index);
+        }
+        updateMaskPreviewForFrame(index);
+        updateUndoActions();
+        return true;
+    }
+    const std::vector<int> targets = targetFrameIndices();
+    bool handled = false;
+    for (int frameIndex : targets) {
+        if (frameIndex < 0 || frameIndex >= static_cast<int>(stacks->size())) {
+            continue;
+        }
+        UndoStack& stack = (*stacks)[static_cast<std::size_t>(frameIndex)];
+        if (stack.redo.empty()) {
+            continue;
+        }
+        UndoState current;
+        if (frameIndex < static_cast<int>(m_frameDynamicMaskMaps.size())) {
+            current.mask = m_frameDynamicMaskMaps[static_cast<std::size_t>(frameIndex)].clone();
             current.mask_kind = MaskKind::Dynamic;
-            current.mask_index = index;
+            current.mask_index = frameIndex;
+        }
+        if (!current.mask.empty()) {
+            stack.undo.push_back(std::move(current));
+        }
+        if (stack.undo.size() > kMaxUndoDepth) {
+            stack.undo.erase(stack.undo.begin());
+        }
+        UndoState next = stack.redo.back();
+        stack.redo.pop_back();
+        if (next.mask_kind == MaskKind::Dynamic &&
+            next.mask_index >= 0 && next.mask_index < static_cast<int>(m_frameDynamicMaskMaps.size())) {
+            m_frameDynamicMaskMaps[static_cast<std::size_t>(next.mask_index)] = next.mask.clone();
+            handled = true;
         }
     }
-    if (!current.mask.empty()) {
-        stack.undo.push_back(std::move(current));
-    }
-    if (stack.undo.size() > kMaxUndoDepth) {
-        stack.undo.erase(stack.undo.begin());
-    }
-    UndoState next = stack.redo.back();
-    stack.redo.pop_back();
-    if (next.mask_kind == MaskKind::Comparison &&
-        next.mask_index >= 0 && next.mask_index < static_cast<int>(m_compMasks.size())) {
-        m_compMasks[static_cast<std::size_t>(next.mask_index)] = next.mask.clone();
-        updateMaskPreviewIcons();
-    } else if (next.mask_kind == MaskKind::Dynamic &&
-               next.mask_index >= 0 && next.mask_index < static_cast<int>(m_frameDynamicMaskMaps.size())) {
-        m_frameDynamicMaskMaps[static_cast<std::size_t>(next.mask_index)] = next.mask.clone();
+    if (handled) {
         updateDynamicMaskPreviewIcons();
+        updateMaskPreviewForFrame(index);
+        const std::vector<int> targets = targetFrameIndices();
+        for (int frameIndex : targets) {
+            updateFramePreviewAt(frameIndex);
+        }
     }
-    updateMaskPreviewForFrame(index);
     updateUndoActions();
-    return true;
+    return handled;
 }
 
 void MainWindow::updateUndoActions()
@@ -5207,9 +5633,21 @@ void MainWindow::updateUndoActions()
             break;
     }
     if (stacks && index >= 0 && index < static_cast<int>(stacks->size())) {
-        const UndoStack& stack = (*stacks)[static_cast<std::size_t>(index)];
-        canUndo = !stack.undo.empty();
-        canRedo = !stack.redo.empty();
+        if (target == UndoTarget::Frame || target == UndoTarget::DynMask || target == UndoTarget::BackgroundMask) {
+            const std::vector<int> targets = targetFrameIndices();
+            for (int frameIndex : targets) {
+                if (frameIndex < 0 || frameIndex >= static_cast<int>(stacks->size())) {
+                    continue;
+                }
+                const UndoStack& stack = (*stacks)[static_cast<std::size_t>(frameIndex)];
+                canUndo = canUndo || !stack.undo.empty();
+                canRedo = canRedo || !stack.redo.empty();
+            }
+        } else {
+            const UndoStack& stack = (*stacks)[static_cast<std::size_t>(index)];
+            canUndo = !stack.undo.empty();
+            canRedo = !stack.redo.empty();
+        }
     }
     if (m_undoAction) {
         m_undoAction->setEnabled(canUndo);
@@ -6616,29 +7054,43 @@ void MainWindow::handleToolPress(bool isFrame,
             }
             localX = x - layout.topX;
             localY = y;
-            cv::Mat* mask = activeBackgroundMask(index);
-            if (!mask || mask->empty()) {
+            cv::Mat* baseMask = activeBackgroundMask(index);
+            if (!baseMask || baseMask->empty()) {
                 return;
             }
             if (m_drawTool == DrawTool::MagicFill || m_drawTool == DrawTool::Point) {
-                if (localX < 0 || localY < 0 || localX >= mask->cols || localY >= mask->rows) {
+                if (localX < 0 || localY < 0 || localX >= baseMask->cols || localY >= baseMask->rows) {
                     return;
                 }
                 if (!m_frameUndoActive) {
-                    pushBackgroundMaskUndoSnapshot(index);
+                    const std::vector<int> targets = targetFrameIndices();
+                    for (int frameIndex : targets) {
+                        pushBackgroundMaskUndoSnapshot(frameIndex);
+                    }
                     m_frameUndoActive = true;
                 }
-                if (m_drawTool == DrawTool::MagicFill) {
-                    applyMaskFill(*mask, localX, localY, button == Qt::RightButton);
-                } else {
-                    applyToolToMask(*mask,
-                                    DrawTool::Point,
-                                    QPoint(localX, localY),
-                                    QPoint(localX, localY),
-                                    button == Qt::RightButton);
+                const QPoint basePoint(localX, localY);
+                const QSize baseSize(baseMask->cols, baseMask->rows);
+                const std::vector<int> targets = targetFrameIndices();
+                for (int frameIndex : targets) {
+                    cv::Mat* mask = activeBackgroundMask(frameIndex);
+                    if (!mask || mask->empty()) {
+                        continue;
+                    }
+                    const QPoint mapped = ScalePointToSize(basePoint, baseSize, QSize(mask->cols, mask->rows));
+                    const bool erase = (button == Qt::RightButton) || modifiers.testFlag(Qt::ShiftModifier);
+                    if (m_drawTool == DrawTool::MagicFill) {
+                        applyMaskFill(*mask, mapped.x(), mapped.y(), erase);
+                    } else {
+                        applyToolToMask(*mask,
+                                        DrawTool::Point,
+                                        mapped,
+                                        mapped,
+                                        erase);
+                    }
+                    updateFramePreviewAt(frameIndex);
                 }
                 updateFrameCanvasImage(index);
-                updateFramePreviewAt(index);
                 updateMaskPreviewForFrame(index);
                 return;
             }
@@ -6646,7 +7098,10 @@ void MainWindow::handleToolPress(bool isFrame,
                 return;
             }
             if (!m_frameUndoActive) {
-                pushBackgroundMaskUndoSnapshot(index);
+                const std::vector<int> targets = targetFrameIndices();
+                for (int frameIndex : targets) {
+                    pushBackgroundMaskUndoSnapshot(frameIndex);
+                }
                 m_frameUndoActive = true;
             }
             m_frameStart = QPoint(localX, localY);
@@ -6702,35 +7157,59 @@ void MainWindow::handleToolPress(bool isFrame,
                     return;
                 }
                 if (!m_frameUndoActive) {
-                    pushMaskUndoSnapshot(m_maskMode, index);
+                    if (m_maskMode == MaskMode::Dynamic) {
+                        const std::vector<int> targets = targetFrameIndices();
+                        for (int frameIndex : targets) {
+                            pushMaskUndoSnapshot(m_maskMode, frameIndex);
+                        }
+                    } else {
+                        pushMaskUndoSnapshot(m_maskMode, index);
+                    }
                     m_frameUndoActive = true;
                 }
-                if (m_drawTool == DrawTool::MagicFill) {
-                    if (m_maskMode == MaskMode::Dynamic) {
-                        const bool erase = (button == Qt::RightButton) || modifiers.testFlag(Qt::ShiftModifier);
-                        applyDynamicMaskFill(*mask, dynamicSetId, mappedX, mappedY, erase);
-                    } else {
-                        applyMaskFill(*mask, mappedX, mappedY, button == Qt::RightButton);
+                const QPoint basePoint(mappedX, mappedY);
+                const QSize baseSize(mask->cols, mask->rows);
+                if (m_maskMode == MaskMode::Dynamic) {
+                    const bool erase = (button == Qt::RightButton) || modifiers.testFlag(Qt::ShiftModifier);
+                    const std::vector<int> targets = targetFrameIndices();
+                    for (int frameIndex : targets) {
+                        cv::Mat* targetMask = activeDynamicMaskMap(frameIndex);
+                        if (!targetMask || targetMask->empty()) {
+                            continue;
+                        }
+                        const QPoint mapped = ScalePointToSize(basePoint, baseSize,
+                                                               QSize(targetMask->cols, targetMask->rows));
+                        if (m_drawTool == DrawTool::MagicFill) {
+                            applyDynamicMaskFill(*targetMask, dynamicSetId, mapped.x(), mapped.y(), erase);
+                        } else {
+                            applyToolToDynamicMask(*targetMask,
+                                                   dynamicSetId,
+                                                   DrawTool::Point,
+                                                   mapped,
+                                                   mapped,
+                                                   erase);
+                        }
+                        updateFramePreviewAt(frameIndex);
                     }
                 } else {
-                    if (m_maskMode == MaskMode::Dynamic) {
-                        const bool erase = (button == Qt::RightButton) || modifiers.testFlag(Qt::ShiftModifier);
-                        applyToolToDynamicMask(*mask,
-                                               dynamicSetId,
-                                               DrawTool::Point,
-                                               QPoint(mappedX, mappedY),
-                                               QPoint(mappedX, mappedY),
-                                               erase);
+                    const bool erase = (button == Qt::RightButton) || modifiers.testFlag(Qt::ShiftModifier);
+                    if (m_drawTool == DrawTool::MagicFill) {
+                        applyMaskFill(*mask, mappedX, mappedY, erase);
                     } else {
                         applyToolToMask(*mask,
                                         DrawTool::Point,
-                                        QPoint(mappedX, mappedY),
-                                        QPoint(mappedX, mappedY),
-                                        button == Qt::RightButton);
+                                        basePoint,
+                                        basePoint,
+                                        erase);
+                    }
+                    const std::vector<int> targets = targetFrameIndices();
+                    for (int frameIndex : targets) {
+                        updateFramePreviewAt(frameIndex);
                     }
                 }
                 if (m_maskMode == MaskMode::Comparison) {
                     updateMaskPreviewIcons();
+                    updatePreviewsForMaskId(m_maskList ? m_maskList->currentRow() : -1);
                 } else {
                     updateDynamicMaskPreviewIcons();
                 }
@@ -6741,7 +7220,14 @@ void MainWindow::handleToolPress(bool isFrame,
                 return;
             }
             if (!m_frameUndoActive) {
-                pushMaskUndoSnapshot(m_maskMode, index);
+                if (m_maskMode == MaskMode::Dynamic) {
+                    const std::vector<int> targets = targetFrameIndices();
+                    for (int frameIndex : targets) {
+                        pushMaskUndoSnapshot(m_maskMode, frameIndex);
+                    }
+                } else {
+                    pushMaskUndoSnapshot(m_maskMode, index);
+                }
                 m_frameUndoActive = true;
             }
             const int scaleX = (layout.bottomWidth > 0 && mask->cols > 0) ? layout.bottomWidth / mask->cols : 1;
@@ -6775,16 +7261,55 @@ void MainWindow::handleToolPress(bool isFrame,
     bool& undoActive = isFrame ? m_frameUndoActive : m_spriteUndoActive;
     if (m_drawTool != DrawTool::ColorPicker) {
         if (!undoActive) {
-            pushUndoSnapshot(isFrame, currentIndex);
+            if (isFrame) {
+                const std::vector<int> targets = targetFrameIndices();
+                for (int frameIndex : targets) {
+                    pushUndoSnapshot(true, frameIndex);
+                }
+            } else {
+                pushUndoSnapshot(false, currentIndex);
+            }
             undoActive = true;
         }
     }
     if (m_drawTool == DrawTool::Point) {
-        applyToolToImage(*image, DrawTool::Point, QPoint(x, y), QPoint(x, y), button == Qt::RightButton);
+        if (isFrame) {
+            const QPoint basePoint(x, y);
+            const QSize baseSize(image->cols, image->rows);
+            const std::vector<int> targets = targetFrameIndices();
+            for (int frameIndex : targets) {
+                cv::Mat* target = activeFrameImage(frameIndex, true);
+                if (!target || target->empty()) {
+                    continue;
+                }
+                const QPoint mapped = ScalePointToSize(basePoint, baseSize,
+                                                       QSize(target->cols, target->rows));
+                applyToolToImage(*target, DrawTool::Point, mapped, mapped, button == Qt::RightButton);
+                updateFramePreviewAt(frameIndex);
+            }
+        } else {
+            applyToolToImage(*image, DrawTool::Point, QPoint(x, y), QPoint(x, y), button == Qt::RightButton);
+        }
     } else if (m_drawTool == DrawTool::ColorPicker) {
         pickColorFromImage(*image, x, y);
     } else if (m_drawTool == DrawTool::MagicFill) {
-        applyMagicFill(*image, x, y);
+        if (isFrame) {
+            const QPoint basePoint(x, y);
+            const QSize baseSize(image->cols, image->rows);
+            const std::vector<int> targets = targetFrameIndices();
+            for (int frameIndex : targets) {
+                cv::Mat* target = activeFrameImage(frameIndex, true);
+                if (!target || target->empty()) {
+                    continue;
+                }
+                const QPoint mapped = ScalePointToSize(basePoint, baseSize,
+                                                       QSize(target->cols, target->rows));
+                applyMagicFill(*target, mapped.x(), mapped.y());
+                updateFramePreviewAt(frameIndex);
+            }
+        } else {
+            applyMagicFill(*image, x, y);
+        }
     } else {
         if (isFrame) {
             m_frameStart = QPoint(x, y);
@@ -6835,17 +7360,28 @@ void MainWindow::handleToolDrag(bool isFrame,
             return;
         }
         if (m_drawTool == DrawTool::Point) {
-            const bool erase = buttons.testFlag(Qt::RightButton);
-            applyToolToMask(*mask, DrawTool::Point, QPoint(x, y), QPoint(x, y), erase);
+            const bool erase = buttons.testFlag(Qt::RightButton) || modifiers.testFlag(Qt::ShiftModifier);
+            const QPoint basePoint(x, y);
+            const QSize baseSize(mask->cols, mask->rows);
+            const std::vector<int> targets = targetFrameIndices();
+            for (int frameIndex : targets) {
+                cv::Mat* targetMask = activeBackgroundMask(frameIndex);
+                if (!targetMask || targetMask->empty()) {
+                    continue;
+                }
+                const QPoint mapped = ScalePointToSize(basePoint, baseSize,
+                                                       QSize(targetMask->cols, targetMask->rows));
+                applyToolToMask(*targetMask, DrawTool::Point, mapped, mapped, erase);
+                updateFramePreviewAt(frameIndex);
+            }
             updateFrameCanvasImage(index);
-            updateFramePreviewAt(index);
             return;
         }
         if (!m_frameHasStart) {
             return;
         }
         cv::Mat previewMask = mask->clone();
-        const bool erase = buttons.testFlag(Qt::RightButton);
+        const bool erase = buttons.testFlag(Qt::RightButton) || modifiers.testFlag(Qt::ShiftModifier);
         applyToolToMask(previewMask, m_drawTool, m_frameStart, QPoint(x, y), erase);
         cv::Mat base = applyDynamicColors(index, *frameImage, m_useHdFrame);
         if (m_showBackgroundLayer) {
@@ -6925,11 +7461,25 @@ void MainWindow::handleToolDrag(bool isFrame,
         }
         if (m_drawTool == DrawTool::Point) {
             const bool erase = buttons.testFlag(Qt::RightButton) ||
-                (m_maskMode == MaskMode::Dynamic && modifiers.testFlag(Qt::ShiftModifier));
+                (m_maskMode == MaskMode::Dynamic && modifiers.testFlag(Qt::ShiftModifier)) ||
+                (m_maskMode == MaskMode::Comparison && modifiers.testFlag(Qt::ShiftModifier));
+            const QPoint basePoint(x, y);
+            const QSize baseSize(mask->cols, mask->rows);
             if (m_maskMode == MaskMode::Dynamic) {
-                applyToolToDynamicMask(*mask, dynamicSetId, DrawTool::Point, QPoint(x, y), QPoint(x, y), erase);
+                const std::vector<int> targets = targetFrameIndices();
+                for (int frameIndex : targets) {
+                    cv::Mat* targetMask = activeDynamicMaskMap(frameIndex);
+                    if (!targetMask || targetMask->empty()) {
+                        continue;
+                    }
+                    const QPoint mapped = ScalePointToSize(basePoint, baseSize,
+                                                           QSize(targetMask->cols, targetMask->rows));
+                    applyToolToDynamicMask(*targetMask, dynamicSetId, DrawTool::Point, mapped, mapped, erase);
+                    updateFramePreviewAt(frameIndex);
+                }
             } else {
-                applyToolToMask(*mask, DrawTool::Point, QPoint(x, y), QPoint(x, y), erase);
+                applyToolToMask(*mask, DrawTool::Point, basePoint, basePoint, erase);
+                updatePreviewsForMaskId(m_maskList ? m_maskList->currentRow() : -1);
             }
             if (m_maskMode == MaskMode::Comparison) {
                 updateMaskPreviewIcons();
@@ -6948,7 +7498,8 @@ void MainWindow::handleToolDrag(bool isFrame,
         cv::Mat previewMask;
         cv::Mat previewMap = mask->clone();
         const bool erase = buttons.testFlag(Qt::RightButton) ||
-            (m_maskMode == MaskMode::Dynamic && modifiers.testFlag(Qt::ShiftModifier));
+            (m_maskMode == MaskMode::Dynamic && modifiers.testFlag(Qt::ShiftModifier)) ||
+            (m_maskMode == MaskMode::Comparison && modifiers.testFlag(Qt::ShiftModifier));
         if (m_maskMode == MaskMode::Dynamic) {
             applyToolToDynamicMask(previewMap, dynamicSetId, m_drawTool, m_frameStart, QPoint(x, y), erase);
             previewMask = buildDynamicMaskFromMap(previewMap, dynamicSetId);
@@ -6997,12 +7548,24 @@ void MainWindow::handleToolDrag(bool isFrame,
     }
     if (m_drawTool == DrawTool::Point) {
         const bool erase = buttons.testFlag(Qt::RightButton);
-        applyToolToImage(*image, DrawTool::Point, QPoint(x, y), QPoint(x, y), erase);
         if (isFrame) {
+            const QPoint basePoint(x, y);
+            const QSize baseSize(image->cols, image->rows);
+            const std::vector<int> targets = targetFrameIndices();
+            for (int frameIndex : targets) {
+                cv::Mat* target = activeFrameImage(frameIndex, true);
+                if (!target || target->empty()) {
+                    continue;
+                }
+                const QPoint mapped = ScalePointToSize(basePoint, baseSize,
+                                                       QSize(target->cols, target->rows));
+                applyToolToImage(*target, DrawTool::Point, mapped, mapped, erase);
+                updateFramePreviewAt(frameIndex);
+            }
             updateFrameCanvasImage(m_framesList->currentRow());
-            updateFramePreviewAt(m_framesList->currentRow());
             updateMaskPreviewForFrame(m_framesList->currentRow());
         } else {
+            applyToolToImage(*image, DrawTool::Point, QPoint(x, y), QPoint(x, y), erase);
             m_spritesCanvas->setImage(*image);
         }
         return;
@@ -7080,12 +7643,27 @@ void MainWindow::handleToolRelease(bool isFrame,
             m_frameHasStart = false;
             return;
         }
-        const bool erase = (m_frameStartButton == Qt::RightButton || button == Qt::RightButton);
-        applyToolToMask(*mask, m_drawTool, m_frameStart, QPoint(x, y), erase);
+        const bool erase = (m_frameStartButton == Qt::RightButton || button == Qt::RightButton ||
+                            modifiers.testFlag(Qt::ShiftModifier));
+        const QPoint baseStart = m_frameStart;
+        const QPoint baseEnd(x, y);
+        const QSize baseSize(mask->cols, mask->rows);
+        const std::vector<int> targets = targetFrameIndices();
+        for (int frameIndex : targets) {
+            cv::Mat* targetMask = activeBackgroundMask(frameIndex);
+            if (!targetMask || targetMask->empty()) {
+                continue;
+            }
+            const QPoint mappedStart = ScalePointToSize(baseStart, baseSize,
+                                                        QSize(targetMask->cols, targetMask->rows));
+            const QPoint mappedEnd = ScalePointToSize(baseEnd, baseSize,
+                                                      QSize(targetMask->cols, targetMask->rows));
+            applyToolToMask(*targetMask, m_drawTool, mappedStart, mappedEnd, erase);
+            updateFramePreviewAt(frameIndex);
+        }
         m_frameHasStart = false;
         m_framesCanvas->canvas()->clearPreviewImage();
         updateFrameCanvasImage(index);
-        updateFramePreviewAt(index);
         updateMaskPreviewForFrame(index);
         m_frameUndoActive = false;
         return;
@@ -7153,11 +7731,28 @@ void MainWindow::handleToolRelease(bool isFrame,
             y /= scaleY;
         }
         const bool erase = (m_frameStartButton == Qt::RightButton || button == Qt::RightButton ||
-                            (m_maskMode == MaskMode::Dynamic && modifiers.testFlag(Qt::ShiftModifier)));
+                            (m_maskMode == MaskMode::Dynamic && modifiers.testFlag(Qt::ShiftModifier)) ||
+                            (m_maskMode == MaskMode::Comparison && modifiers.testFlag(Qt::ShiftModifier)));
+        const QPoint baseStart = m_frameStart;
+        const QPoint baseEnd(x, y);
+        const QSize baseSize(mask->cols, mask->rows);
         if (m_maskMode == MaskMode::Dynamic) {
-            applyToolToDynamicMask(*mask, dynamicSetId, m_drawTool, m_frameStart, QPoint(x, y), erase);
+            const std::vector<int> targets = targetFrameIndices();
+            for (int frameIndex : targets) {
+                cv::Mat* targetMask = activeDynamicMaskMap(frameIndex);
+                if (!targetMask || targetMask->empty()) {
+                    continue;
+                }
+                const QPoint mappedStart = ScalePointToSize(baseStart, baseSize,
+                                                            QSize(targetMask->cols, targetMask->rows));
+                const QPoint mappedEnd = ScalePointToSize(baseEnd, baseSize,
+                                                          QSize(targetMask->cols, targetMask->rows));
+                applyToolToDynamicMask(*targetMask, dynamicSetId, m_drawTool, mappedStart, mappedEnd, erase);
+                updateFramePreviewAt(frameIndex);
+            }
         } else {
-            applyToolToMask(*mask, m_drawTool, m_frameStart, QPoint(x, y), erase);
+            applyToolToMask(*mask, m_drawTool, baseStart, baseEnd, erase);
+            updatePreviewsForMaskId(m_maskList ? m_maskList->currentRow() : -1);
         }
         m_frameHasStart = false;
         m_framesCanvas->canvas()->clearPreviewImage();
@@ -7210,14 +7805,29 @@ void MainWindow::handleToolRelease(bool isFrame,
         x -= layout.topX;
     }
     const bool erase = (startButton == Qt::RightButton || button == Qt::RightButton);
-    applyToolToImage(*image, m_drawTool, start, QPoint(x, y), erase);
     if (isFrame) {
+        const QPoint baseStart = start;
+        const QPoint baseEnd(x, y);
+        const QSize baseSize(image->cols, image->rows);
+        const std::vector<int> targets = targetFrameIndices();
+        for (int frameIndex : targets) {
+            cv::Mat* target = activeFrameImage(frameIndex, true);
+            if (!target || target->empty()) {
+                continue;
+            }
+            const QPoint mappedStart = ScalePointToSize(baseStart, baseSize,
+                                                        QSize(target->cols, target->rows));
+            const QPoint mappedEnd = ScalePointToSize(baseEnd, baseSize,
+                                                      QSize(target->cols, target->rows));
+            applyToolToImage(*target, m_drawTool, mappedStart, mappedEnd, erase);
+            updateFramePreviewAt(frameIndex);
+        }
         m_framesCanvas->canvas()->clearPreviewImage();
         updateFrameCanvasImage(m_framesList->currentRow());
-        updateFramePreviewAt(m_framesList->currentRow());
         updateMaskPreviewForFrame(m_framesList->currentRow());
         m_frameUndoActive = false;
     } else {
+        applyToolToImage(*image, m_drawTool, start, QPoint(x, y), erase);
         m_spritesCanvas->canvas()->clearPreviewImage();
         m_spritesCanvas->setImage(*image);
         m_spriteUndoActive = false;

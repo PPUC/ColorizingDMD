@@ -96,6 +96,10 @@ private:
     void refreshFramePreviews();
     void updateFramePreviewAt(int index);
     void refreshFramePreviewSelection();
+    void updatePreviewSelectionStyles();
+    std::vector<int> selectedPreviewFrameIndices() const;
+    std::vector<int> targetFrameIndices() const;
+    void updatePreviewsForMaskId(int maskId);
     int previewRowForFrame(int index) const;
     PreviewFilterKind currentPreviewFilterKind() const;
     void updatePreviewFilterState();
@@ -235,6 +239,7 @@ private:
     class QListWidget* m_framePreviewList;
     class QToolButton* m_previewFilterButton;
     class QToolButton* m_previewFilterClearButton;
+    class QToolButton* m_previewSelectedButton;
     class QToolButton* m_previewHdButton;
     class QToolButton* m_previewMaskOverlayButton;
     class QToolButton* m_previewRefreshButton;
@@ -334,8 +339,13 @@ private:
     bool m_useHdBackground = false;
     bool m_previewFilterEnabled = false;
     PreviewFilterKind m_previewFilterKind = PreviewFilterKind::None;
+    bool m_previewSelectedOnly = false;
     bool m_previewHdOnly = false;
     bool m_previewMaskOverlayEnabled = false;
+    std::vector<int> m_previewSelectedFrames;
+    bool m_restorePreviewSelection = false;
+    int m_restorePreviewCurrent = -1;
+    std::vector<int> m_restorePreviewSelectionIndices;
     class QAction* m_undoAction;
     class QAction* m_redoAction;
     DrawTool m_drawTool = DrawTool::Point;
