@@ -662,12 +662,18 @@ bool LoadLegacyProject(const std::string& path,
     if (length_header >= 9 * sizeof(uint32_t)) {
         const std::size_t rotations_bytes =
             static_cast<std::size_t>(n_frames) * MAX_COLOR_ROTATIONN * MAX_LENGTH_COLOR_ROTATION * sizeof(uint16_t);
-        if (!SkipExact(file, rotations_bytes + rotations_bytes)) {
+        const std::size_t rotations_count = rotations_bytes / sizeof(uint16_t);
+        std::vector<uint16_t> rotations(rotations_count, 0);
+        std::vector<uint16_t> rotations_x(rotations_count, 0);
+        if ((rotations_bytes > 0 && !ReadExact(file, rotations.data(), rotations_bytes)) ||
+            (rotations_bytes > 0 && !ReadExact(file, rotations_x.data(), rotations_bytes))) {
             if (error) {
                 *error = "Unexpected end of file (rotations)";
             }
             return false;
         }
+        out.frame_rotations = std::move(rotations);
+        out.frame_rotations_x = std::move(rotations_x);
         if (length_header >= 10 * sizeof(uint32_t)) {
             const std::size_t det_dwords_bytes =
                 static_cast<std::size_t>(n_sprites) * MAX_SPRITE_DETECT_AREAS * sizeof(uint32_t);

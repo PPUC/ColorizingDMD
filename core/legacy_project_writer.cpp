@@ -511,8 +511,17 @@ bool SaveLegacyProject(const std::string& crom_path,
 
     const std::size_t rotations_count = static_cast<std::size_t>(n_frames) * MAX_COLOR_ROTATIONN * MAX_LENGTH_COLOR_ROTATION;
     std::vector<uint16_t> rotations(rotations_count, 0);
+    std::vector<uint16_t> rotations_x(rotations_count, 0);
+    if (!project.frame_rotations.empty()) {
+        const std::size_t copy = std::min(project.frame_rotations.size(), rotations.size());
+        std::copy_n(project.frame_rotations.begin(), copy, rotations.begin());
+    }
+    if (!project.frame_rotations_x.empty()) {
+        const std::size_t copy = std::min(project.frame_rotations_x.size(), rotations_x.size());
+        std::copy_n(project.frame_rotations_x.begin(), copy, rotations_x.begin());
+    }
     if (!WriteExact(crom, rotations.data(), rotations.size() * sizeof(uint16_t)) ||
-        !WriteExact(crom, rotations.data(), rotations.size() * sizeof(uint16_t))) {
+        !WriteExact(crom, rotations_x.data(), rotations_x.size() * sizeof(uint16_t))) {
         if (error) {
             *error = "Failed to write .cROM rotations";
         }

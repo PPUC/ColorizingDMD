@@ -21,6 +21,7 @@ CanvasWidget::CanvasWidget(const QString& title, QWidget* parent)
     , m_backgroundMaskButton(new QToolButton(m_canvas))
     , m_zoneButton(new QToolButton(m_canvas))
     , m_hdButton(new QToolButton(m_canvas))
+    , m_rotateButton(new QToolButton(m_canvas))
 {
     auto* layout = new QVBoxLayout(this);
     m_canvas->setOverlayText(title);
@@ -93,6 +94,13 @@ CanvasWidget::CanvasWidget(const QString& title, QWidget* parent)
     m_hdButton->setToolTip("Toggle HD frame");
     m_hdButton->setCursor(Qt::PointingHandCursor);
     connect(m_hdButton, &QToolButton::toggled, this, &CanvasWidget::hdToggled);
+
+    m_rotateButton->setText("Rotate");
+    m_rotateButton->setCheckable(true);
+    m_rotateButton->setAutoRaise(true);
+    m_rotateButton->setToolTip("Preview color rotations");
+    m_rotateButton->setCursor(Qt::PointingHandCursor);
+    connect(m_rotateButton, &QToolButton::toggled, this, &CanvasWidget::rotateToggled);
 }
 
 void CanvasWidget::setTitle(const QString& title)
@@ -236,6 +244,23 @@ void CanvasWidget::setZoneButtonVisible(bool visible)
     m_zoneButton->setVisible(visible);
 }
 
+void CanvasWidget::setRotateChecked(bool enabled)
+{
+    if (!m_rotateButton) {
+        return;
+    }
+    QSignalBlocker blocker(m_rotateButton);
+    m_rotateButton->setChecked(enabled);
+}
+
+void CanvasWidget::setRotateEnabled(bool enabled)
+{
+    if (!m_rotateButton) {
+        return;
+    }
+    m_rotateButton->setEnabled(enabled);
+}
+
 void CanvasWidget::setBackgroundChecked(bool enabled)
 {
     if (!m_backgroundButton) {
@@ -282,7 +307,8 @@ void CanvasWidget::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
     if (!m_fitButton || !m_gridButton || !m_originalButton || !m_backgroundButton ||
-        !m_maskButton || !m_dynamicButton || !m_backgroundMaskButton || !m_zoneButton || !m_hdButton) {
+        !m_maskButton || !m_dynamicButton || !m_backgroundMaskButton || !m_zoneButton || !m_hdButton ||
+        !m_rotateButton) {
         return;
     }
     const int margin = 8;
@@ -331,4 +357,9 @@ void CanvasWidget::resizeEvent(QResizeEvent* event)
     const int hdX = bgX - hdSize.width() - 6;
     m_hdButton->move(hdX, y);
     m_hdButton->raise();
+
+    const QSize rotateSize = m_rotateButton->sizeHint();
+    const int rotateX = hdX - rotateSize.width() - 6;
+    m_rotateButton->move(rotateX, y);
+    m_rotateButton->raise();
 }

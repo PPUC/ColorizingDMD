@@ -37,6 +37,8 @@ public:
     void setZoneButtonChecked(bool enabled);
     void setZoneButtonEnabled(bool enabled);
     void setZoneButtonVisible(bool visible);
+    void setRotateChecked(bool enabled);
+    void setRotateEnabled(bool enabled);
 
 signals:
     void fitRequested();
@@ -48,6 +50,7 @@ signals:
     void backgroundMaskToggled(bool enabled);
     void zoneToggled(bool enabled);
     void hdToggled(bool enabled);
+    void rotateToggled(bool enabled);
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
@@ -64,4 +67,5 @@ private:
     QToolButton* m_backgroundMaskButton;
     QToolButton* m_zoneButton;
     QToolButton* m_hdButton;
+    QToolButton* m_rotateButton;
 };

@@ -46,6 +46,8 @@ struct LegacyProject {
     std::vector<cv::Mat> comp_masks;
     std::vector<uint8_t> frame_comp_mask_ids;
     std::vector<uint8_t> frame_shape_comp_modes;
+    std::vector<uint16_t> frame_rotations;
+    std::vector<uint16_t> frame_rotations_x;
     std::vector<cv::Mat> frame_dynamic_mask_maps;
     std::vector<cv::Mat> frame_dynamic_mask_maps_x;
     std::vector<cv::Mat> frame_refs;

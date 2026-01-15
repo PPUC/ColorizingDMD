@@ -8,6 +8,7 @@ target_sources(ColorizingDMD PRIVATE
     CanvasWidget.h
     GLCanvasWidget.cpp
     GLCanvasWidget.h
+    ../libserum/src/serum-editor.cpp
     ProjectState.cpp
     ProjectState.h
     ProjectIO.cpp
@@ -47,4 +48,5 @@ target_link_libraries(ColorizingDMD PRIVATE
 
 target_include_directories(ColorizingDMD PRIVATE
     ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/libserum/src
 )

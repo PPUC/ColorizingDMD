@@ -3,11 +3,14 @@
 #include <QMainWindow>
 
 #include <QStringList>
+#include <QElapsedTimer>
+#include <QTimer>
 #include <string>
 #include <vector>
 #include <opencv2/core.hpp>
 
 #include "legacy_project.h"
+#include "serum-editor.h"
 
 class MainWindow : public QMainWindow
 {
@@ -118,6 +121,17 @@ private:
                               const cv::Mat& colorized,
                               const cv::Mat& reference,
                               const cv::Mat& hdFrame) const;
+    cv::Mat applyRotationPreview(const cv::Mat& colorized,
+                                 int frameIndex,
+                                 bool useHd) const;
+    void setFrameCanvasFromComposed(int index, const cv::Mat& composed);
+    void setCanvasRotationEnabled(bool enabled);
+    void updateCanvasRotationFrame();
+    void resetCanvasRotationState();
+    void refreshRotationEditor();
+    void refreshRotationList();
+    void updateRotationDelay(int delayMs);
+    void updateRotationDataFromList();
     cv::Mat buildReferenceForSize(int index, const cv::Size& target) const;
     cv::Mat applyDynamicColors(int index, const cv::Mat& frame, bool useHd) const;
     cv::Mat applySpritesToFrame(int index, const cv::Mat& frame, bool useHd, bool drawOutline) const;
@@ -169,6 +183,8 @@ private:
                                      const cv::Mat& mask,
                                      const cv::Vec3b& color,
                                      const cv::Scalar& gapColor) const;
+    cv::Mat renderFrameWithSerum(int index, bool useHd) const;
+    cv::Mat renderFrameWithSerum(int index, bool useHd, const cv::Mat& overrideColorized) const;
     cv::Mat buildOriginalPreviewForIndex(int index) const;
     cv::Mat buildSpriteCoverageMask(int index, bool useHd) const;
     void restoreSpriteCoverage(cv::Mat& target,
@@ -246,6 +262,7 @@ private:
     void startPaletteSetSlot();
     void startReducedSetSlot();
     void startDynamicSetSlot();
+    void startRotationSetSlot();
     void cancelPaletteSetSlot();
     void keyPressEvent(QKeyEvent* event) override;
 
@@ -269,6 +286,7 @@ private:
     class QToolButton* m_previewSelectedButton;
     class QToolButton* m_previewHdButton;
     class QToolButton* m_previewMaskOverlayButton;
+    class QToolButton* m_previewRotateButton;
     class QToolButton* m_previewRefreshButton;
     class QListWidget* m_maskList;
     class QToolButton* m_maskMoveUp;
@@ -300,6 +318,15 @@ private:
     class QWidget* m_spritesTab;
     class QWidget* m_colorsTab;
     class QWidget* m_spriteZonesTab;
+    class QComboBox* m_rotationSetCombo;
+    class QSpinBox* m_rotationDelaySpin;
+    class QListWidget* m_rotationList;
+    class QPushButton* m_rotationAddButton;
+    class QPushButton* m_rotationRemoveButton;
+    class QPushButton* m_rotationUpButton;
+    class QPushButton* m_rotationDownButton;
+    class QPushButton* m_rotationClearButton;
+    class QPushButton* m_rotationAssignButton;
     class QComboBox* m_bookmarksCombo;
     class QSpinBox* m_frameJump;
     class QLabel* m_projectLabel;
@@ -372,6 +399,8 @@ private:
     std::vector<uint8_t> m_frameExtraFlags;
     std::vector<uint8_t> m_frameCompMaskIds;
     std::vector<uint8_t> m_frameShapeCompModes;
+    std::vector<uint16_t> m_frameRotations;
+    std::vector<uint16_t> m_frameRotationsX;
 
     bool m_drawPointEnabled = false;
     MaskMode m_maskMode = MaskMode::None;
@@ -401,6 +430,14 @@ private:
     bool m_previewSelectedOnly = false;
     bool m_previewHdOnly = false;
     bool m_previewMaskOverlayEnabled = false;
+    bool m_previewRotateEnabled = false;
+    bool m_canvasRotateEnabled = false;
+    int m_rotationSetIndex = 0;
+    int m_rotationFrameIndex = -1;
+    bool m_rotationUseHd = false;
+    class QTimer* m_rotationTimer;
+    QElapsedTimer m_rotationClock;
+    SerumEditorRotationState m_rotationState;
     std::vector<int> m_previewSelectedFrames;
     bool m_restorePreviewSelection = false;
     int m_restorePreviewCurrent = -1;
@@ -426,6 +463,7 @@ private:
     bool m_paletteSetSlotActive = false;
     bool m_reducedSetSlotActive = false;
     bool m_dynamicSetSlotActive = false;
+    bool m_rotationSetSlotActive = false;
     struct PaletteUndoState {
         enum class Kind {
             Full,
