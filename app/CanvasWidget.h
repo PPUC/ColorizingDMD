@@ -21,7 +21,11 @@ public:
     void setOriginalVisible(bool enabled);
     void setMaskButtonsChecked(bool maskEnabled, bool dynamicEnabled);
     void setMaskButtonsVisible(bool visible);
+    void setMaskButtonVisible(bool visible);
+    void setDynamicButtonVisible(bool visible);
     void setMaskButtonsEnabled(bool enabled);
+    void setMaskButtonText(const QString& text);
+    void setMaskButtonToolTip(const QString& text);
     void setHdButtonChecked(bool enabled);
     void setHdButtonEnabled(bool enabled);
     void setBackgroundChecked(bool enabled);
@@ -30,6 +34,9 @@ public:
     void setBackgroundMaskChecked(bool enabled);
     void setBackgroundMaskEnabled(bool enabled);
     void setBackgroundMaskVisible(bool visible);
+    void setZoneButtonChecked(bool enabled);
+    void setZoneButtonEnabled(bool enabled);
+    void setZoneButtonVisible(bool visible);
 
 signals:
     void fitRequested();
@@ -39,6 +46,7 @@ signals:
     void maskToggled(bool enabled);
     void dynamicToggled(bool enabled);
     void backgroundMaskToggled(bool enabled);
+    void zoneToggled(bool enabled);
     void hdToggled(bool enabled);
 
 protected:
@@ -54,5 +62,6 @@ private:
     QToolButton* m_maskButton;
     QToolButton* m_dynamicButton;
     QToolButton* m_backgroundMaskButton;
+    QToolButton* m_zoneButton;
     QToolButton* m_hdButton;
 };

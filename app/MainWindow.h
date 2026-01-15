@@ -31,7 +31,8 @@ private:
     enum class MaskKind {
         None,
         Comparison,
-        Dynamic
+        Dynamic,
+        SpriteDetAreas
     };
     enum class MaskMode {
         None,
@@ -47,6 +48,11 @@ private:
     struct UndoStack {
         std::vector<UndoState> undo;
         std::vector<UndoState> redo;
+    };
+    struct SpriteZoneGroup {
+        QRect rect;
+        std::vector<int> slotIndices;
+        std::vector<int> sprites;
     };
     enum class FrameHoverArea {
         None,
@@ -76,6 +82,8 @@ private:
     void refreshCounts();
     void refreshFrameSpriteLists();
     void refreshBackgroundList();
+    void refreshSpriteZoneList();
+    void refreshFrameSpriteSlotCombo();
     void setInspectorSelection(const QString& label);
     void updateSelectionFromLists();
     bool eventFilter(QObject* obj, QEvent* event) override;
@@ -112,11 +120,13 @@ private:
                               const cv::Mat& hdFrame) const;
     cv::Mat buildReferenceForSize(int index, const cv::Size& target) const;
     cv::Mat applyDynamicColors(int index, const cv::Mat& frame, bool useHd) const;
+    cv::Mat applySpritesToFrame(int index, const cv::Mat& frame, bool useHd, bool drawOutline) const;
     cv::Mat applyBackgroundComposite(int index, const cv::Mat& frame, bool useHd) const;
     cv::Mat applyBackgroundCompositeWithMask(int index,
                                              const cv::Mat& frame,
                                              const cv::Mat& mask,
                                              bool useHd) const;
+    std::vector<SpriteZoneGroup> buildSpriteZonesForFrame(int frameIndex) const;
     void resetUndoStacks();
     void ensureUndoStacksSize();
     void pushPaletteUndoSnapshot();
@@ -128,6 +138,8 @@ private:
     void pushMaskUndoSnapshot(MaskMode mode, int index);
     void pushBackgroundMaskUndoSnapshot(int index);
     void pushBackgroundUndoSnapshot(int index);
+    void pushSpriteDynamicMaskUndoSnapshot(int index);
+    void pushSpriteDetAreaUndoSnapshot(int index);
     bool undoEdit(bool isFrame);
     bool redoEdit(bool isFrame);
     bool undoBackgroundEdit();
@@ -144,6 +156,7 @@ private:
     cv::Mat* activeFrameImage(int index, bool forEdit);
     cv::Mat* activeBackgroundImage(int index, bool forEdit);
     void ensureMaskDataSize();
+    void ensureSpriteDataSize();
     void ensureBackgroundDataSize();
     cv::Mat buildReferenceFrame(const cv::Mat& source) const;
     cv::Mat buildMaskPreview(const cv::Mat& frame, const cv::Mat& mask, const cv::Vec3b& color) const;
@@ -157,8 +170,16 @@ private:
                                      const cv::Vec3b& color,
                                      const cv::Scalar& gapColor) const;
     cv::Mat buildOriginalPreviewForIndex(int index) const;
+    cv::Mat buildSpriteCoverageMask(int index, bool useHd) const;
+    void restoreSpriteCoverage(cv::Mat& target,
+                               const cv::Mat& backup,
+                               const cv::Mat& spriteMask) const;
     void updateMaskPreviewForFrame(int index);
+    void updateSpriteZoneOverlay(int index);
     void setMaskMode(MaskMode mode);
+    void setSpriteZoneMode(bool enabled);
+    void updateSpriteDetAreaOverlay(int index);
+    void setSpriteDetAreaMode(bool enabled);
     void applyToolToMask(cv::Mat& mask, DrawTool tool, const QPoint& start, const QPoint& end, bool erase);
     void applyMaskFill(cv::Mat& mask, int x, int y, bool erase);
     void refreshMaskCombos();
@@ -171,7 +192,10 @@ private:
     bool dynamicMapHasSet(const cv::Mat& map, int setId) const;
     cv::Mat buildDynamicMaskFromMap(const cv::Mat& map, int setId) const;
     void updateFrameCanvasImage(int index);
+    void updateSpriteCanvasImage(int index);
     void updateBackgroundCanvasImage(int index);
+    cv::Mat applySpriteDynamicColors(int index, const cv::Mat& sprite) const;
+    QRect spriteContentRect(int index) const;
     bool hasHdBackground(int index) const;
     void updateHdControlsForContext();
     int currentFrameMaskId() const;
@@ -180,6 +204,7 @@ private:
     void setCurrentFrameDynamicMaskId(int id);
     cv::Mat* activeComparisonMask();
     cv::Mat* activeDynamicMaskMap(int frameIndex);
+    cv::Mat* activeSpriteDynamicMask(int spriteIndex);
     cv::Mat* activeBackgroundMask(int index);
     void swapMaskEntries(int a, int b);
     void swapDynamicMaskEntries(int a, int b);
@@ -235,6 +260,7 @@ private:
     class QListWidget* m_spritesList;
     class QListWidget* m_imagesList;
     class QListWidget* m_backgroundList;
+    class QListWidget* m_spriteZoneList;
     class QLineEdit* m_frameFilter;
     class QLineEdit* m_spriteFilter;
     class QListWidget* m_framePreviewList;
@@ -257,7 +283,11 @@ private:
     class QComboBox* m_frameDynamicMaskAssign;
     class QPushButton* m_frameDynamicCopyButton;
     class QComboBox* m_frameBackgroundAssign;
+    class QComboBox* m_frameSpriteSlotCombo;
     class QCheckBox* m_shapeCompToggle;
+    class QComboBox* m_spriteDynamicSetCombo;
+    class QComboBox* m_spriteDetAreaCombo;
+    class QPushButton* m_spriteDetAreaClearButton;
     class QComboBox* m_hdSourceCombo;
     class QComboBox* m_hdScaleCombo;
     class QPushButton* m_hdCreateButton;
@@ -269,6 +299,7 @@ private:
     class QWidget* m_backgroundsTab;
     class QWidget* m_spritesTab;
     class QWidget* m_colorsTab;
+    class QWidget* m_spriteZonesTab;
     class QComboBox* m_bookmarksCombo;
     class QSpinBox* m_frameJump;
     class QLabel* m_projectLabel;
@@ -298,6 +329,25 @@ private:
 
     std::vector<uint32_t> m_frameDurations;
     std::vector<std::string> m_spriteNames;
+    std::vector<cv::Mat> m_spriteColored;
+    std::vector<cv::Mat> m_spriteColoredX;
+    std::vector<cv::Mat> m_spriteOriginals;
+    std::vector<cv::Mat> m_spriteMasksX;
+    std::vector<cv::Mat> m_spriteDynamicMasks;
+    std::vector<cv::Mat> m_spriteDynamicMasksX;
+    std::vector<std::vector<uint16_t>> m_spriteDynamicColors;
+    std::vector<std::vector<uint16_t>> m_spriteDynamicColorsX;
+    std::vector<uint8_t> m_spriteExtraFlags;
+    std::vector<uint8_t> m_spriteShapeModes;
+    std::vector<uint16_t> m_spriteDetAreas;
+    std::vector<uint32_t> m_spriteDetDwords;
+    std::vector<uint16_t> m_spriteDetDwordPos;
+    std::vector<uint8_t> m_frameSpriteAssignments;
+    std::vector<uint16_t> m_frameSpriteBBoxes;
+    std::vector<uint32_t> m_spriteColFromFrame;
+    std::vector<uint16_t> m_spriteRects;
+    std::vector<uint32_t> m_spriteRectMirror;
+    std::vector<SpriteZoneGroup> m_spriteZones;
     std::vector<uint32_t> m_sectionStarts;
     std::vector<std::string> m_sectionNames;
     std::vector<UndoStack> m_frameUndoStacks;
@@ -327,12 +377,20 @@ private:
     MaskMode m_maskMode = MaskMode::None;
     bool m_frameUndoActive = false;
     bool m_spriteUndoActive = false;
+    bool m_spriteDynamicMaskMode = false;
+    int m_spriteDynamicSetIndex = 0;
+    bool m_spriteDetAreaMode = false;
+    int m_spriteDetAreaIndex = 0;
+    int m_selectedSpriteSlot = 0;
+    int m_selectedSpriteZoneIndex = -1;
     bool m_backgroundUndoActive = false;
     bool m_maskReorderActive = false;
     bool m_dynamicMaskReorderActive = false;
     bool m_showOriginalFrame = true;
     bool m_frameDrawOnMask = false;
+    bool m_frameDrawOnZone = false;
     bool m_backgroundMaskMode = false;
+    bool m_spriteZoneMode = false;
     FrameHoverArea m_frameHoverArea = FrameHoverArea::None;
     bool m_useHdFrame = false;
     bool m_showBackgroundLayer = true;

@@ -19,6 +19,7 @@ CanvasWidget::CanvasWidget(const QString& title, QWidget* parent)
     , m_maskButton(new QToolButton(m_canvas))
     , m_dynamicButton(new QToolButton(m_canvas))
     , m_backgroundMaskButton(new QToolButton(m_canvas))
+    , m_zoneButton(new QToolButton(m_canvas))
     , m_hdButton(new QToolButton(m_canvas))
 {
     auto* layout = new QVBoxLayout(this);
@@ -79,6 +80,13 @@ CanvasWidget::CanvasWidget(const QString& title, QWidget* parent)
     m_backgroundMaskButton->setCursor(Qt::PointingHandCursor);
     connect(m_backgroundMaskButton, &QToolButton::toggled, this, &CanvasWidget::backgroundMaskToggled);
 
+    m_zoneButton->setText("Zones");
+    m_zoneButton->setCheckable(true);
+    m_zoneButton->setAutoRaise(true);
+    m_zoneButton->setToolTip("Edit sprite detection zones");
+    m_zoneButton->setCursor(Qt::PointingHandCursor);
+    connect(m_zoneButton, &QToolButton::toggled, this, &CanvasWidget::zoneToggled);
+
     m_hdButton->setText("HD");
     m_hdButton->setCheckable(true);
     m_hdButton->setAutoRaise(true);
@@ -137,6 +145,22 @@ void CanvasWidget::setMaskButtonsVisible(bool visible)
     m_dynamicButton->setVisible(visible);
 }
 
+void CanvasWidget::setMaskButtonVisible(bool visible)
+{
+    if (!m_maskButton) {
+        return;
+    }
+    m_maskButton->setVisible(visible);
+}
+
+void CanvasWidget::setDynamicButtonVisible(bool visible)
+{
+    if (!m_dynamicButton) {
+        return;
+    }
+    m_dynamicButton->setVisible(visible);
+}
+
 void CanvasWidget::setMaskButtonsEnabled(bool enabled)
 {
     if (!m_maskButton || !m_dynamicButton) {
@@ -144,6 +168,22 @@ void CanvasWidget::setMaskButtonsEnabled(bool enabled)
     }
     m_maskButton->setEnabled(enabled);
     m_dynamicButton->setEnabled(enabled);
+}
+
+void CanvasWidget::setMaskButtonText(const QString& text)
+{
+    if (!m_maskButton) {
+        return;
+    }
+    m_maskButton->setText(text);
+}
+
+void CanvasWidget::setMaskButtonToolTip(const QString& text)
+{
+    if (!m_maskButton) {
+        return;
+    }
+    m_maskButton->setToolTip(text);
 }
 
 void CanvasWidget::setBackgroundMaskChecked(bool enabled)
@@ -169,6 +209,31 @@ void CanvasWidget::setBackgroundMaskVisible(bool visible)
         return;
     }
     m_backgroundMaskButton->setVisible(visible);
+}
+
+void CanvasWidget::setZoneButtonChecked(bool enabled)
+{
+    if (!m_zoneButton) {
+        return;
+    }
+    QSignalBlocker blocker(m_zoneButton);
+    m_zoneButton->setChecked(enabled);
+}
+
+void CanvasWidget::setZoneButtonEnabled(bool enabled)
+{
+    if (!m_zoneButton) {
+        return;
+    }
+    m_zoneButton->setEnabled(enabled);
+}
+
+void CanvasWidget::setZoneButtonVisible(bool visible)
+{
+    if (!m_zoneButton) {
+        return;
+    }
+    m_zoneButton->setVisible(visible);
 }
 
 void CanvasWidget::setBackgroundChecked(bool enabled)
@@ -217,7 +282,7 @@ void CanvasWidget::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
     if (!m_fitButton || !m_gridButton || !m_originalButton || !m_backgroundButton ||
-        !m_maskButton || !m_dynamicButton || !m_hdButton) {
+        !m_maskButton || !m_dynamicButton || !m_backgroundMaskButton || !m_zoneButton || !m_hdButton) {
         return;
     }
     const int margin = 8;
@@ -252,8 +317,13 @@ void CanvasWidget::resizeEvent(QResizeEvent* event)
     m_maskButton->move(maskX, y);
     m_maskButton->raise();
 
+    const QSize zoneSize = m_zoneButton->sizeHint();
+    const int zoneX = maskX - zoneSize.width() - 6;
+    m_zoneButton->move(zoneX, y);
+    m_zoneButton->raise();
+
     const QSize bgSize = m_backgroundMaskButton->sizeHint();
-    const int bgX = maskX - bgSize.width() - 6;
+    const int bgX = zoneX - bgSize.width() - 6;
     m_backgroundMaskButton->move(bgX, y);
     m_backgroundMaskButton->raise();
 

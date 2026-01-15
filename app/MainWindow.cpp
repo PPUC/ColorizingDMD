@@ -38,6 +38,9 @@
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QWidget>
+
+#include <algorithm>
+#include <cstring>
 #include <QFileInfo>
 #include <QSignalBlocker>
 #include <QStyledItemDelegate>
@@ -56,6 +59,7 @@
 #include <cstring>
 #include <unordered_set>
 #include <unordered_map>
+#include <map>
 
 #include <opencv2/imgproc.hpp>
 
@@ -97,6 +101,7 @@ constexpr int kFrameDurationRole = Qt::UserRole + 2;
 constexpr int kPreviewIconSizeRole = Qt::UserRole + 3;
 constexpr int kPaletteDisabledRole = Qt::UserRole + 4;
 constexpr int kPreviewSecondarySelectedRole = Qt::UserRole + 5;
+constexpr int kSpriteZoneIndexRole = Qt::UserRole + 6;
 
 cv::Mat EnsureBgr(const cv::Mat& source);
 uint16_t BgrToRgb565(const cv::Vec3b& color);
@@ -491,6 +496,28 @@ bool MaskHasContent(const cv::Mat& mask)
     return !mask.empty() && cv::countNonZero(mask) > 0;
 }
 
+void ApplySpriteMaskConstraints(cv::Mat& map, const cv::Mat& spriteMask)
+{
+    if (map.empty() || spriteMask.empty()) {
+        return;
+    }
+    cv::Mat maskScaled;
+    if (spriteMask.size() != map.size()) {
+        cv::resize(spriteMask, maskScaled, map.size(), 0.0, 0.0, cv::INTER_NEAREST);
+    } else {
+        maskScaled = spriteMask;
+    }
+    for (int y = 0; y < map.rows; ++y) {
+        uint8_t* row = map.ptr<uint8_t>(y);
+        const uint8_t* mrow = maskScaled.ptr<uint8_t>(y);
+        for (int x = 0; x < map.cols; ++x) {
+            if (mrow[x] == 255) {
+                row[x] = 255;
+            }
+        }
+    }
+}
+
 bool IsAllBlackFrame(const cv::Mat& frame)
 {
     if (frame.empty()) {
@@ -809,6 +836,24 @@ MainWindow::MainWindow(QWidget* parent)
         m_spriteStore->clear();
         m_frameDurations.clear();
         m_spriteNames.clear();
+        m_spriteColored.clear();
+        m_spriteColoredX.clear();
+        m_spriteOriginals.clear();
+        m_spriteMasksX.clear();
+        m_spriteDynamicMasks.clear();
+        m_spriteDynamicMasksX.clear();
+        m_spriteDynamicColors.clear();
+        m_spriteDynamicColorsX.clear();
+        m_spriteExtraFlags.clear();
+        m_spriteShapeModes.clear();
+        m_spriteDetAreas.clear();
+        m_spriteDetDwords.clear();
+        m_spriteDetDwordPos.clear();
+        m_frameSpriteAssignments.clear();
+        m_frameSpriteBBoxes.clear();
+        m_spriteColFromFrame.clear();
+        m_spriteRects.clear();
+        m_spriteRectMirror.clear();
         m_sectionStarts.clear();
         m_sectionNames.clear();
         m_frameRefs.clear();
@@ -984,6 +1029,51 @@ MainWindow::MainWindow(QWidget* parent)
             const int row = m_spritesList->currentRow();
             m_spriteStore->removeAt(row);
             m_state->removeSprite(row);
+            if (row >= 0 && row < static_cast<int>(m_spriteNames.size())) {
+                m_spriteNames.erase(m_spriteNames.begin() + row);
+            }
+            if (row >= 0 && row < static_cast<int>(m_spriteColored.size())) {
+                m_spriteColored.erase(m_spriteColored.begin() + row);
+            }
+            if (row >= 0 && row < static_cast<int>(m_spriteColoredX.size())) {
+                m_spriteColoredX.erase(m_spriteColoredX.begin() + row);
+            }
+            if (row >= 0 && row < static_cast<int>(m_spriteOriginals.size())) {
+                m_spriteOriginals.erase(m_spriteOriginals.begin() + row);
+            }
+            if (row >= 0 && row < static_cast<int>(m_spriteMasksX.size())) {
+                m_spriteMasksX.erase(m_spriteMasksX.begin() + row);
+            }
+            if (row >= 0 && row < static_cast<int>(m_spriteDynamicMasks.size())) {
+                m_spriteDynamicMasks.erase(m_spriteDynamicMasks.begin() + row);
+            }
+            if (row >= 0 && row < static_cast<int>(m_spriteDynamicMasksX.size())) {
+                m_spriteDynamicMasksX.erase(m_spriteDynamicMasksX.begin() + row);
+            }
+            if (row >= 0 && row < static_cast<int>(m_spriteDynamicColors.size())) {
+                m_spriteDynamicColors.erase(m_spriteDynamicColors.begin() + row);
+            }
+            if (row >= 0 && row < static_cast<int>(m_spriteDynamicColorsX.size())) {
+                m_spriteDynamicColorsX.erase(m_spriteDynamicColorsX.begin() + row);
+            }
+            if (row >= 0 && row < static_cast<int>(m_spriteExtraFlags.size())) {
+                m_spriteExtraFlags.erase(m_spriteExtraFlags.begin() + row);
+            }
+            if (row >= 0 && row < static_cast<int>(m_spriteShapeModes.size())) {
+                m_spriteShapeModes.erase(m_spriteShapeModes.begin() + row);
+            }
+            if (!m_frameSpriteAssignments.empty()) {
+                for (auto& entry : m_frameSpriteAssignments) {
+                    if (entry == 255) {
+                        continue;
+                    }
+                    if (entry == static_cast<uint8_t>(row)) {
+                        entry = 255;
+                    } else if (entry > static_cast<uint8_t>(row)) {
+                        entry = static_cast<uint8_t>(entry - 1);
+                    }
+                }
+            }
             ensureUndoStacksSize();
         } else if (m_imagesList->hasFocus()) {
             const int row = m_imagesList->currentRow();
@@ -1000,12 +1090,18 @@ MainWindow::MainWindow(QWidget* parent)
     m_canvasTabs = tabs;
     m_framesCanvas = new CanvasWidget("Frames canvas (placeholder)", tabs);
     m_spritesCanvas = new CanvasWidget("Sprites canvas (placeholder)", tabs);
+    m_spritesCanvas->setMaskButtonText("Detect");
+    m_spritesCanvas->setMaskButtonToolTip("Edit sprite detection areas");
     m_imagesCanvas = new CanvasWidget("Images canvas (placeholder)", tabs);
     m_backgroundsCanvas = new CanvasWidget("Backgrounds canvas (placeholder)", tabs);
     m_framesCanvas->setMaskButtonsVisible(true);
-    m_spritesCanvas->setMaskButtonsVisible(false);
+    m_framesCanvas->setZoneButtonVisible(true);
+    m_spritesCanvas->setMaskButtonsVisible(true);
+    m_spritesCanvas->setZoneButtonVisible(false);
     m_imagesCanvas->setMaskButtonsVisible(false);
+    m_imagesCanvas->setZoneButtonVisible(false);
     m_backgroundsCanvas->setMaskButtonsVisible(false);
+    m_backgroundsCanvas->setZoneButtonVisible(false);
     m_framesCanvas->setBackgroundMaskVisible(true);
     m_spritesCanvas->setBackgroundMaskVisible(false);
     m_imagesCanvas->setBackgroundMaskVisible(false);
@@ -1035,10 +1131,12 @@ MainWindow::MainWindow(QWidget* parent)
     auto* masksTab = new QWidget(toolsTabs);
     auto* dynamicMasksTab = new QWidget(toolsTabs);
     auto* backgroundsTab = new QWidget(toolsTabs);
+    auto* spriteZonesTab = new QWidget(toolsTabs);
     m_masksTab = masksTab;
     m_dynamicMasksTab = dynamicMasksTab;
     m_backgroundsTab = backgroundsTab;
     m_spritesTab = spritesTab;
+    m_spriteZonesTab = spriteZonesTab;
 
     m_frameFilter = new QLineEdit(framesTab);
     m_frameFilter->setPlaceholderText("Filter frames...");
@@ -1069,6 +1167,12 @@ MainWindow::MainWindow(QWidget* parent)
     m_spriteFilter = new QLineEdit(spritesTab);
     m_spriteFilter->setPlaceholderText("Filter sprites...");
     m_spritesList = new QListWidget(spritesTab);
+    m_spritesList->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_spritesList->setDragDropMode(QAbstractItemView::DragOnly);
+    m_spritesList->setDragDropOverwriteMode(false);
+    m_spritesList->setDragEnabled(true);
+    m_spritesList->setAcceptDrops(false);
+    m_spritesList->setDropIndicatorShown(false);
     auto* spritesLayout = new QVBoxLayout(spritesTab);
     spritesLayout->addWidget(m_spriteFilter);
     spritesLayout->addWidget(m_spritesList, 1);
@@ -1101,6 +1205,24 @@ MainWindow::MainWindow(QWidget* parent)
     auto* backgroundsLayout = new QVBoxLayout(backgroundsTab);
     backgroundsLayout->addWidget(m_backgroundList, 1);
     backgroundsTab->setLayout(backgroundsLayout);
+
+    m_spriteZoneList = new QListWidget(spriteZonesTab);
+    m_spriteZoneList->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_spriteZoneList->setViewMode(QListView::IconMode);
+    m_spriteZoneList->setFlow(QListView::TopToBottom);
+    m_spriteZoneList->setWrapping(false);
+    m_spriteZoneList->setMovement(QListView::Snap);
+    m_spriteZoneList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_spriteZoneList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+    m_spriteZoneList->setResizeMode(QListView::Adjust);
+    m_spriteZoneList->setUniformItemSizes(false);
+    m_spriteZoneList->setIconSize(QSize(kPreviewIconWidth, kPreviewIconHeight));
+    m_spriteZoneList->setGridSize(QSize());
+    m_spriteZoneList->setSpacing(4);
+    m_spriteZoneList->setItemDelegate(new ToolPreviewDelegate(m_spriteZoneList));
+    auto* spriteZonesLayout = new QVBoxLayout(spriteZonesTab);
+    spriteZonesLayout->addWidget(m_spriteZoneList, 1);
+    spriteZonesTab->setLayout(spriteZonesLayout);
 
     auto* masksLayout = new QVBoxLayout(masksTab);
     m_maskList = new QListWidget(masksTab);
@@ -1391,6 +1513,7 @@ MainWindow::MainWindow(QWidget* parent)
     toolsTabs->addTab(masksTab, "Masks");
     toolsTabs->addTab(dynamicMasksTab, "Dynamic Masks");
     toolsTabs->addTab(backgroundsTab, "Backgrounds");
+    toolsTabs->addTab(spriteZonesTab, "Sprite Zones");
     toolsTabs->addTab(colorsTab, "Colors");
     toolDock->setWidget(toolsTabs);
     addDockWidget(Qt::LeftDockWidgetArea, toolDock);
@@ -1410,10 +1533,27 @@ MainWindow::MainWindow(QWidget* parent)
     m_selectionLabel = new QLabel("None", inspectorWidget);
     m_frameMetaLabel = new QLabel("-", inspectorWidget);
     m_spriteMetaLabel = new QLabel("-", inspectorWidget);
+    m_spriteDynamicSetCombo = new QComboBox(inspectorWidget);
+    m_spriteDynamicSetCombo->setEnabled(false);
+    for (int i = 0; i < MAX_DYNA_SETS_PER_SPRITE; ++i) {
+        m_spriteDynamicSetCombo->addItem(QString("Set %1").arg(i + 1), i);
+    }
+    m_spriteDetAreaCombo = new QComboBox(inspectorWidget);
+    m_spriteDetAreaCombo->setEnabled(false);
+    for (int i = 0; i < MAX_SPRITE_DETECT_AREAS; ++i) {
+        m_spriteDetAreaCombo->addItem(QString("Area %1").arg(i + 1), i);
+    }
+    m_spriteDetAreaClearButton = new QPushButton("Clear area", inspectorWidget);
+    m_spriteDetAreaClearButton->setEnabled(false);
     m_frameMaskAssign = new QComboBox(inspectorWidget);
     m_frameDynamicMaskAssign = new QComboBox(inspectorWidget);
     m_frameDynamicCopyButton = new QPushButton("Copy to frame...", inspectorWidget);
     m_frameBackgroundAssign = new QComboBox(inspectorWidget);
+    m_frameSpriteSlotCombo = new QComboBox(inspectorWidget);
+    m_frameSpriteSlotCombo->setEnabled(false);
+    for (int i = 0; i < MAX_SPRITES_PER_FRAME; ++i) {
+        m_frameSpriteSlotCombo->addItem(QString("Slot %1").arg(i + 1), i);
+    }
     m_backgroundAssignLabel = new QLabel("Background", inspectorWidget);
     m_shapeCompToggle = new QCheckBox("Shape comparison", inspectorWidget);
     m_hdSourceCombo = new QComboBox(inspectorWidget);
@@ -1433,9 +1573,13 @@ MainWindow::MainWindow(QWidget* parent)
     inspectorLayout->addRow("Selection", m_selectionLabel);
     inspectorLayout->addRow("Frame info", m_frameMetaLabel);
     inspectorLayout->addRow("Sprite info", m_spriteMetaLabel);
+    inspectorLayout->addRow("Sprite dynamic", m_spriteDynamicSetCombo);
+    inspectorLayout->addRow("Sprite detect", m_spriteDetAreaCombo);
+    inspectorLayout->addRow("Detect clear", m_spriteDetAreaClearButton);
     inspectorLayout->addRow("Mask", m_frameMaskAssign);
     inspectorLayout->addRow("Dynamic mask", m_frameDynamicMaskAssign);
     inspectorLayout->addRow("Dynamic copy", m_frameDynamicCopyButton);
+    inspectorLayout->addRow("Sprite slot", m_frameSpriteSlotCombo);
     inspectorLayout->addRow(m_backgroundAssignLabel, m_frameBackgroundAssign);
     inspectorLayout->addRow("Shape compare", m_shapeCompToggle);
     inspectorLayout->addRow("HD source", m_hdSourceCombo);
@@ -1558,6 +1702,39 @@ MainWindow::MainWindow(QWidget* parent)
             }
             m_frameShapeCompModes[static_cast<std::size_t>(row)] = enabled ? 1 : 0;
         }
+    });
+    connect(m_spriteDetAreaCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
+        if (index < 0 || index >= MAX_SPRITE_DETECT_AREAS) {
+            return;
+        }
+        m_spriteDetAreaIndex = index;
+        updateSpriteCanvasImage(m_spritesList ? m_spritesList->currentRow() : -1);
+    });
+    connect(m_spriteDetAreaClearButton, &QPushButton::clicked, this, [this]() {
+        const int spriteIndex = m_spritesList ? m_spritesList->currentRow() : -1;
+        if (spriteIndex < 0) {
+            return;
+        }
+        ensureSpriteDataSize();
+        const std::size_t base = static_cast<std::size_t>(spriteIndex) * MAX_SPRITE_DETECT_AREAS * 4 +
+            static_cast<std::size_t>(m_spriteDetAreaIndex) * 4;
+        if (base + 3 >= m_spriteDetAreas.size()) {
+            return;
+        }
+        pushSpriteDetAreaUndoSnapshot(spriteIndex);
+        m_spriteDetAreas[base] = 0xffff;
+        m_spriteDetAreas[base + 1] = 0xffff;
+        m_spriteDetAreas[base + 2] = 0xffff;
+        m_spriteDetAreas[base + 3] = 0xffff;
+        updateSpriteCanvasImage(spriteIndex);
+    });
+    connect(m_frameSpriteSlotCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
+        if (index < 0 || index >= MAX_SPRITES_PER_FRAME) {
+            return;
+        }
+        m_selectedSpriteSlot = index;
+        refreshSpriteZoneList();
+        updateMaskPreviewForFrame(m_framesList ? m_framesList->currentRow() : -1);
     });
     connect(m_hdCreateButton, &QPushButton::clicked, this, [this]() {
         if (m_canvasTabs && m_canvasTabs->currentWidget() == m_backgroundsCanvas) {
@@ -1775,6 +1952,15 @@ MainWindow::MainWindow(QWidget* parent)
             refreshFramePreviews();
         }
     });
+    connect(m_spriteDynamicSetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+        if (!m_spriteDynamicSetCombo || index < 0) {
+            return;
+        }
+        m_spriteDynamicSetIndex = m_spriteDynamicSetCombo->currentData().toInt();
+        if (m_spriteDynamicMaskMode) {
+            updateSpriteCanvasImage(m_spritesList ? m_spritesList->currentRow() : -1);
+        }
+    });
     connect(m_frameDynamicCopyButton, &QPushButton::clicked, this, [this]() {
         const int frameCount = m_frameStore ? m_frameStore->count() : 0;
         const int sourceIndex = m_framesList ? m_framesList->currentRow() : -1;
@@ -1948,6 +2134,27 @@ MainWindow::MainWindow(QWidget* parent)
         }
         updateDynamicMaskPreviewIcons();
         updateMaskPreviewForFrame(m_framesList->currentRow());
+    });
+    connect(m_spriteZoneList, &QListWidget::currentRowChanged, this, [this](int row) {
+        if (row < 0) {
+            m_selectedSpriteZoneIndex = -1;
+        } else {
+            m_selectedSpriteZoneIndex = row;
+            if (m_selectedSpriteZoneIndex >= 0 &&
+                m_selectedSpriteZoneIndex < static_cast<int>(m_spriteZones.size())) {
+                const SpriteZoneGroup& zone = m_spriteZones[static_cast<std::size_t>(m_selectedSpriteZoneIndex)];
+                if (!zone.slotIndices.empty()) {
+                    if (std::find(zone.slotIndices.begin(), zone.slotIndices.end(), m_selectedSpriteSlot) == zone.slotIndices.end()) {
+                        m_selectedSpriteSlot = zone.slotIndices.front();
+                        if (m_frameSpriteSlotCombo) {
+                            QSignalBlocker blocker(m_frameSpriteSlotCombo);
+                            m_frameSpriteSlotCombo->setCurrentIndex(m_selectedSpriteSlot);
+                        }
+                    }
+                }
+            }
+        }
+        updateMaskPreviewForFrame(m_framesList ? m_framesList->currentRow() : -1);
     });
 
     connect(m_bookmarksCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
@@ -2247,9 +2454,52 @@ MainWindow::MainWindow(QWidget* parent)
             m_coordLabel->setText(QString());
             return;
         }
-        const int spriteX = std::clamp(x, 0, sprite->cols - 1) + 1;
-        const int spriteY = std::clamp(y, 0, sprite->rows - 1) + 1;
-        m_coordLabel->setText(QString("Sprite %1,%2").arg(spriteX).arg(spriteY));
+        const QRect contentRect = spriteContentRect(index);
+        const int baseWidth = contentRect.isValid() ? contentRect.width() : sprite->cols;
+        const int baseHeight = contentRect.isValid() ? contentRect.height() : sprite->rows;
+        cv::Mat originalRef;
+        if (index >= 0 && index < static_cast<int>(m_spriteOriginals.size())) {
+            if (contentRect.isValid() && !contentRect.isEmpty()) {
+                originalRef = m_spriteOriginals[static_cast<std::size_t>(index)](
+                    cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height()));
+            } else {
+                originalRef = m_spriteOriginals[static_cast<std::size_t>(index)];
+            }
+        }
+        cv::Mat original = originalRef.empty() ? cv::Mat() : buildOriginalFrame(originalRef);
+        cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseWidth, baseHeight));
+        FrameLayout layout = BuildFrameLayout(baseWidth, baseHeight,
+                                              displayOriginal.cols, displayOriginal.rows);
+        if (y >= 0 && y < layout.topHeight &&
+            x >= layout.topX && x < layout.topX + layout.topWidth) {
+            const int localX = x - layout.topX;
+            const int localY = y;
+            const int scaleX = (layout.topWidth > 0 && baseWidth > 0) ? layout.topWidth / baseWidth : 1;
+            const int scaleY = (layout.topHeight > 0 && baseHeight > 0) ? layout.topHeight / baseHeight : 1;
+            const int mappedX = (scaleX > 1) ? localX / scaleX : localX;
+            const int mappedY = (scaleY > 1) ? localY / scaleY : localY;
+            const int spriteX = std::clamp(mappedX, 0, std::max(0, baseWidth - 1)) + 1;
+            const int spriteY = std::clamp(mappedY, 0, std::max(0, baseHeight - 1)) + 1;
+            m_coordLabel->setText(QString("Sprite %1,%2").arg(spriteX).arg(spriteY));
+            return;
+        }
+        const int gap = kFrameGapPixels;
+        if (!original.empty() &&
+            y >= layout.topHeight + gap &&
+            y < layout.topHeight + gap + layout.bottomHeight &&
+            x >= layout.bottomX && x < layout.bottomX + layout.bottomWidth) {
+            const int localX = x - layout.bottomX;
+            const int localY = y - (layout.topHeight + gap);
+            const int scaleX = (layout.bottomWidth > 0 && original.cols > 0) ? layout.bottomWidth / original.cols : 1;
+            const int scaleY = (layout.bottomHeight > 0 && original.rows > 0) ? layout.bottomHeight / original.rows : 1;
+            const int mappedX = (scaleX > 1) ? localX / scaleX : localX;
+            const int mappedY = (scaleY > 1) ? localY / scaleY : localY;
+            const int refX = std::clamp(mappedX, 0, std::max(0, original.cols - 1)) + 1;
+            const int refY = std::clamp(mappedY, 0, std::max(0, original.rows - 1)) + 1;
+            m_coordLabel->setText(QString("Original %1,%2").arg(refX).arg(refY));
+            return;
+        }
+        m_coordLabel->setText(QString());
     });
     connect(m_backgroundsCanvas->canvas(), &GLCanvasWidget::imageHovered, this, [this](int x, int y, bool onImage) {
         if (!m_coordLabel) {
@@ -2322,6 +2572,79 @@ MainWindow::MainWindow(QWidget* parent)
             statusBar()->showMessage(QString("Assigned background %1").arg(index), 2000);
             updateFrameCanvasImage(m_framesList->currentRow());
         }
+        if (kind == "sprite") {
+            if (index < 0 || index >= m_spritesList->count()) {
+                return;
+            }
+            if (!m_spriteZoneMode) {
+                statusBar()->showMessage("Enable Zones to assign sprites.", 2000);
+                return;
+            }
+            if (m_selectedSpriteZoneIndex < 0 || m_selectedSpriteZoneIndex >= static_cast<int>(m_spriteZones.size())) {
+                statusBar()->showMessage("Select a sprite zone to assign a sprite.", 2000);
+                return;
+            }
+            const int frameIndex = m_framesList->currentRow();
+            if (frameIndex < 0) {
+                return;
+            }
+            SpriteZoneGroup zone = m_spriteZones[static_cast<std::size_t>(m_selectedSpriteZoneIndex)];
+            int slotToUse = m_selectedSpriteSlot;
+            if (slotToUse < 0 || slotToUse >= MAX_SPRITES_PER_FRAME) {
+                slotToUse = -1;
+            }
+            if (slotToUse < 0) {
+                for (int slot : zone.slotIndices) {
+                    const std::size_t slotIndex = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME +
+                        static_cast<std::size_t>(slot);
+                    if (slotIndex < m_frameSpriteAssignments.size() &&
+                        m_frameSpriteAssignments[slotIndex] == 255) {
+                        slotToUse = slot;
+                        break;
+                    }
+                }
+            }
+            if (slotToUse < 0) {
+                for (int slot = 0; slot < MAX_SPRITES_PER_FRAME; ++slot) {
+                    const std::size_t slotIndex = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME +
+                        static_cast<std::size_t>(slot);
+                    if (slotIndex < m_frameSpriteAssignments.size() &&
+                        m_frameSpriteAssignments[slotIndex] == 255) {
+                        slotToUse = slot;
+                        break;
+                    }
+                }
+            }
+            if (slotToUse < 0) {
+                statusBar()->showMessage("No empty sprite slots available for this frame.", 2000);
+                return;
+            }
+            const std::vector<int> targets = targetFrameIndices();
+            for (int row : targets) {
+                const std::size_t slotIndex = static_cast<std::size_t>(row) * MAX_SPRITES_PER_FRAME +
+                    static_cast<std::size_t>(slotToUse);
+                if (slotIndex >= m_frameSpriteAssignments.size()) {
+                    continue;
+                }
+                m_frameSpriteAssignments[slotIndex] = static_cast<uint8_t>(index);
+                const std::size_t bboxIndex = static_cast<std::size_t>(row) * MAX_SPRITES_PER_FRAME * 4 +
+                    static_cast<std::size_t>(slotToUse) * 4;
+                if (bboxIndex + 3 < m_frameSpriteBBoxes.size()) {
+                    m_frameSpriteBBoxes[bboxIndex] = static_cast<uint16_t>(zone.rect.x());
+                    m_frameSpriteBBoxes[bboxIndex + 1] = static_cast<uint16_t>(zone.rect.y());
+                    m_frameSpriteBBoxes[bboxIndex + 2] = static_cast<uint16_t>(zone.rect.x() + zone.rect.width() - 1);
+                    m_frameSpriteBBoxes[bboxIndex + 3] = static_cast<uint16_t>(zone.rect.y() + zone.rect.height() - 1);
+                }
+                updateFramePreviewAt(row);
+            }
+            m_selectedSpriteSlot = slotToUse;
+            statusBar()->showMessage(QString("Assigned sprite %1 to zone %2")
+                                         .arg(index)
+                                         .arg(m_selectedSpriteZoneIndex + 1),
+                                     2000);
+            refreshSpriteZoneList();
+            refreshFrameSpriteSlotCombo();
+        }
         updateMaskPreviewForFrame(m_framesList->currentRow());
     });
     connect(m_spritesCanvas->canvas(), &GLCanvasWidget::imageClicked, this, [this](int x, int y, Qt::MouseButton button, Qt::KeyboardModifiers modifiers) {
@@ -2374,6 +2697,21 @@ MainWindow::MainWindow(QWidget* parent)
         } else if (m_maskMode == MaskMode::Dynamic) {
             setMaskMode(MaskMode::None);
         }
+    });
+    connect(m_spritesCanvas, &CanvasWidget::maskToggled, this, [this](bool enabled) {
+        setSpriteDetAreaMode(enabled);
+    });
+    connect(m_framesCanvas, &CanvasWidget::zoneToggled, this, [this](bool enabled) {
+        setSpriteZoneMode(enabled);
+    });
+    connect(m_spritesCanvas, &CanvasWidget::dynamicToggled, this, [this](bool enabled) {
+        m_spriteDynamicMaskMode = enabled;
+        if (enabled && m_spriteDetAreaMode) {
+            m_spriteDetAreaMode = false;
+            m_spritesCanvas->setMaskButtonsChecked(false, true);
+        }
+        m_spritesCanvas->canvas()->clearPreviewImage();
+        updateSpriteCanvasImage(m_spritesList ? m_spritesList->currentRow() : -1);
     });
     connect(m_framesCanvas, &CanvasWidget::backgroundMaskToggled, this, [this](bool enabled) {
         m_backgroundMaskMode = enabled;
@@ -2693,6 +3031,24 @@ void MainWindow::openProjectFile(const QString& filename)
             m_backgroundStore->clear();
             m_frameDurations.clear();
             m_spriteNames.clear();
+            m_spriteColored.clear();
+            m_spriteColoredX.clear();
+            m_spriteOriginals.clear();
+            m_spriteMasksX.clear();
+            m_spriteDynamicMasks.clear();
+            m_spriteDynamicMasksX.clear();
+            m_spriteDynamicColors.clear();
+            m_spriteDynamicColorsX.clear();
+            m_spriteExtraFlags.clear();
+            m_spriteShapeModes.clear();
+            m_spriteDetAreas.clear();
+            m_spriteDetDwords.clear();
+            m_spriteDetDwordPos.clear();
+            m_frameSpriteAssignments.clear();
+            m_frameSpriteBBoxes.clear();
+            m_spriteColFromFrame.clear();
+            m_spriteRects.clear();
+            m_spriteRectMirror.clear();
             m_sectionStarts.clear();
             m_sectionNames.clear();
             m_frameRefs.clear();
@@ -2759,6 +3115,24 @@ void MainWindow::openProjectFile(const QString& filename)
         m_backgroundStore->clear();
         m_frameDurations.clear();
         m_spriteNames.clear();
+        m_spriteColored.clear();
+        m_spriteColoredX.clear();
+        m_spriteOriginals.clear();
+        m_spriteMasksX.clear();
+        m_spriteDynamicMasks.clear();
+        m_spriteDynamicMasksX.clear();
+        m_spriteDynamicColors.clear();
+        m_spriteDynamicColorsX.clear();
+        m_spriteExtraFlags.clear();
+        m_spriteShapeModes.clear();
+        m_spriteDetAreas.clear();
+        m_spriteDetDwords.clear();
+        m_spriteDetDwordPos.clear();
+        m_frameSpriteAssignments.clear();
+        m_frameSpriteBBoxes.clear();
+        m_spriteColFromFrame.clear();
+        m_spriteRects.clear();
+        m_spriteRectMirror.clear();
         m_sectionStarts.clear();
         m_sectionNames.clear();
         m_frameRefs.clear();
@@ -2787,6 +3161,24 @@ void MainWindow::openProjectFile(const QString& filename)
         }
         m_frameDurations = legacy.frame_durations;
         m_spriteNames = legacy.sprite_labels;
+        m_spriteColored = legacy.sprite_colored;
+        m_spriteColoredX = legacy.sprite_colored_x;
+        m_spriteOriginals = legacy.sprite_originals;
+        m_spriteMasksX = legacy.sprite_masks_x;
+        m_spriteDynamicMasks = legacy.sprite_dynamic_masks;
+        m_spriteDynamicMasksX = legacy.sprite_dynamic_masks_x;
+        m_spriteDynamicColors = legacy.sprite_dynamic_colors;
+        m_spriteDynamicColorsX = legacy.sprite_dynamic_colors_x;
+        m_spriteExtraFlags = legacy.sprite_extra_flags;
+        m_spriteShapeModes = legacy.sprite_shape_modes;
+        m_spriteDetAreas = legacy.sprite_det_areas;
+        m_spriteDetDwords = legacy.sprite_det_dwords;
+        m_spriteDetDwordPos = legacy.sprite_det_dword_pos;
+        m_frameSpriteAssignments = legacy.frame_sprites;
+        m_frameSpriteBBoxes = legacy.frame_sprite_bboxes;
+        m_spriteColFromFrame = legacy.sprite_col_from_frame;
+        m_spriteRects = legacy.sprite_rects;
+        m_spriteRectMirror = legacy.sprite_rect_mirror;
         m_sectionStarts = legacy.section_firsts;
         m_sectionNames = legacy.section_names;
         m_frameRefs = legacy.frame_refs;
@@ -2968,6 +3360,28 @@ LegacyProject MainWindow::buildLegacyProject(const QString& baseName) const
             project.sprites.push_back(sprite->clone());
         }
     }
+    if (!m_spriteColored.empty()) {
+        project.sprite_colored = m_spriteColored;
+    } else {
+        project.sprite_colored = project.sprites;
+    }
+    project.sprite_colored_x = m_spriteColoredX;
+    project.sprite_originals = m_spriteOriginals;
+    project.sprite_masks_x = m_spriteMasksX;
+    project.sprite_dynamic_masks = m_spriteDynamicMasks;
+    project.sprite_dynamic_masks_x = m_spriteDynamicMasksX;
+    project.sprite_dynamic_colors = m_spriteDynamicColors;
+    project.sprite_dynamic_colors_x = m_spriteDynamicColorsX;
+    project.sprite_extra_flags = m_spriteExtraFlags;
+    project.sprite_shape_modes = m_spriteShapeModes;
+    project.sprite_det_areas = m_spriteDetAreas;
+    project.sprite_det_dwords = m_spriteDetDwords;
+    project.sprite_det_dword_pos = m_spriteDetDwordPos;
+    project.frame_sprites = m_frameSpriteAssignments;
+    project.frame_sprite_bboxes = m_frameSpriteBBoxes;
+    project.sprite_col_from_frame = m_spriteColFromFrame;
+    project.sprite_rects = m_spriteRects;
+    project.sprite_rect_mirror = m_spriteRectMirror;
 
     project.frame_durations.assign(static_cast<std::size_t>(frameCount), 30);
     for (int i = 0; i < frameCount && i < static_cast<int>(m_frameDurations.size()); ++i) {
@@ -3218,7 +3632,9 @@ void MainWindow::updatePreviewFilterState()
             break;
         case PreviewFilterKind::Sprite:
             label = "Filter: Sprite";
-            statusBar()->showMessage("Sprite assignments are not available yet.", 2500);
+            if (!m_spritesList || m_spritesList->currentRow() < 0) {
+                statusBar()->showMessage("Select a sprite to filter frames.", 2000);
+            }
             break;
         case PreviewFilterKind::None:
             break;
@@ -3328,11 +3744,31 @@ std::vector<int> MainWindow::buildPreviewFrameIndices() const
             }
             break;
         }
-        case PreviewFilterKind::Sprite:
+        case PreviewFilterKind::Sprite: {
+            const int selected = m_spritesList ? m_spritesList->currentRow() : -1;
+            if (selected < 0 || m_frameSpriteAssignments.empty()) {
+                break;
+            }
+            const int frameSlots = std::max(1, MAX_SPRITES_PER_FRAME);
             for (int i = 0; i < count; ++i) {
-                indices.push_back(i);
+                const std::size_t base = static_cast<std::size_t>(i) * frameSlots;
+                bool usesSprite = false;
+                for (int slot = 0; slot < frameSlots; ++slot) {
+                    const std::size_t idx = base + static_cast<std::size_t>(slot);
+                    if (idx >= m_frameSpriteAssignments.size()) {
+                        break;
+                    }
+                    if (m_frameSpriteAssignments[idx] == static_cast<uint8_t>(selected)) {
+                        usesSprite = true;
+                        break;
+                    }
+                }
+                if (usesSprite) {
+                    indices.push_back(i);
+                }
             }
             break;
+        }
         case PreviewFilterKind::None:
             break;
     }
@@ -3420,10 +3856,12 @@ void MainWindow::refreshFramePreviews()
         }
         cv::Mat base = applyDynamicColors(i, *image, false);
         cv::Mat composed = applyBackgroundComposite(i, base, false);
+        composed = applySpritesToFrame(i, composed, false, false);
         cv::Mat hdComposed;
         if (!hdFrame.empty()) {
             cv::Mat hdBase = applyDynamicColors(i, hdFrame, true);
             hdComposed = applyBackgroundComposite(i, hdBase, true);
+            hdComposed = applySpritesToFrame(i, hdComposed, true, false);
         }
         cv::Mat previewMat = buildPreviewFrame(i, composed, reference, hdComposed);
         cv::Mat rgb;
@@ -3479,10 +3917,12 @@ void MainWindow::updateFramePreviewAt(int index)
     }
     cv::Mat base = applyDynamicColors(index, *image, false);
     cv::Mat composed = applyBackgroundComposite(index, base, false);
+    composed = applySpritesToFrame(index, composed, false, false);
     cv::Mat hdComposed;
     if (!hdFrame.empty()) {
         cv::Mat hdBase = applyDynamicColors(index, hdFrame, true);
         hdComposed = applyBackgroundComposite(index, hdBase, true);
+        hdComposed = applySpritesToFrame(index, hdComposed, true, false);
     }
     cv::Mat previewMat = buildPreviewFrame(index, composed, reference, hdComposed);
     cv::Mat rgb;
@@ -3616,6 +4056,159 @@ cv::Mat MainWindow::buildOriginalPreviewForIndex(int index) const
     return cv::Mat();
 }
 
+cv::Mat MainWindow::buildSpriteCoverageMask(int index, bool useHd) const
+{
+    if (index < 0 || !m_spriteStore) {
+        return cv::Mat();
+    }
+    const cv::Mat* frame = nullptr;
+    if (useHd && index >= 0 && index < static_cast<int>(m_frameExtraFrames.size()) &&
+        !m_frameExtraFrames[static_cast<std::size_t>(index)].empty()) {
+        frame = &m_frameExtraFrames[static_cast<std::size_t>(index)];
+    } else if (m_frameStore) {
+        frame = m_frameStore->at(index);
+    }
+    if (!frame || frame->empty()) {
+        return cv::Mat();
+    }
+    if (m_frameSpriteAssignments.empty() || m_spriteRects.empty()) {
+        return cv::Mat();
+    }
+    cv::Mat mask(frame->rows, frame->cols, CV_8UC1, cv::Scalar(0));
+    bool hasContent = false;
+    const std::size_t baseSlot = static_cast<std::size_t>(index) * MAX_SPRITES_PER_FRAME;
+    if (baseSlot >= m_frameSpriteAssignments.size()) {
+        return cv::Mat();
+    }
+    const int frameWidth = frame->cols;
+    const int frameHeight = frame->rows;
+    for (int slot = 0; slot < MAX_SPRITES_PER_FRAME; ++slot) {
+        const std::size_t slotIndex = baseSlot + static_cast<std::size_t>(slot);
+        if (slotIndex >= m_frameSpriteAssignments.size()) {
+            break;
+        }
+        const uint8_t spriteId = m_frameSpriteAssignments[slotIndex];
+        if (spriteId == 255) {
+            continue;
+        }
+        const int spriteIndex = static_cast<int>(spriteId);
+        const cv::Mat* shape = nullptr;
+        bool treatZeroAsEmpty = false;
+        if (useHd && spriteIndex >= 0 &&
+            spriteIndex < static_cast<int>(m_spriteMasksX.size()) &&
+            !m_spriteMasksX[static_cast<std::size_t>(spriteIndex)].empty()) {
+            shape = &m_spriteMasksX[static_cast<std::size_t>(spriteIndex)];
+        } else if (spriteIndex >= 0 &&
+                   spriteIndex < static_cast<int>(m_spriteOriginals.size()) &&
+                   !m_spriteOriginals[static_cast<std::size_t>(spriteIndex)].empty()) {
+            shape = &m_spriteOriginals[static_cast<std::size_t>(spriteIndex)];
+            treatZeroAsEmpty = true;
+        }
+        if (!shape || shape->empty()) {
+            continue;
+        }
+        const std::size_t rectBase = static_cast<std::size_t>(spriteIndex) * 4;
+        if (rectBase + 3 >= m_spriteRects.size()) {
+            continue;
+        }
+        const uint16_t rawLeft = m_spriteRects[rectBase];
+        if (rawLeft == 0xffff) {
+            continue;
+        }
+        const bool rectExtra = (rawLeft & 0x8000) != 0;
+        int left = static_cast<int>(rawLeft & 0x7fff);
+        int top = static_cast<int>(m_spriteRects[rectBase + 1]);
+        int right = static_cast<int>(m_spriteRects[rectBase + 2]);
+        int bottom = static_cast<int>(m_spriteRects[rectBase + 3]);
+        if (useHd && !rectExtra) {
+            left *= 2;
+            top *= 2;
+            right = right * 2 + 1;
+            bottom = bottom * 2 + 1;
+        } else if (!useHd && rectExtra) {
+            left /= 2;
+            top /= 2;
+            right /= 2;
+            bottom /= 2;
+        }
+        if (right < left || bottom < top) {
+            continue;
+        }
+        const int rectWidth = right - left + 1;
+        const int rectHeight = bottom - top + 1;
+        bool mirrorX = false;
+        bool mirrorY = false;
+        const std::size_t mirrorBase = static_cast<std::size_t>(spriteIndex) * 2;
+        if (mirrorBase + 1 < m_spriteRectMirror.size()) {
+            mirrorX = m_spriteRectMirror[mirrorBase] != 0;
+            mirrorY = m_spriteRectMirror[mirrorBase + 1] != 0;
+        }
+        for (int y = 0; y < rectHeight; ++y) {
+            const int frameY = top + y;
+            if (frameY < 0 || frameY >= frameHeight) {
+                continue;
+            }
+            const int spriteY = mirrorY ? (rectHeight - 1 - y) : y;
+            if (spriteY < 0 || spriteY >= shape->rows) {
+                continue;
+            }
+            const uint8_t* shapeRow = shape->ptr<uint8_t>(spriteY);
+            uint8_t* maskRow = mask.ptr<uint8_t>(frameY);
+            for (int x = 0; x < rectWidth; ++x) {
+                const int frameX = left + x;
+                if (frameX < 0 || frameX >= frameWidth) {
+                    continue;
+                }
+                const int spriteX = mirrorX ? (rectWidth - 1 - x) : x;
+                if (spriteX < 0 || spriteX >= shape->cols) {
+                    continue;
+                }
+                const uint8_t value = shapeRow[spriteX];
+                if (value == 255 || (treatZeroAsEmpty && value == 0)) {
+                    continue;
+                }
+                maskRow[frameX] = 1;
+                hasContent = true;
+            }
+        }
+    }
+    if (!hasContent) {
+        return cv::Mat();
+    }
+    return mask;
+}
+
+void MainWindow::restoreSpriteCoverage(cv::Mat& target,
+                                       const cv::Mat& backup,
+                                       const cv::Mat& spriteMask) const
+{
+    if (target.empty() || backup.empty() || spriteMask.empty()) {
+        return;
+    }
+    const int rows = std::min(target.rows, spriteMask.rows);
+    const int cols = std::min(target.cols, spriteMask.cols);
+    for (int y = 0; y < rows; ++y) {
+        const uint8_t* mrow = spriteMask.ptr<uint8_t>(y);
+        if (target.type() == CV_8UC3) {
+            cv::Vec3b* row = target.ptr<cv::Vec3b>(y);
+            const cv::Vec3b* brow = backup.ptr<cv::Vec3b>(y);
+            for (int x = 0; x < cols; ++x) {
+                if (mrow[x]) {
+                    row[x] = brow[x];
+                }
+            }
+        } else if (target.type() == CV_8UC4) {
+            cv::Vec4b* row = target.ptr<cv::Vec4b>(y);
+            const cv::Vec4b* brow = backup.ptr<cv::Vec4b>(y);
+            for (int x = 0; x < cols; ++x) {
+                if (mrow[x]) {
+                    row[x] = brow[x];
+                }
+            }
+        }
+    }
+}
+
 cv::Mat MainWindow::buildReferenceForSize(int index, const cv::Size& target) const
 {
     cv::Mat ref = buildOriginalPreviewForIndex(index);
@@ -3691,6 +4284,232 @@ cv::Mat MainWindow::applyDynamicColors(int index, const cv::Mat& frame, bool use
         }
     }
     return output;
+}
+
+cv::Mat MainWindow::applySpritesToFrame(int index,
+                                        const cv::Mat& frame,
+                                        bool useHd,
+                                        bool drawOutline) const
+{
+    (void)drawOutline;
+    cv::Mat output = EnsureBgr(frame);
+    if (output.empty() || index < 0 || !m_spriteStore) {
+        return output;
+    }
+    if (m_frameSpriteAssignments.empty() || m_spriteRects.empty()) {
+        return output;
+    }
+    const std::size_t baseSlot = static_cast<std::size_t>(index) * MAX_SPRITES_PER_FRAME;
+    if (baseSlot >= m_frameSpriteAssignments.size()) {
+        return output;
+    }
+    const int frameWidth = output.cols;
+    const int frameHeight = output.rows;
+    for (int slot = 0; slot < MAX_SPRITES_PER_FRAME; ++slot) {
+        const std::size_t slotIndex = baseSlot + static_cast<std::size_t>(slot);
+        if (slotIndex >= m_frameSpriteAssignments.size()) {
+            break;
+        }
+        const uint8_t spriteId = m_frameSpriteAssignments[slotIndex];
+        if (spriteId == 255) {
+            continue;
+        }
+        const int spriteIndex = static_cast<int>(spriteId);
+        const cv::Mat* spriteImage = nullptr;
+        if (useHd && spriteIndex >= 0 &&
+            spriteIndex < static_cast<int>(m_spriteColoredX.size()) &&
+            !m_spriteColoredX[static_cast<std::size_t>(spriteIndex)].empty()) {
+            spriteImage = &m_spriteColoredX[static_cast<std::size_t>(spriteIndex)];
+        } else if (spriteIndex >= 0 && spriteIndex < m_spriteStore->count()) {
+            spriteImage = m_spriteStore->at(spriteIndex);
+        }
+        if (!spriteImage || spriteImage->empty()) {
+            continue;
+        }
+        cv::Mat spriteDisplay = useHd
+            ? EnsureBgr(*spriteImage)
+            : applySpriteDynamicColors(spriteIndex, *spriteImage);
+
+        const cv::Mat* spriteMask = nullptr;
+        if (useHd && spriteIndex >= 0 &&
+            spriteIndex < static_cast<int>(m_spriteMasksX.size()) &&
+            !m_spriteMasksX[static_cast<std::size_t>(spriteIndex)].empty()) {
+            spriteMask = &m_spriteMasksX[static_cast<std::size_t>(spriteIndex)];
+        } else if (spriteIndex >= 0 &&
+                   spriteIndex < static_cast<int>(m_spriteOriginals.size()) &&
+                   !m_spriteOriginals[static_cast<std::size_t>(spriteIndex)].empty()) {
+            spriteMask = &m_spriteOriginals[static_cast<std::size_t>(spriteIndex)];
+        }
+        if (!spriteMask || spriteMask->empty()) {
+            continue;
+        }
+        const std::size_t rectBase = static_cast<std::size_t>(spriteIndex) * 4;
+        if (rectBase + 3 >= m_spriteRects.size()) {
+            continue;
+        }
+        const uint16_t rawLeft = m_spriteRects[rectBase];
+        if (rawLeft == 0xffff) {
+            continue;
+        }
+        const bool rectExtra = (rawLeft & 0x8000) != 0;
+        int left = static_cast<int>(rawLeft & 0x7fff);
+        int top = static_cast<int>(m_spriteRects[rectBase + 1]);
+        int right = static_cast<int>(m_spriteRects[rectBase + 2]);
+        int bottom = static_cast<int>(m_spriteRects[rectBase + 3]);
+        if (useHd && !rectExtra) {
+            left *= 2;
+            top *= 2;
+            right = right * 2 + 1;
+            bottom = bottom * 2 + 1;
+        } else if (!useHd && rectExtra) {
+            left /= 2;
+            top /= 2;
+            right /= 2;
+            bottom /= 2;
+        }
+        if (right < left || bottom < top) {
+            continue;
+        }
+        const int rectWidth = right - left + 1;
+        const int rectHeight = bottom - top + 1;
+        bool mirrorX = false;
+        bool mirrorY = false;
+        const std::size_t mirrorBase = static_cast<std::size_t>(spriteIndex) * 2;
+        if (mirrorBase + 1 < m_spriteRectMirror.size()) {
+            mirrorX = m_spriteRectMirror[mirrorBase] != 0;
+            mirrorY = m_spriteRectMirror[mirrorBase + 1] != 0;
+        }
+        for (int y = 0; y < rectHeight; ++y) {
+            const int frameY = top + y;
+            if (frameY < 0 || frameY >= frameHeight) {
+                continue;
+            }
+            const int spriteY = mirrorY ? (rectHeight - 1 - y) : y;
+            if (spriteY < 0 || spriteY >= spriteMask->rows || spriteY >= spriteDisplay.rows) {
+                continue;
+            }
+            const uint8_t* maskRow = spriteMask->ptr<uint8_t>(spriteY);
+            const cv::Vec3b* spriteRow = spriteDisplay.ptr<cv::Vec3b>(spriteY);
+            cv::Vec3b* outRow = output.ptr<cv::Vec3b>(frameY);
+            for (int x = 0; x < rectWidth; ++x) {
+                const int frameX = left + x;
+                if (frameX < 0 || frameX >= frameWidth) {
+                    continue;
+                }
+                const int spriteX = mirrorX ? (rectWidth - 1 - x) : x;
+                if (spriteX < 0 || spriteX >= spriteMask->cols || spriteX >= spriteDisplay.cols) {
+                    continue;
+                }
+                if (maskRow[spriteX] == 255) {
+                    continue;
+                }
+                outRow[frameX] = spriteRow[spriteX];
+            }
+        }
+    }
+    return output;
+}
+
+cv::Mat MainWindow::applySpriteDynamicColors(int index, const cv::Mat& sprite) const
+{
+    cv::Mat output = EnsureBgr(sprite);
+    if (output.empty() ||
+        index < 0 ||
+        index >= static_cast<int>(m_spriteDynamicColors.size()) ||
+        index >= static_cast<int>(m_spriteDynamicMasks.size()) ||
+        index >= static_cast<int>(m_spriteOriginals.size())) {
+        return output;
+    }
+    const std::vector<uint16_t>& colors = m_spriteDynamicColors[static_cast<std::size_t>(index)];
+    const int stride = dynamicColorsPerSet(colors);
+    if (stride <= 0) {
+        return output;
+    }
+    const cv::Mat& map = m_spriteDynamicMasks[static_cast<std::size_t>(index)];
+    const cv::Mat& original = m_spriteOriginals[static_cast<std::size_t>(index)];
+    if (map.empty() || original.empty()) {
+        return output;
+    }
+    cv::Mat mapScaled;
+    if (map.size() != output.size()) {
+        cv::resize(map, mapScaled, output.size(), 0.0, 0.0, cv::INTER_NEAREST);
+    } else {
+        mapScaled = map;
+    }
+    cv::Mat originalScaled;
+    if (original.size() != output.size()) {
+        cv::resize(original, originalScaled, output.size(), 0.0, 0.0, cv::INTER_NEAREST);
+    } else {
+        originalScaled = original;
+    }
+    int levels = m_noColors > 0 ? static_cast<int>(m_noColors) : 64;
+    levels = std::max(1, levels);
+    const int maxLevel = std::max(1, levels - 1);
+    for (int y = 0; y < output.rows; ++y) {
+        cv::Vec3b* row = output.ptr<cv::Vec3b>(y);
+        const uint8_t* mrow = mapScaled.ptr<uint8_t>(y);
+        const uint8_t* orow = originalScaled.ptr<uint8_t>(y);
+        for (int x = 0; x < output.cols; ++x) {
+            const uint8_t originalValue = orow[x];
+            if (originalValue == 255) {
+                continue;
+            }
+            const int setId = static_cast<int>(mrow[x]);
+            if (setId < 0 || setId >= MAX_DYNA_SETS_PER_SPRITE || setId == 255) {
+                continue;
+            }
+            int slot = static_cast<int>(originalValue);
+            if (levels > stride) {
+                slot = (slot * (stride - 1) + maxLevel / 2) / maxLevel;
+            }
+            slot = std::clamp(slot, 0, stride - 1);
+            const std::size_t offset = static_cast<std::size_t>(setId) * stride +
+                static_cast<std::size_t>(slot);
+            if (offset < colors.size()) {
+                row[x] = Rgb565ToBgr(colors[offset]);
+            }
+        }
+    }
+    return output;
+}
+
+QRect MainWindow::spriteContentRect(int index) const
+{
+    if (index < 0) {
+        return QRect();
+    }
+    const cv::Mat* sprite = (m_spriteStore && index >= 0) ? m_spriteStore->at(index) : nullptr;
+    int width = sprite ? sprite->cols : MAX_SPRITE_WIDTH;
+    int height = sprite ? sprite->rows : MAX_SPRITE_HEIGHT;
+    if (index >= 0 && index < static_cast<int>(m_spriteOriginals.size())) {
+        const cv::Mat& original = m_spriteOriginals[static_cast<std::size_t>(index)];
+        if (!original.empty()) {
+            width = original.cols;
+            height = original.rows;
+            int minx = width;
+            int miny = height;
+            int maxx = -1;
+            int maxy = -1;
+            for (int y = 0; y < original.rows; ++y) {
+                const uint8_t* row = original.ptr<uint8_t>(y);
+                for (int x = 0; x < original.cols; ++x) {
+                    if (row[x] != 255) {
+                        minx = std::min(minx, x);
+                        miny = std::min(miny, y);
+                        maxx = std::max(maxx, x);
+                        maxy = std::max(maxy, y);
+                    }
+                }
+            }
+            if (maxx >= minx && maxy >= miny) {
+                return QRect(minx, miny, maxx - minx + 1, maxy - miny + 1);
+            }
+        }
+    }
+    if (width <= 0 || height <= 0) {
+        return QRect();
+    }
+    return QRect(0, 0, width, height);
 }
 
 cv::Mat MainWindow::applyBackgroundComposite(int index, const cv::Mat& frame, bool useHd) const
@@ -3831,23 +4650,32 @@ void MainWindow::updateFrameCanvasImage(int index)
     }
     if (index < 0) {
         m_framesCanvas->setImage(cv::Mat());
+        m_framesCanvas->canvas()->clearTertiaryOutline();
         return;
     }
     const cv::Mat* image = activeFrameImage(index, false);
     if (!image || image->empty()) {
         m_framesCanvas->setImage(cv::Mat());
+        m_framesCanvas->canvas()->clearTertiaryOutline();
         return;
     }
     cv::Mat base = applyDynamicColors(index, *image, m_useHdFrame);
     cv::Mat composed = m_showBackgroundLayer
         ? applyBackgroundComposite(index, base, m_useHdFrame)
         : base;
+    composed = applySpritesToFrame(index, composed, m_useHdFrame, true);
     cv::Mat reference = buildOriginalPreviewForIndex(index);
     cv::Mat original = buildOriginalFrame(reference);
     if (original.empty() || !m_showOriginalFrame) {
         m_framesCanvas->setImage(composed);
         m_framesCanvas->canvas()->setGridSegments(0, 0, 0);
         m_framesCanvas->canvas()->setGridScales(1, 1);
+        const cv::Mat spriteOutline = buildSpriteCoverageMask(index, m_useHdFrame);
+        if (!spriteOutline.empty()) {
+            m_framesCanvas->canvas()->setTertiaryMaskOutline(spriteOutline, QColor(255, 220, 0));
+        } else {
+            m_framesCanvas->canvas()->clearTertiaryOutline();
+        }
         return;
     }
     cv::Mat displayOriginal = BuildDisplayOriginal(original, composed.size());
@@ -3861,6 +4689,91 @@ void MainWindow::updateFrameCanvasImage(int index)
     }
     m_framesCanvas->canvas()->setGridSegments(composed.rows, kFrameGapPixels, displayOriginal.rows);
     m_framesCanvas->canvas()->setGridScales(1, bottomScale);
+    FrameLayout layout = BuildFrameLayout(composed, displayOriginal);
+    const QRect topRegion(layout.topX, 0, layout.topWidth, layout.topHeight);
+    const cv::Mat spriteOutline = buildSpriteCoverageMask(index, m_useHdFrame);
+    if (!spriteOutline.empty()) {
+        m_framesCanvas->canvas()->setTertiaryMaskOutline(spriteOutline, QColor(255, 220, 0), topRegion);
+    } else {
+        m_framesCanvas->canvas()->clearTertiaryOutline();
+    }
+}
+
+void MainWindow::updateSpriteCanvasImage(int index)
+{
+    if (!m_spritesCanvas) {
+        return;
+    }
+    if (index < 0) {
+        m_spritesCanvas->setImage(cv::Mat());
+        return;
+    }
+    const cv::Mat* image = m_spriteStore->at(index);
+    if (!image || image->empty()) {
+        m_spritesCanvas->setImage(cv::Mat());
+        return;
+    }
+    const QRect contentRect = spriteContentRect(index);
+    cv::Rect roi(0, 0, image->cols, image->rows);
+    if (contentRect.isValid() && !contentRect.isEmpty()) {
+        roi = cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height());
+    }
+    cv::Mat baseFull = applySpriteDynamicColors(index, *image);
+    cv::Mat base = baseFull(roi).clone();
+    cv::Mat display = base;
+    if (m_spriteDynamicMaskMode) {
+        const cv::Mat* map = (index >= 0 && index < static_cast<int>(m_spriteDynamicMasks.size()))
+            ? &m_spriteDynamicMasks[static_cast<std::size_t>(index)]
+            : nullptr;
+        if (map && !map->empty()) {
+            cv::Mat maskFull = buildDynamicMaskFromMap(*map, m_spriteDynamicSetIndex);
+            cv::Mat mask = maskFull(roi).clone();
+            if (MaskHasContent(mask)) {
+                display = buildMaskPreview(base, mask, cv::Vec3b(0, 200, 255));
+            }
+        }
+    }
+    cv::Mat originalRef;
+    if (index >= 0 && index < static_cast<int>(m_spriteOriginals.size())) {
+        originalRef = m_spriteOriginals[static_cast<std::size_t>(index)](roi).clone();
+    }
+    cv::Mat original;
+    if (!originalRef.empty()) {
+        cv::Mat cleaned = originalRef.clone();
+        for (int y = 0; y < cleaned.rows; ++y) {
+            uint8_t* row = cleaned.ptr<uint8_t>(y);
+            for (int x = 0; x < cleaned.cols; ++x) {
+                if (row[x] == 255) {
+                    row[x] = 0;
+                }
+            }
+        }
+        original = buildOriginalFrame(cleaned);
+    }
+    if (!original.empty()) {
+        cv::Mat displayOriginal = BuildDisplayOriginal(original, display.size());
+        const QColor gap = m_spritesCanvas->palette().color(QPalette::Window);
+        cv::Mat combined = buildCombinedFrame(display,
+                                              displayOriginal,
+                                              cv::Scalar(gap.blue(), gap.green(), gap.red()));
+        m_spritesCanvas->setImage(combined);
+        int bottomScale = 1;
+        if (!displayOriginal.empty() && original.rows > 0 && original.cols > 0 &&
+            displayOriginal.rows == original.rows * 2 && displayOriginal.cols == original.cols * 2) {
+            bottomScale = 2;
+        }
+        m_spritesCanvas->canvas()->setGridSegments(display.rows, kFrameGapPixels, displayOriginal.rows);
+        m_spritesCanvas->canvas()->setGridScales(1, bottomScale);
+    } else {
+        m_spritesCanvas->setImage(display);
+        m_spritesCanvas->canvas()->setGridSegments(0, 0, 0);
+        m_spritesCanvas->canvas()->setGridScales(1, 1);
+    }
+    if (m_spriteDetAreaMode) {
+        updateSpriteDetAreaOverlay(index);
+    } else {
+        m_spritesCanvas->canvas()->clearMaskOutline();
+    }
 }
 
 void MainWindow::updateBackgroundCanvasImage(int index)
@@ -3997,6 +4910,12 @@ void MainWindow::ensureMaskDataSize()
         m_frameDynamicMaskMapsX.resize(static_cast<std::size_t>(frameCount));
     }
     m_frameShapeCompModes.resize(static_cast<std::size_t>(frameCount), 0);
+    if (m_frameSpriteAssignments.size() != static_cast<std::size_t>(frameCount) * MAX_SPRITES_PER_FRAME) {
+        m_frameSpriteAssignments.resize(static_cast<std::size_t>(frameCount) * MAX_SPRITES_PER_FRAME, 255);
+    }
+    if (m_frameSpriteBBoxes.size() != static_cast<std::size_t>(frameCount) * MAX_SPRITES_PER_FRAME * 4) {
+        m_frameSpriteBBoxes.resize(static_cast<std::size_t>(frameCount) * MAX_SPRITES_PER_FRAME * 4, 0);
+    }
 
     cv::Size hdSize;
     for (const auto& hd : m_frameExtraFrames) {
@@ -4011,6 +4930,22 @@ void MainWindow::ensureMaskDataSize()
             cv::Mat& ref = m_frameRefs[static_cast<std::size_t>(i)];
             if (ref.empty() || ref.rows != frame->rows || ref.cols != frame->cols) {
                 ref = buildReferenceFrame(*frame);
+            }
+        }
+        if (width > 0 && height > 0) {
+            for (int slot = 0; slot < MAX_SPRITES_PER_FRAME; ++slot) {
+                const std::size_t bboxIndex = static_cast<std::size_t>(i) * MAX_SPRITES_PER_FRAME * 4 +
+                    static_cast<std::size_t>(slot) * 4;
+                if (bboxIndex + 3 >= m_frameSpriteBBoxes.size()) {
+                    break;
+                }
+                if (m_frameSpriteBBoxes[bboxIndex + 2] == 0 &&
+                    m_frameSpriteBBoxes[bboxIndex + 3] == 0) {
+                    m_frameSpriteBBoxes[bboxIndex] = 0;
+                    m_frameSpriteBBoxes[bboxIndex + 1] = 0;
+                    m_frameSpriteBBoxes[bboxIndex + 2] = static_cast<uint16_t>(width - 1);
+                    m_frameSpriteBBoxes[bboxIndex + 3] = static_cast<uint16_t>(height - 1);
+                }
             }
         }
         if (width > 0 && height > 0) {
@@ -4064,6 +4999,7 @@ void MainWindow::ensureMaskDataSize()
     if (m_framesCanvas) {
         m_framesCanvas->setMaskButtonsEnabled(hasFrames);
         m_framesCanvas->setBackgroundMaskEnabled(hasFrames);
+        m_framesCanvas->setZoneButtonEnabled(hasFrames);
     }
     m_maskList->setEnabled(hasFrames);
     m_maskMoveUp->setEnabled(hasFrames);
@@ -4080,6 +5016,96 @@ void MainWindow::ensureMaskDataSize()
     refreshMaskCombos();
     refreshDynamicMaskCombos();
     ensureBackgroundDataSize();
+}
+
+void MainWindow::ensureSpriteDataSize()
+{
+    const int spriteCount = m_spriteStore ? m_spriteStore->count() : 0;
+    if (spriteCount < 0) {
+        return;
+    }
+    const cv::Size spriteSize(MAX_SPRITE_WIDTH, MAX_SPRITE_HEIGHT);
+    if (m_spriteOriginals.size() != static_cast<std::size_t>(spriteCount)) {
+        m_spriteOriginals.resize(static_cast<std::size_t>(spriteCount));
+    }
+    if (m_spriteDynamicMasks.size() != static_cast<std::size_t>(spriteCount)) {
+        m_spriteDynamicMasks.resize(static_cast<std::size_t>(spriteCount));
+    }
+    if (m_spriteDynamicColors.size() != static_cast<std::size_t>(spriteCount)) {
+        m_spriteDynamicColors.resize(static_cast<std::size_t>(spriteCount));
+    }
+    if (m_spriteColored.size() != static_cast<std::size_t>(spriteCount)) {
+        m_spriteColored.resize(static_cast<std::size_t>(spriteCount));
+    }
+    if (m_spriteColoredX.size() != static_cast<std::size_t>(spriteCount)) {
+        m_spriteColoredX.resize(static_cast<std::size_t>(spriteCount));
+    }
+    if (m_spriteMasksX.size() != static_cast<std::size_t>(spriteCount)) {
+        m_spriteMasksX.resize(static_cast<std::size_t>(spriteCount));
+    }
+    if (m_spriteDynamicMasksX.size() != static_cast<std::size_t>(spriteCount)) {
+        m_spriteDynamicMasksX.resize(static_cast<std::size_t>(spriteCount));
+    }
+    if (m_spriteDynamicColorsX.size() != static_cast<std::size_t>(spriteCount)) {
+        m_spriteDynamicColorsX.resize(static_cast<std::size_t>(spriteCount));
+    }
+    if (m_spriteExtraFlags.size() != static_cast<std::size_t>(spriteCount)) {
+        m_spriteExtraFlags.resize(static_cast<std::size_t>(spriteCount), 0);
+    }
+    if (m_spriteShapeModes.size() != static_cast<std::size_t>(spriteCount)) {
+        m_spriteShapeModes.resize(static_cast<std::size_t>(spriteCount), 0);
+    }
+    const std::size_t detSize = static_cast<std::size_t>(spriteCount) * MAX_SPRITE_DETECT_AREAS * 4;
+    if (m_spriteDetAreas.size() != detSize) {
+        m_spriteDetAreas.resize(detSize, 0xffff);
+    }
+
+    for (int i = 0; i < spriteCount; ++i) {
+        cv::Mat& original = m_spriteOriginals[static_cast<std::size_t>(i)];
+        if (original.empty() || original.size() != spriteSize) {
+            original = cv::Mat(spriteSize, CV_8UC1, cv::Scalar(0));
+        }
+        cv::Mat& map = m_spriteDynamicMasks[static_cast<std::size_t>(i)];
+        if (map.empty() || map.size() != spriteSize) {
+            map = cv::Mat(spriteSize, CV_8UC1, cv::Scalar(255));
+        }
+        std::vector<uint16_t>& colors = m_spriteDynamicColors[static_cast<std::size_t>(i)];
+        if (colors.empty()) {
+            colors.resize(MAX_DYNA_SETS_PER_SPRITE * 64, 0);
+            for (int set = 0; set < MAX_DYNA_SETS_PER_SPRITE; ++set) {
+                const cv::Vec3b base = MaskColorForIndex(set);
+                for (int c = 0; c < 64; ++c) {
+                    const double t = static_cast<double>(c) / 63.0;
+                    cv::Vec3b value(static_cast<uint8_t>(base[0] * t),
+                                    static_cast<uint8_t>(base[1] * t),
+                                    static_cast<uint8_t>(base[2] * t));
+                    colors[set * 64 + c] = BgrToRgb565(value);
+                }
+            }
+        }
+    }
+
+    const bool hasSprites = spriteCount > 0 && m_spritesList &&
+        !(spriteCount == 1 && m_spritesList->item(0)->text().startsWith("No sprites"));
+    if (m_spriteDynamicSetCombo) {
+        m_spriteDynamicSetCombo->setEnabled(hasSprites);
+        const int clamped = std::clamp(m_spriteDynamicSetIndex, 0, MAX_DYNA_SETS_PER_SPRITE - 1);
+        if (clamped != m_spriteDynamicSetIndex) {
+            m_spriteDynamicSetIndex = clamped;
+        }
+        QSignalBlocker blocker(m_spriteDynamicSetCombo);
+        m_spriteDynamicSetCombo->setCurrentIndex(m_spriteDynamicSetIndex);
+    }
+    if (m_spritesCanvas) {
+        m_spritesCanvas->setMaskButtonsEnabled(hasSprites);
+        if (!hasSprites) {
+            m_spriteDynamicMaskMode = false;
+            m_spriteDetAreaMode = false;
+            m_spritesCanvas->setMaskButtonsChecked(false, false);
+        } else {
+            m_spritesCanvas->setMaskButtonsChecked(m_spriteDetAreaMode, m_spriteDynamicMaskMode);
+        }
+    }
 }
 
 void MainWindow::ensureBackgroundDataSize()
@@ -4186,15 +5212,21 @@ void MainWindow::updateMaskPreviewForFrame(int index)
     if (index < 0 || index >= m_frameStore->count()) {
         m_framesCanvas->canvas()->clearPreviewImage();
         m_framesCanvas->canvas()->clearMaskOutline();
+        m_framesCanvas->canvas()->clearTertiaryOutline();
         return;
     }
     const cv::Mat* frame = activeFrameImage(index, false);
     if (!frame || frame->empty()) {
         m_framesCanvas->canvas()->clearMaskOutline();
+        m_framesCanvas->canvas()->clearTertiaryOutline();
         return;
     }
     ensureMaskDataSize();
     ensureBackgroundDataSize();
+    if (m_spriteZoneMode) {
+        updateSpriteZoneOverlay(index);
+        return;
+    }
     cv::Mat reference = buildOriginalPreviewForIndex(index);
     const QColor gap = m_framesCanvas->palette().color(QPalette::Window);
     const cv::Scalar gapColor(gap.blue(), gap.green(), gap.red());
@@ -4202,6 +5234,7 @@ void MainWindow::updateMaskPreviewForFrame(int index)
     if (m_showBackgroundLayer) {
         base = applyBackgroundComposite(index, base, m_useHdFrame);
     }
+    base = applySpritesToFrame(index, base, m_useHdFrame, true);
     cv::Mat topPreview = base;
     bool hasTopMask = false;
     bool hasBottomMask = false;
@@ -4239,6 +5272,12 @@ void MainWindow::updateMaskPreviewForFrame(int index)
         m_framesCanvas->canvas()->clearPreviewImage();
         m_framesCanvas->canvas()->clearMaskOutline();
         m_framesCanvas->canvas()->setSecondaryMaskOutline(cv::Mat(), QColor());
+        const cv::Mat spriteOutline = buildSpriteCoverageMask(index, m_useHdFrame);
+        if (!spriteOutline.empty()) {
+            m_framesCanvas->canvas()->setTertiaryMaskOutline(spriteOutline, QColor(255, 220, 0));
+        } else {
+            m_framesCanvas->canvas()->clearTertiaryOutline();
+        }
         return;
     }
 
@@ -4324,6 +5363,221 @@ void MainWindow::updateMaskPreviewForFrame(int index)
     if (!hasBottomMask && !(hasTopMask && m_backgroundMaskMode)) {
         m_framesCanvas->canvas()->clearMaskOutline();
     }
+    const cv::Mat spriteOutline = buildSpriteCoverageMask(index, m_useHdFrame);
+    if (!spriteOutline.empty()) {
+        QRect topRegion;
+        if (m_showOriginalFrame) {
+            cv::Mat baseOriginal = bottomPreview.empty() ? buildOriginalFrame(reference) : bottomPreview;
+            cv::Mat displayOriginal = BuildDisplayOriginal(baseOriginal, topPreview.size());
+            FrameLayout layout = BuildFrameLayout(topPreview, displayOriginal);
+            topRegion = QRect(layout.topX, 0, layout.topWidth, layout.topHeight);
+        }
+        m_framesCanvas->canvas()->setTertiaryMaskOutline(spriteOutline, QColor(255, 220, 0), topRegion);
+    } else {
+        m_framesCanvas->canvas()->clearTertiaryOutline();
+    }
+}
+
+void MainWindow::updateSpriteZoneOverlay(int index)
+{
+    if (!m_framesCanvas || index < 0) {
+        return;
+    }
+    const cv::Mat* frame = activeFrameImage(index, false);
+    if (!frame || frame->empty()) {
+        m_framesCanvas->canvas()->clearMaskOutline();
+        return;
+    }
+    cv::Mat reference = buildOriginalPreviewForIndex(index);
+    cv::Mat original = buildOriginalFrame(reference);
+    const bool useOriginal = m_showOriginalFrame && !original.empty();
+    cv::Size baseSize = useOriginal ? original.size() : frame->size();
+    if (baseSize.width <= 0 || baseSize.height <= 0) {
+        return;
+    }
+    std::vector<SpriteZoneGroup> zones = buildSpriteZonesForFrame(index);
+    cv::Mat allMask(baseSize, CV_8UC1, cv::Scalar(0));
+    cv::Mat selectedMask(baseSize, CV_8UC1, cv::Scalar(0));
+    for (std::size_t i = 0; i < zones.size(); ++i) {
+        const SpriteZoneGroup& zone = zones[i];
+        cv::Rect rect(zone.rect.x(), zone.rect.y(), zone.rect.width(), zone.rect.height());
+        rect &= cv::Rect(0, 0, baseSize.width, baseSize.height);
+        if (rect.width <= 0 || rect.height <= 0) {
+            continue;
+        }
+        cv::rectangle(allMask, rect, cv::Scalar(1), 1);
+    }
+    bool hasSelected = false;
+    if (m_selectedSpriteSlot >= 0 && m_selectedSpriteSlot < MAX_SPRITES_PER_FRAME) {
+        const std::size_t bboxIndex = static_cast<std::size_t>(index) * MAX_SPRITES_PER_FRAME * 4 +
+            static_cast<std::size_t>(m_selectedSpriteSlot) * 4;
+        if (bboxIndex + 3 < m_frameSpriteBBoxes.size()) {
+            int minx = static_cast<int>(m_frameSpriteBBoxes[bboxIndex]);
+            int miny = static_cast<int>(m_frameSpriteBBoxes[bboxIndex + 1]);
+            int maxx = static_cast<int>(m_frameSpriteBBoxes[bboxIndex + 2]);
+            int maxy = static_cast<int>(m_frameSpriteBBoxes[bboxIndex + 3]);
+            if (maxx >= minx && maxy >= miny) {
+                minx = std::clamp(minx, 0, baseSize.width - 1);
+                miny = std::clamp(miny, 0, baseSize.height - 1);
+                maxx = std::clamp(maxx, minx, baseSize.width - 1);
+                maxy = std::clamp(maxy, miny, baseSize.height - 1);
+                cv::Rect rect(minx, miny, maxx - minx + 1, maxy - miny + 1);
+                cv::rectangle(selectedMask, rect, cv::Scalar(1), 1);
+                hasSelected = true;
+            }
+        }
+    } else if (m_selectedSpriteZoneIndex >= 0 && m_selectedSpriteZoneIndex < static_cast<int>(zones.size())) {
+        const SpriteZoneGroup& zone = zones[static_cast<std::size_t>(m_selectedSpriteZoneIndex)];
+        cv::Rect rect(zone.rect.x(), zone.rect.y(), zone.rect.width(), zone.rect.height());
+        rect &= cv::Rect(0, 0, baseSize.width, baseSize.height);
+        if (rect.width > 0 && rect.height > 0) {
+            cv::rectangle(selectedMask, rect, cv::Scalar(1), 1);
+            hasSelected = true;
+        }
+    }
+    cv::Mat otherMask = allMask.clone();
+    if (hasSelected) {
+        for (int y = 0; y < otherMask.rows; ++y) {
+            uint8_t* row = otherMask.ptr<uint8_t>(y);
+            const uint8_t* srow = selectedMask.ptr<uint8_t>(y);
+            for (int x = 0; x < otherMask.cols; ++x) {
+                if (srow[x]) {
+                    row[x] = 0;
+                }
+            }
+        }
+    }
+    QRect region;
+    if (useOriginal) {
+        cv::Mat displayOriginal = BuildDisplayOriginal(original, frame->size());
+        FrameLayout layout = BuildFrameLayout(*frame, displayOriginal);
+        region = QRect(layout.bottomX,
+                       layout.topHeight + kFrameGapPixels,
+                       layout.bottomWidth,
+                       layout.bottomHeight);
+    } else {
+        FrameLayout layout = BuildFrameLayout(*frame, reference);
+        region = QRect(layout.topX, 0, layout.topWidth, layout.topHeight);
+    }
+    if (hasSelected) {
+        if (MaskHasContent(selectedMask)) {
+            m_framesCanvas->canvas()->setMaskOutline(selectedMask, QColor(255, 200, 0), region);
+        } else {
+            m_framesCanvas->canvas()->clearPrimaryOutline();
+        }
+        if (MaskHasContent(otherMask)) {
+            m_framesCanvas->canvas()->setSecondaryMaskOutline(otherMask, QColor(0, 200, 255), region);
+        } else {
+            m_framesCanvas->canvas()->setSecondaryMaskOutline(cv::Mat(), QColor());
+        }
+    } else if (MaskHasContent(allMask)) {
+        m_framesCanvas->canvas()->setMaskOutline(allMask, QColor(255, 200, 0), region);
+        m_framesCanvas->canvas()->setSecondaryMaskOutline(cv::Mat(), QColor());
+    } else {
+        m_framesCanvas->canvas()->clearMaskOutline();
+    }
+}
+
+void MainWindow::updateSpriteDetAreaOverlay(int index)
+{
+    if (!m_spritesCanvas) {
+        return;
+    }
+    if (index < 0 || index >= static_cast<int>(m_spriteDetAreas.size() / (MAX_SPRITE_DETECT_AREAS * 4))) {
+        m_spritesCanvas->canvas()->clearMaskOutline();
+        return;
+    }
+    const cv::Mat* sprite = (m_spriteStore && index >= 0) ? m_spriteStore->at(index) : nullptr;
+    if (!sprite || sprite->empty()) {
+        m_spritesCanvas->canvas()->clearMaskOutline();
+        return;
+    }
+    const QRect contentRect = spriteContentRect(index);
+    const int offsetX = contentRect.isValid() ? contentRect.x() : 0;
+    const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
+    const int baseWidth = contentRect.isValid() ? contentRect.width() : sprite->cols;
+    const int baseHeight = contentRect.isValid() ? contentRect.height() : sprite->rows;
+    cv::Mat originalRef;
+    if (index >= 0 && index < static_cast<int>(m_spriteOriginals.size())) {
+        originalRef = m_spriteOriginals[static_cast<std::size_t>(index)](
+            cv::Rect(offsetX, offsetY, baseWidth, baseHeight));
+    }
+    if (originalRef.empty()) {
+        m_spritesCanvas->canvas()->clearMaskOutline();
+        return;
+    }
+    cv::Mat cleaned = originalRef.clone();
+    for (int y = 0; y < cleaned.rows; ++y) {
+        uint8_t* row = cleaned.ptr<uint8_t>(y);
+        for (int x = 0; x < cleaned.cols; ++x) {
+            if (row[x] == 255) {
+                row[x] = 0;
+            }
+        }
+    }
+    cv::Mat original = buildOriginalFrame(cleaned);
+    if (original.empty()) {
+        m_spritesCanvas->canvas()->clearMaskOutline();
+        return;
+    }
+    cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseWidth, baseHeight));
+    FrameLayout layout = BuildFrameLayout(baseWidth, baseHeight,
+                                          displayOriginal.cols, displayOriginal.rows);
+    QRect region(layout.bottomX,
+                 layout.topHeight + kFrameGapPixels,
+                 layout.bottomWidth,
+                 layout.bottomHeight);
+    const cv::Size size = original.size();
+    cv::Mat allMask(size, CV_8UC1, cv::Scalar(0));
+    cv::Mat selectedMask(size, CV_8UC1, cv::Scalar(0));
+    const std::size_t base = static_cast<std::size_t>(index) * MAX_SPRITE_DETECT_AREAS * 4;
+    for (int area = 0; area < MAX_SPRITE_DETECT_AREAS; ++area) {
+        const std::size_t areaBase = base + static_cast<std::size_t>(area) * 4;
+        if (areaBase + 3 >= m_spriteDetAreas.size()) {
+            continue;
+        }
+        const uint16_t left = m_spriteDetAreas[areaBase];
+        if (left == 0xffff) {
+            continue;
+        }
+        const int fullX = static_cast<int>(left);
+        const int fullY = static_cast<int>(m_spriteDetAreas[areaBase + 1]);
+        const int w = static_cast<int>(m_spriteDetAreas[areaBase + 2]);
+        const int h = static_cast<int>(m_spriteDetAreas[areaBase + 3]);
+        cv::Rect rect(fullX - offsetX, fullY - offsetY, w, h);
+        rect &= cv::Rect(0, 0, size.width, size.height);
+        if (rect.width <= 0 || rect.height <= 0) {
+            continue;
+        }
+        cv::rectangle(allMask, rect, cv::Scalar(1), 1);
+        if (area == m_spriteDetAreaIndex) {
+            cv::rectangle(selectedMask, rect, cv::Scalar(1), 1);
+        }
+    }
+    cv::Mat otherMask = allMask.clone();
+    if (MaskHasContent(selectedMask)) {
+        for (int y = 0; y < otherMask.rows; ++y) {
+            uint8_t* row = otherMask.ptr<uint8_t>(y);
+            const uint8_t* srow = selectedMask.ptr<uint8_t>(y);
+            for (int x = 0; x < otherMask.cols; ++x) {
+                if (srow[x]) {
+                    row[x] = 0;
+                }
+            }
+        }
+        m_spritesCanvas->canvas()->setMaskOutline(selectedMask, QColor(255, 200, 0), region);
+        if (MaskHasContent(otherMask)) {
+            m_spritesCanvas->canvas()->setSecondaryMaskOutline(otherMask, QColor(0, 200, 255), region);
+        } else {
+            m_spritesCanvas->canvas()->setSecondaryMaskOutline(cv::Mat(), QColor());
+        }
+        return;
+    }
+    if (MaskHasContent(allMask)) {
+        m_spritesCanvas->canvas()->setMaskOutline(allMask, QColor(255, 200, 0), region);
+    } else {
+        m_spritesCanvas->canvas()->clearMaskOutline();
+    }
 }
 
 void MainWindow::setMaskMode(MaskMode mode)
@@ -4333,6 +5587,13 @@ void MainWindow::setMaskMode(MaskMode mode)
     }
     m_maskMode = mode;
     cancelCurrentDraw();
+    if (m_spriteZoneMode) {
+        m_spriteZoneMode = false;
+        if (m_framesCanvas) {
+            m_framesCanvas->setZoneButtonChecked(false);
+        }
+        refreshSpriteZoneList();
+    }
     if (m_framesCanvas) {
         const bool comp = (m_maskMode == MaskMode::Comparison);
         const bool dyn = (m_maskMode == MaskMode::Dynamic);
@@ -4844,6 +6105,14 @@ cv::Mat* MainWindow::activeDynamicMaskMap(int frameIndex)
     return &m_frameDynamicMaskMaps[static_cast<std::size_t>(frameIndex)];
 }
 
+cv::Mat* MainWindow::activeSpriteDynamicMask(int spriteIndex)
+{
+    if (spriteIndex < 0 || spriteIndex >= static_cast<int>(m_spriteDynamicMasks.size())) {
+        return nullptr;
+    }
+    return &m_spriteDynamicMasks[static_cast<std::size_t>(spriteIndex)];
+}
+
 cv::Mat* MainWindow::activeBackgroundMask(int index)
 {
     if (index < 0) {
@@ -4879,6 +6148,52 @@ void MainWindow::swapMaskEntries(int a, int b)
         m_frameMaskAssign->setCurrentIndex(value == 255 ? 0 : value + 1);
     }
     updateMaskPreviewForFrame(m_framesList->currentRow());
+}
+
+void MainWindow::setSpriteZoneMode(bool enabled)
+{
+    if (m_spriteZoneMode == enabled) {
+        return;
+    }
+    m_spriteZoneMode = enabled;
+    m_frameDrawOnZone = false;
+    m_frameHasStart = false;
+    if (enabled) {
+        if (m_maskMode != MaskMode::None) {
+            m_maskMode = MaskMode::None;
+        }
+        if (m_backgroundMaskMode) {
+            m_backgroundMaskMode = false;
+            if (m_framesCanvas) {
+                m_framesCanvas->setBackgroundMaskChecked(false);
+            }
+        }
+        if (m_framesCanvas) {
+            m_framesCanvas->setMaskButtonsChecked(false, false);
+        }
+    }
+    refreshSpriteZoneList();
+    if (m_framesList && m_framesList->currentRow() >= 0) {
+        updateFrameCanvasImage(m_framesList->currentRow());
+    }
+    updateMaskPreviewForFrame(m_framesList ? m_framesList->currentRow() : -1);
+}
+
+void MainWindow::setSpriteDetAreaMode(bool enabled)
+{
+    if (m_spriteDetAreaMode == enabled) {
+        return;
+    }
+    m_spriteDetAreaMode = enabled;
+    cancelCurrentDraw();
+    if (enabled && m_spriteDynamicMaskMode) {
+        m_spriteDynamicMaskMode = false;
+    }
+    if (m_spritesCanvas) {
+        m_spritesCanvas->setMaskButtonsChecked(m_spriteDetAreaMode, m_spriteDynamicMaskMode);
+    }
+    updateSpriteCanvasImage(m_spritesList ? m_spritesList->currentRow() : -1);
+    updateUndoActions();
 }
 
 void MainWindow::swapDynamicMaskEntries(int a, int b)
@@ -5205,6 +6520,57 @@ void MainWindow::pushBackgroundUndoSnapshot(int index)
     updateUndoActions();
 }
 
+void MainWindow::pushSpriteDynamicMaskUndoSnapshot(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_spriteDynamicMasks.size())) {
+        return;
+    }
+    if (index >= static_cast<int>(m_spriteUndoStacks.size())) {
+        return;
+    }
+    const cv::Mat& map = m_spriteDynamicMasks[static_cast<std::size_t>(index)];
+    if (map.empty()) {
+        return;
+    }
+    UndoStack& stack = m_spriteUndoStacks[static_cast<std::size_t>(index)];
+    UndoState state;
+    state.mask = map.clone();
+    state.mask_kind = MaskKind::Dynamic;
+    state.mask_index = index;
+    stack.undo.push_back(std::move(state));
+    if (stack.undo.size() > kMaxUndoDepth) {
+        stack.undo.erase(stack.undo.begin());
+    }
+    stack.redo.clear();
+    updateUndoActions();
+}
+
+void MainWindow::pushSpriteDetAreaUndoSnapshot(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_spriteUndoStacks.size())) {
+        return;
+    }
+    const std::size_t base = static_cast<std::size_t>(index) * MAX_SPRITE_DETECT_AREAS * 4;
+    if (base + MAX_SPRITE_DETECT_AREAS * 4 > m_spriteDetAreas.size()) {
+        return;
+    }
+    cv::Mat snapshot(1, MAX_SPRITE_DETECT_AREAS * 4, CV_16UC1);
+    std::memcpy(snapshot.data,
+                m_spriteDetAreas.data() + base,
+                MAX_SPRITE_DETECT_AREAS * 4 * sizeof(uint16_t));
+    UndoStack& stack = m_spriteUndoStacks[static_cast<std::size_t>(index)];
+    UndoState state;
+    state.mask = snapshot.clone();
+    state.mask_kind = MaskKind::SpriteDetAreas;
+    state.mask_index = index;
+    stack.undo.push_back(std::move(state));
+    if (stack.undo.size() > kMaxUndoDepth) {
+        stack.undo.erase(stack.undo.begin());
+    }
+    stack.redo.clear();
+    updateUndoActions();
+}
+
 void MainWindow::pushBackgroundMaskUndoSnapshot(int index)
 {
     if (index < 0 || index >= static_cast<int>(m_backgroundMaskUndoStacks.size())) {
@@ -5246,7 +6612,57 @@ bool MainWindow::undoEdit(bool isFrame)
         if (stack.undo.empty()) {
             return false;
         }
-        cv::Mat* image = isFrame ? activeFrameImage(index, true) : m_spriteStore->atMutable(index);
+        if (!isFrame) {
+            UndoState previous = stack.undo.back();
+            stack.undo.pop_back();
+            if (previous.mask_kind == MaskKind::Dynamic && !previous.mask.empty()) {
+                cv::Mat* map = activeSpriteDynamicMask(index);
+                if (!map) {
+                    return false;
+                }
+                UndoState current;
+                current.mask = map->clone();
+                current.mask_kind = MaskKind::Dynamic;
+                current.mask_index = index;
+                stack.redo.push_back(std::move(current));
+                *map = previous.mask.clone();
+                updateSpriteCanvasImage(index);
+                return true;
+            }
+            if (previous.mask_kind == MaskKind::SpriteDetAreas && !previous.mask.empty()) {
+                const std::size_t base = static_cast<std::size_t>(index) * MAX_SPRITE_DETECT_AREAS * 4;
+                if (base + MAX_SPRITE_DETECT_AREAS * 4 > m_spriteDetAreas.size()) {
+                    return false;
+                }
+                cv::Mat snapshot(1, MAX_SPRITE_DETECT_AREAS * 4, CV_16UC1);
+                std::memcpy(snapshot.data,
+                            m_spriteDetAreas.data() + base,
+                            MAX_SPRITE_DETECT_AREAS * 4 * sizeof(uint16_t));
+                UndoState current;
+                current.mask = snapshot.clone();
+                current.mask_kind = MaskKind::SpriteDetAreas;
+                current.mask_index = index;
+                stack.redo.push_back(std::move(current));
+                if (previous.mask.total() >= static_cast<std::size_t>(MAX_SPRITE_DETECT_AREAS * 4)) {
+                    std::memcpy(m_spriteDetAreas.data() + base,
+                                previous.mask.data,
+                                MAX_SPRITE_DETECT_AREAS * 4 * sizeof(uint16_t));
+                }
+                updateSpriteCanvasImage(index);
+                return true;
+            }
+            cv::Mat* image = m_spriteStore->atMutable(index);
+            if (!image || image->empty() || previous.image.empty()) {
+                return false;
+            }
+            UndoState current;
+            current.image = image->clone();
+            stack.redo.push_back(std::move(current));
+            *image = previous.image.clone();
+            updateSpriteCanvasImage(index);
+            return true;
+        }
+        cv::Mat* image = activeFrameImage(index, true);
         if (!image || image->empty()) {
             return false;
         }
@@ -5256,11 +6672,7 @@ bool MainWindow::undoEdit(bool isFrame)
         UndoState previous = stack.undo.back();
         stack.undo.pop_back();
         *image = previous.image.clone();
-        if (isFrame) {
-            updateFramePreviewAt(index);
-        } else {
-            m_spritesCanvas->setImage(*image);
-        }
+        updateFramePreviewAt(index);
         return true;
     };
     if (!isFrame) {
@@ -5303,7 +6715,66 @@ bool MainWindow::redoEdit(bool isFrame)
         if (stack.redo.empty()) {
             return false;
         }
-        cv::Mat* image = isFrame ? activeFrameImage(index, true) : m_spriteStore->atMutable(index);
+        if (!isFrame) {
+            UndoState next = stack.redo.back();
+            stack.redo.pop_back();
+            if (next.mask_kind == MaskKind::Dynamic && !next.mask.empty()) {
+                cv::Mat* map = activeSpriteDynamicMask(index);
+                if (!map) {
+                    return false;
+                }
+                UndoState current;
+                current.mask = map->clone();
+                current.mask_kind = MaskKind::Dynamic;
+                current.mask_index = index;
+                stack.undo.push_back(std::move(current));
+                if (stack.undo.size() > kMaxUndoDepth) {
+                    stack.undo.erase(stack.undo.begin());
+                }
+                *map = next.mask.clone();
+                updateSpriteCanvasImage(index);
+                return true;
+            }
+            if (next.mask_kind == MaskKind::SpriteDetAreas && !next.mask.empty()) {
+                const std::size_t base = static_cast<std::size_t>(index) * MAX_SPRITE_DETECT_AREAS * 4;
+                if (base + MAX_SPRITE_DETECT_AREAS * 4 > m_spriteDetAreas.size()) {
+                    return false;
+                }
+                cv::Mat snapshot(1, MAX_SPRITE_DETECT_AREAS * 4, CV_16UC1);
+                std::memcpy(snapshot.data,
+                            m_spriteDetAreas.data() + base,
+                            MAX_SPRITE_DETECT_AREAS * 4 * sizeof(uint16_t));
+                UndoState current;
+                current.mask = snapshot.clone();
+                current.mask_kind = MaskKind::SpriteDetAreas;
+                current.mask_index = index;
+                stack.undo.push_back(std::move(current));
+                if (stack.undo.size() > kMaxUndoDepth) {
+                    stack.undo.erase(stack.undo.begin());
+                }
+                if (next.mask.total() >= static_cast<std::size_t>(MAX_SPRITE_DETECT_AREAS * 4)) {
+                    std::memcpy(m_spriteDetAreas.data() + base,
+                                next.mask.data,
+                                MAX_SPRITE_DETECT_AREAS * 4 * sizeof(uint16_t));
+                }
+                updateSpriteCanvasImage(index);
+                return true;
+            }
+            cv::Mat* image = m_spriteStore->atMutable(index);
+            if (!image || image->empty() || next.image.empty()) {
+                return false;
+            }
+            UndoState current;
+            current.image = image->clone();
+            stack.undo.push_back(std::move(current));
+            if (stack.undo.size() > kMaxUndoDepth) {
+                stack.undo.erase(stack.undo.begin());
+            }
+            *image = next.image.clone();
+            updateSpriteCanvasImage(index);
+            return true;
+        }
+        cv::Mat* image = activeFrameImage(index, true);
         if (!image || image->empty()) {
             return false;
         }
@@ -5316,11 +6787,7 @@ bool MainWindow::redoEdit(bool isFrame)
         UndoState next = stack.redo.back();
         stack.redo.pop_back();
         *image = next.image.clone();
-        if (isFrame) {
-            updateFramePreviewAt(index);
-        } else {
-            m_spritesCanvas->setImage(*image);
-        }
+        updateFramePreviewAt(index);
         return true;
     };
     if (!isFrame) {
@@ -6822,6 +8289,229 @@ void MainWindow::refreshBackgroundList()
     }
 }
 
+std::vector<MainWindow::SpriteZoneGroup> MainWindow::buildSpriteZonesForFrame(int frameIndex) const
+{
+    std::vector<SpriteZoneGroup> zones;
+    if (frameIndex < 0 || frameIndex >= static_cast<int>(m_frameSpriteAssignments.size() / MAX_SPRITES_PER_FRAME)) {
+        return zones;
+    }
+    const cv::Mat* frame = m_frameStore ? m_frameStore->at(frameIndex) : nullptr;
+    const int frameWidth = frame ? frame->cols : kDefaultFrameWidth;
+    const int frameHeight = frame ? frame->rows : kDefaultFrameHeight;
+    const std::size_t baseSlot = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME;
+    const std::size_t bboxBase = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME * 4;
+    std::map<std::tuple<int, int, int, int>, std::size_t> zoneMap;
+    for (int slot = 0; slot < MAX_SPRITES_PER_FRAME; ++slot) {
+        const std::size_t slotIndex = baseSlot + static_cast<std::size_t>(slot);
+        if (slotIndex >= m_frameSpriteAssignments.size()) {
+            break;
+        }
+        const uint8_t spriteIndex = m_frameSpriteAssignments[slotIndex];
+        if (spriteIndex == 255) {
+            continue;
+        }
+        int minx = 0;
+        int miny = 0;
+        int maxx = frameWidth > 0 ? frameWidth - 1 : 0;
+        int maxy = frameHeight > 0 ? frameHeight - 1 : 0;
+        const std::size_t bboxIndex = bboxBase + static_cast<std::size_t>(slot) * 4;
+        if (bboxIndex + 3 < m_frameSpriteBBoxes.size()) {
+            minx = static_cast<int>(m_frameSpriteBBoxes[bboxIndex]);
+            miny = static_cast<int>(m_frameSpriteBBoxes[bboxIndex + 1]);
+            maxx = static_cast<int>(m_frameSpriteBBoxes[bboxIndex + 2]);
+            maxy = static_cast<int>(m_frameSpriteBBoxes[bboxIndex + 3]);
+        }
+        if (maxx < minx || maxy < miny) {
+            continue;
+        }
+        minx = std::clamp(minx, 0, frameWidth > 0 ? frameWidth - 1 : 0);
+        miny = std::clamp(miny, 0, frameHeight > 0 ? frameHeight - 1 : 0);
+        maxx = std::clamp(maxx, minx, frameWidth > 0 ? frameWidth - 1 : minx);
+        maxy = std::clamp(maxy, miny, frameHeight > 0 ? frameHeight - 1 : miny);
+        const QRect rect(minx, miny, maxx - minx + 1, maxy - miny + 1);
+        const auto key = std::make_tuple(rect.x(), rect.y(), rect.width(), rect.height());
+        auto it = zoneMap.find(key);
+        if (it == zoneMap.end()) {
+            SpriteZoneGroup zone;
+            zone.rect = rect;
+            zone.slotIndices.push_back(slot);
+            zone.sprites.push_back(static_cast<int>(spriteIndex));
+            zones.push_back(std::move(zone));
+            zoneMap[key] = zones.size() - 1;
+        } else {
+            SpriteZoneGroup& zone = zones[it->second];
+            zone.slotIndices.push_back(slot);
+            zone.sprites.push_back(static_cast<int>(spriteIndex));
+        }
+    }
+    return zones;
+}
+
+void MainWindow::refreshSpriteZoneList()
+{
+    if (!m_spriteZoneList) {
+        return;
+    }
+    const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
+    QSignalBlocker blocker(m_spriteZoneList);
+    m_spriteZoneList->clear();
+    if (frameIndex < 0 || !m_frameStore || m_frameStore->count() <= 0) {
+        auto* item = new QListWidgetItem("No frames");
+        item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
+        m_spriteZoneList->addItem(item);
+        m_spriteZoneList->setEnabled(false);
+        m_selectedSpriteZoneIndex = -1;
+        return;
+    }
+    m_spriteZones = buildSpriteZonesForFrame(frameIndex);
+    if (m_spriteZones.empty()) {
+        auto* item = new QListWidgetItem("No sprite zones");
+        item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
+        m_spriteZoneList->addItem(item);
+        m_spriteZoneList->setEnabled(false);
+        m_selectedSpriteZoneIndex = -1;
+        return;
+    }
+    m_spriteZoneList->setEnabled(true);
+    int preferredZone = -1;
+    if (m_selectedSpriteSlot >= 0 && m_selectedSpriteSlot < MAX_SPRITES_PER_FRAME) {
+        for (std::size_t i = 0; i < m_spriteZones.size(); ++i) {
+            const SpriteZoneGroup& zone = m_spriteZones[i];
+            if (std::find(zone.slotIndices.begin(), zone.slotIndices.end(), m_selectedSpriteSlot) != zone.slotIndices.end()) {
+                preferredZone = static_cast<int>(i);
+                break;
+            }
+        }
+    }
+    const QSize iconSize(kPreviewIconWidth, kPreviewIconHeight);
+    const cv::Mat reference = buildOriginalPreviewForIndex(frameIndex);
+    cv::Mat original = buildOriginalFrame(reference);
+    if (original.empty()) {
+        original = MakePlaceholderImage(kDefaultFrameWidth, kDefaultFrameHeight,
+                                        cv::Scalar(18, 18, 18),
+                                        cv::Scalar(55, 55, 55));
+    }
+    cv::Mat previewBase = EnsureBgr(original);
+    if (previewBase.size() != cv::Size(iconSize.width(), iconSize.height())) {
+        cv::resize(previewBase, previewBase, cv::Size(iconSize.width(), iconSize.height()), 0.0, 0.0, cv::INTER_NEAREST);
+    }
+    cv::Mat previewRgb;
+    cv::cvtColor(previewBase, previewRgb, cv::COLOR_BGR2RGB);
+    QImage baseImage(previewRgb.data, previewRgb.cols, previewRgb.rows, previewRgb.step, QImage::Format_RGB888);
+    for (std::size_t i = 0; i < m_spriteZones.size(); ++i) {
+        const SpriteZoneGroup& zone = m_spriteZones[i];
+        QPixmap pixmap = QPixmap::fromImage(baseImage.copy());
+        QPainter painter(&pixmap);
+        painter.setRenderHint(QPainter::Antialiasing, false);
+        const double scaleX = previewBase.cols > 0 ? static_cast<double>(pixmap.width()) / previewBase.cols : 1.0;
+        const double scaleY = previewBase.rows > 0 ? static_cast<double>(pixmap.height()) / previewBase.rows : 1.0;
+        const QRectF rect(zone.rect.x() * scaleX,
+                          zone.rect.y() * scaleY,
+                          zone.rect.width() * scaleX,
+                          zone.rect.height() * scaleY);
+        QPen pen(QColor(255, 200, 0));
+        pen.setWidth(2);
+        painter.setPen(pen);
+        painter.drawRect(rect);
+        if (m_spriteStore && !zone.sprites.empty()) {
+            const int thumbSize = 14;
+            const int padding = 2;
+            int thumbX = pixmap.width() - padding - thumbSize;
+            int thumbY = pixmap.height() - padding - thumbSize;
+            for (int spriteIndex : zone.sprites) {
+                if (thumbX < padding) {
+                    break;
+                }
+                const cv::Mat* sprite = (spriteIndex >= 0 && spriteIndex < m_spriteStore->count())
+                    ? m_spriteStore->at(spriteIndex)
+                    : nullptr;
+                if (!sprite || sprite->empty()) {
+                    continue;
+                }
+                cv::Mat spriteRgb;
+                cv::Mat spriteBgr = EnsureBgr(*sprite);
+                cv::cvtColor(spriteBgr, spriteRgb, cv::COLOR_BGR2RGB);
+                QImage spriteImage(spriteRgb.data,
+                                   spriteRgb.cols,
+                                   spriteRgb.rows,
+                                   spriteRgb.step,
+                                   QImage::Format_RGB888);
+                QPixmap spritePixmap = QPixmap::fromImage(spriteImage.copy());
+                spritePixmap = spritePixmap.scaled(thumbSize,
+                                                   thumbSize,
+                                                   Qt::KeepAspectRatio,
+                                                   Qt::FastTransformation);
+                painter.drawPixmap(QRect(thumbX, thumbY, thumbSize, thumbSize), spritePixmap);
+                thumbX -= thumbSize + padding;
+            }
+        }
+        painter.end();
+
+        QStringList spriteLabels;
+        for (int spriteIndex : zone.sprites) {
+            spriteLabels << QString::number(spriteIndex);
+        }
+        QString label = QString("Zone %1").arg(static_cast<int>(i) + 1);
+        if (!spriteLabels.isEmpty()) {
+            label += QString(" - Sprites: %1").arg(spriteLabels.join(", "));
+        }
+        auto* item = new QListWidgetItem();
+        item->setIcon(QIcon(pixmap));
+        item->setText(label);
+        item->setData(kSpriteZoneIndexRole, static_cast<int>(i));
+        const int padding = 6;
+        const int textHeight = m_spriteZoneList->fontMetrics().height() + 4;
+        const int gap = 2;
+        const int width = pixmap.width() + padding * 2;
+        const int height = pixmap.height() + textHeight + padding * 2 + gap;
+        item->setSizeHint(QSize(width, height));
+        m_spriteZoneList->addItem(item);
+    }
+    if (m_selectedSpriteZoneIndex >= 0 && m_selectedSpriteZoneIndex < m_spriteZoneList->count()) {
+        m_spriteZoneList->setCurrentRow(m_selectedSpriteZoneIndex);
+    } else if (preferredZone >= 0 && preferredZone < m_spriteZoneList->count()) {
+        m_spriteZoneList->setCurrentRow(preferredZone);
+        m_selectedSpriteZoneIndex = preferredZone;
+    } else if (m_spriteZoneList->count() > 0) {
+        m_spriteZoneList->setCurrentRow(0);
+        m_selectedSpriteZoneIndex = 0;
+    }
+}
+
+void MainWindow::refreshFrameSpriteSlotCombo()
+{
+    if (!m_frameSpriteSlotCombo) {
+        return;
+    }
+    ensureMaskDataSize();
+    const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
+    QSignalBlocker blocker(m_frameSpriteSlotCombo);
+    m_frameSpriteSlotCombo->clear();
+    if (frameIndex < 0 || m_frameSpriteAssignments.empty()) {
+        m_frameSpriteSlotCombo->setEnabled(false);
+        return;
+    }
+    for (int slot = 0; slot < MAX_SPRITES_PER_FRAME; ++slot) {
+        const std::size_t slotIndex = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME +
+            static_cast<std::size_t>(slot);
+        uint8_t spriteIndex = 255;
+        if (slotIndex < m_frameSpriteAssignments.size()) {
+            spriteIndex = m_frameSpriteAssignments[slotIndex];
+        }
+        QString label = QString("Slot %1").arg(slot + 1);
+        if (spriteIndex != 255) {
+            label += QString(" (Sprite %1)").arg(spriteIndex);
+        } else {
+            label += " (Empty)";
+        }
+        m_frameSpriteSlotCombo->addItem(label, slot);
+    }
+    const int clamped = std::clamp(m_selectedSpriteSlot, 0, MAX_SPRITES_PER_FRAME - 1);
+    m_frameSpriteSlotCombo->setCurrentIndex(clamped);
+    m_selectedSpriteSlot = clamped;
+    m_frameSpriteSlotCombo->setEnabled(true);
+}
+
 void MainWindow::refreshFrameSpriteLists()
 {
     m_framesList->clear();
@@ -6948,6 +8638,18 @@ void MainWindow::refreshFrameSpriteLists()
         m_spritesCanvas->setImage(cv::Mat());
         m_spriteStore->clear();
         updateMetadataForSprite(-1);
+        m_spriteDetAreaMode = false;
+        if (m_spritesCanvas) {
+            m_spritesCanvas->setMaskButtonsChecked(false, false);
+        }
+        if (m_spriteDetAreaCombo) {
+            QSignalBlocker blocker(m_spriteDetAreaCombo);
+            m_spriteDetAreaCombo->setCurrentIndex(0);
+            m_spriteDetAreaCombo->setEnabled(false);
+        }
+        if (m_spriteDetAreaClearButton) {
+            m_spriteDetAreaClearButton->setEnabled(false);
+        }
     } else {
         while (m_spriteStore->count() < m_state->sprites().size()) {
             m_spriteStore->add(MakePlaceholderImage(kDefaultSpriteWidth, kDefaultSpriteHeight,
@@ -6958,6 +8660,15 @@ void MainWindow::refreshFrameSpriteLists()
             m_spriteStore->removeAt(m_spriteStore->count() - 1);
         }
         m_spritesList->addItems(m_state->sprites());
+        for (int i = 0; i < m_spritesList->count(); ++i) {
+            if (QListWidgetItem* item = m_spritesList->item(i)) {
+                if (item->text().startsWith("No sprites")) {
+                    continue;
+                }
+                item->setData(Qt::UserRole, i);
+                item->setData(Qt::UserRole + 1, QStringLiteral("sprite"));
+            }
+        }
         if (m_spritesList->currentRow() < 0 && m_spritesList->count() > 0) {
             m_spritesList->setCurrentRow(0);
         } else if (m_spritesList->currentRow() >= 0) {
@@ -6968,7 +8679,9 @@ void MainWindow::refreshFrameSpriteLists()
     updateFrameJumpRange();
     refreshFramePreviews();
     ensureUndoStacksSize();
+    ensureSpriteDataSize();
     ensureMaskDataSize();
+    refreshFrameSpriteSlotCombo();
 }
 
 void MainWindow::setInspectorSelection(const QString& label)
@@ -7139,22 +8852,42 @@ void MainWindow::showFrameAtIndex(int index)
         }
         updateHdControlsForContext();
         updateMaskPreviewForFrame(index);
+        refreshSpriteZoneList();
+        refreshFrameSpriteSlotCombo();
         updateDynamicMaskPreviewIcons();
         syncDynamicSetSelection();
         refreshDynamicPaletteButtons();
     } else {
         updateFrameCanvasImage(-1);
+        refreshFrameSpriteSlotCombo();
     }
 }
 
 void MainWindow::showSpriteAtIndex(int index)
 {
-    const cv::Mat* image = m_spriteStore->at(index);
-    if (image && !image->empty()) {
+    if (index >= 0) {
         m_spritesCanvas->canvas()->clearPreviewImage();
-        m_spritesCanvas->setImage(*image);
+        updateSpriteCanvasImage(index);
+        if (!m_drawPointEnabled) {
+            QTimer::singleShot(0, this, [this]() {
+                m_spritesCanvas->canvas()->requestFitOnResize(true);
+            });
+        }
     } else {
         m_spritesCanvas->setImage(cv::Mat());
+    }
+    if (m_spriteDynamicSetCombo) {
+        QSignalBlocker blocker(m_spriteDynamicSetCombo);
+        m_spriteDynamicSetCombo->setCurrentIndex(m_spriteDynamicSetIndex);
+    }
+    if (m_spriteDetAreaCombo) {
+        m_spriteDetAreaIndex = std::clamp(m_spriteDetAreaIndex, 0, MAX_SPRITE_DETECT_AREAS - 1);
+        QSignalBlocker blocker(m_spriteDetAreaCombo);
+        m_spriteDetAreaCombo->setCurrentIndex(m_spriteDetAreaIndex);
+        m_spriteDetAreaCombo->setEnabled(index >= 0);
+    }
+    if (m_spriteDetAreaClearButton) {
+        m_spriteDetAreaClearButton->setEnabled(index >= 0);
     }
 }
 
@@ -7226,6 +8959,44 @@ void MainWindow::handleToolPress(bool isFrame,
         int localX = x;
         int localY = y;
         m_frameDrawOnMask = false;
+        m_frameDrawOnZone = false;
+        if (m_spriteZoneMode) {
+            if (m_selectedSpriteSlot < 0 || m_selectedSpriteSlot >= MAX_SPRITES_PER_FRAME) {
+                statusBar()->showMessage("Select a sprite slot before editing zones.", 2000);
+                return;
+            }
+            const bool useBottom = m_showOriginalFrame && !reference.empty();
+            if (useBottom) {
+                const int gap = kFrameGapPixels;
+                if (y < layout.topHeight + gap || y >= layout.topHeight + gap + layout.bottomHeight ||
+                    x < layout.bottomX || x >= layout.bottomX + layout.bottomWidth) {
+                    return;
+                }
+                localX = x - layout.bottomX;
+                localY = y - (layout.topHeight + gap);
+            } else {
+                if (y < 0 || y >= layout.topHeight ||
+                    x < layout.topX || x >= layout.topX + layout.topWidth) {
+                    return;
+                }
+                localX = x - layout.topX;
+                localY = y;
+            }
+            const int baseWidth = reference.empty() ? topFrame->cols : reference.cols;
+            const int baseHeight = reference.empty() ? topFrame->rows : reference.rows;
+            const int scaleX = (useBottom && baseWidth > 0) ? layout.bottomWidth / baseWidth : 1;
+            const int scaleY = (useBottom && baseHeight > 0) ? layout.bottomHeight / baseHeight : 1;
+            const int mappedX = (scaleX > 1) ? localX / scaleX : localX;
+            const int mappedY = (scaleY > 1) ? localY / scaleY : localY;
+            if (mappedX < 0 || mappedY < 0 || mappedX >= baseWidth || mappedY >= baseHeight) {
+                return;
+            }
+            m_frameDrawOnZone = true;
+            m_frameStart = QPoint(mappedX, mappedY);
+            m_frameHasStart = true;
+            m_frameStartButton = button;
+            return;
+        }
         if (m_backgroundMaskMode) {
             ensureBackgroundDataSize();
             if (index >= static_cast<int>(m_frameBackgroundIds.size()) ||
@@ -7425,6 +9196,147 @@ void MainWindow::handleToolPress(bool isFrame,
             return;
         }
     }
+    if (!isFrame && m_spriteDetAreaMode) {
+        const int index = m_spritesList ? m_spritesList->currentRow() : -1;
+        if (index < 0) {
+            return;
+        }
+        ensureSpriteDataSize();
+        const cv::Mat* spriteImage = m_spriteStore ? m_spriteStore->at(index) : nullptr;
+        if (!spriteImage || spriteImage->empty()) {
+            return;
+        }
+        const QRect contentRect = spriteContentRect(index);
+        const int offsetX = contentRect.isValid() ? contentRect.x() : 0;
+        const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
+        const int baseWidth = contentRect.isValid() ? contentRect.width() : spriteImage->cols;
+        const int baseHeight = contentRect.isValid() ? contentRect.height() : spriteImage->rows;
+        cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
+            ? m_spriteOriginals[static_cast<std::size_t>(index)](
+                cv::Rect(offsetX, offsetY, baseWidth, baseHeight))
+            : cv::Mat();
+        if (originalRef.empty()) {
+            return;
+        }
+        cv::Mat cleaned = originalRef.clone();
+        for (int yy = 0; yy < cleaned.rows; ++yy) {
+            uint8_t* row = cleaned.ptr<uint8_t>(yy);
+            for (int xx = 0; xx < cleaned.cols; ++xx) {
+                if (row[xx] == 255) {
+                    row[xx] = 0;
+                }
+            }
+        }
+        cv::Mat original = buildOriginalFrame(cleaned);
+        cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseWidth, baseHeight));
+        FrameLayout layout = BuildFrameLayout(baseWidth, baseHeight,
+                                              displayOriginal.cols, displayOriginal.rows);
+        const int gap = kFrameGapPixels;
+        if (y < layout.topHeight + gap || y >= layout.topHeight + gap + layout.bottomHeight ||
+            x < layout.bottomX || x >= layout.bottomX + layout.bottomWidth) {
+            return;
+        }
+        int localX = x - layout.bottomX;
+        int localY = y - (layout.topHeight + gap);
+        const int scaleX = (layout.bottomWidth > 0 && original.cols > 0) ? layout.bottomWidth / original.cols : 1;
+        const int scaleY = (layout.bottomHeight > 0 && original.rows > 0) ? layout.bottomHeight / original.rows : 1;
+        const int mappedX = (scaleX > 1) ? localX / scaleX : localX;
+        const int mappedY = (scaleY > 1) ? localY / scaleY : localY;
+        if (mappedX < 0 || mappedY < 0 || mappedX >= original.cols || mappedY >= original.rows) {
+            return;
+        }
+        if (m_drawTool == DrawTool::ColorPicker) {
+            return;
+        }
+        if (!m_spriteUndoActive) {
+            pushSpriteDetAreaUndoSnapshot(index);
+            m_spriteUndoActive = true;
+        }
+        m_spriteStart = QPoint(mappedX, mappedY);
+        m_spriteHasStart = true;
+        m_spriteStartButton = button;
+        return;
+    }
+    if (!isFrame && m_spriteDynamicMaskMode) {
+        const int index = m_spritesList ? m_spritesList->currentRow() : -1;
+        if (index < 0) {
+            return;
+        }
+        ensureSpriteDataSize();
+        cv::Mat* map = activeSpriteDynamicMask(index);
+        if (!map || map->empty()) {
+            return;
+        }
+        const cv::Mat* spriteImage = m_spriteStore ? m_spriteStore->at(index) : nullptr;
+        const QRect contentRect = spriteContentRect(index);
+        const int offsetX = contentRect.isValid() ? contentRect.x() : 0;
+        const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
+        const QSize baseSize = contentRect.isValid()
+            ? QSize(contentRect.width(), contentRect.height())
+            : QSize(spriteImage && !spriteImage->empty() ? spriteImage->cols : map->cols,
+                    spriteImage && !spriteImage->empty() ? spriteImage->rows : map->rows);
+        cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
+            ? m_spriteOriginals[static_cast<std::size_t>(index)](
+                cv::Rect(offsetX, offsetY, baseSize.width(), baseSize.height()))
+            : cv::Mat();
+        cv::Mat original = originalRef.empty() ? cv::Mat() : buildOriginalFrame(originalRef);
+        cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseSize.width(), baseSize.height()));
+        FrameLayout layout = BuildFrameLayout(baseSize.width(), baseSize.height(),
+                                              displayOriginal.cols, displayOriginal.rows);
+        if (x < layout.topX || x >= layout.topX + layout.topWidth ||
+            y < 0 || y >= layout.topHeight) {
+            return;
+        }
+        const QPoint mappedLocal = ScalePointToSize(QPoint(x - layout.topX, y),
+                                                    QSize(layout.topWidth, layout.topHeight),
+                                                    QSize(baseSize.width(), baseSize.height()));
+        const QPoint mapped(mappedLocal.x() + offsetX, mappedLocal.y() + offsetY);
+        if (mapped.x() < 0 || mapped.y() < 0 || mapped.x() >= map->cols || mapped.y() >= map->rows) {
+            return;
+        }
+        const cv::Mat* spriteMask = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
+            ? &m_spriteOriginals[static_cast<std::size_t>(index)]
+            : nullptr;
+        cv::Mat maskScaled;
+        if (spriteMask && !spriteMask->empty()) {
+            if (spriteMask->size() != map->size()) {
+                cv::resize(*spriteMask, maskScaled, map->size(), 0.0, 0.0, cv::INTER_NEAREST);
+            } else {
+                maskScaled = *spriteMask;
+            }
+            if (maskScaled.at<uint8_t>(mapped.y(), mapped.x()) == 255) {
+                return;
+            }
+        }
+        if (m_drawTool == DrawTool::MagicFill || m_drawTool == DrawTool::Point) {
+            if (!m_spriteUndoActive) {
+                pushSpriteDynamicMaskUndoSnapshot(index);
+                m_spriteUndoActive = true;
+            }
+            const bool erase = (button == Qt::RightButton) || modifiers.testFlag(Qt::ShiftModifier);
+            if (m_drawTool == DrawTool::MagicFill) {
+                applyDynamicMaskFill(*map, m_spriteDynamicSetIndex, mapped.x(), mapped.y(), erase);
+            } else {
+                applyToolToDynamicMask(*map, m_spriteDynamicSetIndex, DrawTool::Point, mapped, mapped, erase);
+            }
+            if (!maskScaled.empty()) {
+                ApplySpriteMaskConstraints(*map, maskScaled);
+            }
+            updateSpriteCanvasImage(index);
+            return;
+        }
+        if (m_drawTool == DrawTool::ColorPicker) {
+            return;
+        }
+        if (!m_spriteUndoActive) {
+            pushSpriteDynamicMaskUndoSnapshot(index);
+            m_spriteUndoActive = true;
+        }
+        m_spriteStart = mapped;
+        m_spriteHasStart = true;
+        m_spriteStartButton = button;
+        return;
+    }
     cv::Mat* image = isFrame ? activeFrameImage(m_framesList->currentRow(), true)
                              : m_spriteStore->atMutable(m_spritesList->currentRow());
     if (!image || image->empty()) {
@@ -7441,6 +9353,29 @@ void MainWindow::handleToolPress(bool isFrame,
         }
         x -= layout.topX;
         m_frameDrawOnMask = false;
+    } else {
+        const int index = m_spritesList ? m_spritesList->currentRow() : -1;
+        const QRect contentRect = spriteContentRect(index);
+        const int offsetX = contentRect.isValid() ? contentRect.x() : 0;
+        const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
+        const int baseWidth = contentRect.isValid() ? contentRect.width() : image->cols;
+        const int baseHeight = contentRect.isValid() ? contentRect.height() : image->rows;
+        cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
+            ? m_spriteOriginals[static_cast<std::size_t>(index)](
+                cv::Rect(offsetX, offsetY, baseWidth, baseHeight))
+            : cv::Mat();
+        cv::Mat original = originalRef.empty() ? cv::Mat() : buildOriginalFrame(originalRef);
+        cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseWidth, baseHeight));
+        FrameLayout layout = BuildFrameLayout(baseWidth, baseHeight,
+                                              displayOriginal.cols, displayOriginal.rows);
+        if (y < 0 || y >= layout.topHeight ||
+            x < layout.topX || x >= layout.topX + layout.topWidth) {
+            statusBar()->showMessage("Sprite edits apply to the top sprite only.", 2000);
+            return;
+        }
+        x -= layout.topX;
+        x += offsetX;
+        y += offsetY;
     }
     const int currentIndex = isFrame ? m_framesList->currentRow() : m_spritesList->currentRow();
     bool& undoActive = isFrame ? m_frameUndoActive : m_spriteUndoActive;
@@ -7469,6 +9404,13 @@ void MainWindow::handleToolPress(bool isFrame,
                 }
                 const QPoint mapped = ScalePointToSize(basePoint, baseSize,
                                                        QSize(target->cols, target->rows));
+                const cv::Mat spriteMask = buildSpriteCoverageMask(frameIndex, m_useHdFrame);
+                if (!spriteMask.empty() &&
+                    mapped.y() >= 0 && mapped.y() < spriteMask.rows &&
+                    mapped.x() >= 0 && mapped.x() < spriteMask.cols &&
+                    spriteMask.at<uint8_t>(mapped.y(), mapped.x())) {
+                    continue;
+                }
                 applyToolToImage(*target, DrawTool::Point, mapped, mapped, button == Qt::RightButton);
                 updateFramePreviewAt(frameIndex);
             }
@@ -7489,7 +9431,20 @@ void MainWindow::handleToolPress(bool isFrame,
                 }
                 const QPoint mapped = ScalePointToSize(basePoint, baseSize,
                                                        QSize(target->cols, target->rows));
+                const cv::Mat spriteMask = buildSpriteCoverageMask(frameIndex, m_useHdFrame);
+                if (!spriteMask.empty() &&
+                    mapped.y() >= 0 && mapped.y() < spriteMask.rows &&
+                    mapped.x() >= 0 && mapped.x() < spriteMask.cols &&
+                    spriteMask.at<uint8_t>(mapped.y(), mapped.x())) {
+                    continue;
+                }
+                if (!spriteMask.empty()) {
+                    const cv::Mat before = target->clone();
+                    applyMagicFill(*target, mapped.x(), mapped.y());
+                    restoreSpriteCoverage(*target, before, spriteMask);
+                } else {
                 applyMagicFill(*target, mapped.x(), mapped.y());
+                }
                 updateFramePreviewAt(frameIndex);
             }
         } else {
@@ -7497,6 +9452,13 @@ void MainWindow::handleToolPress(bool isFrame,
         }
     } else {
         if (isFrame) {
+            const cv::Mat spriteMask = buildSpriteCoverageMask(m_framesList->currentRow(), m_useHdFrame);
+            if (!spriteMask.empty() &&
+                y >= 0 && y < spriteMask.rows &&
+                x >= 0 && x < spriteMask.cols &&
+                spriteMask.at<uint8_t>(y, x)) {
+                return;
+            }
             m_frameStart = QPoint(x, y);
             m_frameHasStart = true;
             m_frameStartButton = button;
@@ -7511,7 +9473,7 @@ void MainWindow::handleToolPress(bool isFrame,
         updateFramePreviewAt(m_framesList->currentRow());
         updateMaskPreviewForFrame(m_framesList->currentRow());
     } else {
-        m_spritesCanvas->setImage(*image);
+        updateSpriteCanvasImage(m_spritesList ? m_spritesList->currentRow() : -1);
     }
 }
 
@@ -7522,6 +9484,88 @@ void MainWindow::handleToolDrag(bool isFrame,
                                 Qt::KeyboardModifiers modifiers)
 {
     if (!m_drawPointEnabled) {
+        return;
+    }
+    if (isFrame && m_frameDrawOnZone) {
+        const int index = m_framesList ? m_framesList->currentRow() : -1;
+        if (index < 0) {
+            return;
+        }
+        const cv::Mat* topFrame = activeFrameImage(index, false);
+        if (!topFrame || topFrame->empty()) {
+            return;
+        }
+        cv::Mat reference = buildOriginalPreviewForIndex(index);
+        FrameLayout layout = BuildFrameLayout(*topFrame, reference);
+        const bool useBottom = m_showOriginalFrame && !reference.empty();
+        int localX = x;
+        int localY = y;
+        if (useBottom) {
+            const int gap = kFrameGapPixels;
+            if (y < layout.topHeight + gap || y >= layout.topHeight + gap + layout.bottomHeight ||
+                x < layout.bottomX || x >= layout.bottomX + layout.bottomWidth) {
+                return;
+            }
+            localX = x - layout.bottomX;
+            localY = y - (layout.topHeight + gap);
+        } else {
+            if (y < 0 || y >= layout.topHeight ||
+                x < layout.topX || x >= layout.topX + layout.topWidth) {
+                return;
+            }
+            localX = x - layout.topX;
+            localY = y;
+        }
+        const int baseWidth = reference.empty() ? topFrame->cols : reference.cols;
+        const int baseHeight = reference.empty() ? topFrame->rows : reference.rows;
+        const int scaleX = (useBottom && baseWidth > 0) ? layout.bottomWidth / baseWidth : 1;
+        const int scaleY = (useBottom && baseHeight > 0) ? layout.bottomHeight / baseHeight : 1;
+        const int mappedX = (scaleX > 1) ? localX / scaleX : localX;
+        const int mappedY = (scaleY > 1) ? localY / scaleY : localY;
+        if (mappedX < 0 || mappedY < 0 || mappedX >= baseWidth || mappedY >= baseHeight) {
+            return;
+        }
+        if (!m_frameHasStart) {
+            return;
+        }
+        const int x0 = std::clamp(m_frameStart.x(), 0, baseWidth - 1);
+        const int y0 = std::clamp(m_frameStart.y(), 0, baseHeight - 1);
+        const int x1 = std::clamp(mappedX, 0, baseWidth - 1);
+        const int y1 = std::clamp(mappedY, 0, baseHeight - 1);
+        const int left = std::min(x0, x1);
+        const int top = std::min(y0, y1);
+        const int right = std::max(x0, x1);
+        const int bottom = std::max(y0, y1);
+        cv::Mat previewMask(cv::Size(baseWidth, baseHeight), CV_8UC1, cv::Scalar(0));
+        cv::rectangle(previewMask, cv::Rect(left, top, right - left + 1, bottom - top + 1), cv::Scalar(1), 1);
+        cv::Mat otherMask(cv::Size(baseWidth, baseHeight), CV_8UC1, cv::Scalar(0));
+        const std::vector<SpriteZoneGroup> zones = buildSpriteZonesForFrame(index);
+        for (const SpriteZoneGroup& zone : zones) {
+            if (std::find(zone.slotIndices.begin(), zone.slotIndices.end(), m_selectedSpriteSlot) != zone.slotIndices.end()) {
+                continue;
+            }
+            cv::Rect rect(zone.rect.x(), zone.rect.y(), zone.rect.width(), zone.rect.height());
+            rect &= cv::Rect(0, 0, baseWidth, baseHeight);
+            if (rect.width <= 0 || rect.height <= 0) {
+                continue;
+            }
+            cv::rectangle(otherMask, rect, cv::Scalar(1), 1);
+        }
+        QRect region;
+        if (useBottom) {
+            region = QRect(layout.bottomX,
+                           layout.topHeight + kFrameGapPixels,
+                           layout.bottomWidth,
+                           layout.bottomHeight);
+        } else {
+            region = QRect(layout.topX, 0, layout.topWidth, layout.topHeight);
+        }
+        m_framesCanvas->canvas()->setMaskOutline(previewMask, QColor(255, 200, 0), region);
+        if (MaskHasContent(otherMask)) {
+            m_framesCanvas->canvas()->setSecondaryMaskOutline(otherMask, QColor(0, 200, 255), region);
+        } else {
+            m_framesCanvas->canvas()->setSecondaryMaskOutline(cv::Mat(), QColor());
+        }
         return;
     }
     if (isFrame && m_backgroundMaskMode) {
@@ -7572,6 +9616,7 @@ void MainWindow::handleToolDrag(bool isFrame,
         if (m_showBackgroundLayer) {
             base = applyBackgroundComposite(index, base, m_useHdFrame);
         }
+        base = applySpritesToFrame(index, base, m_useHdFrame, true);
         cv::Mat topPreview = buildMaskPreview(base, previewMask, cv::Vec3b(60, 200, 120));
         QRect outlineRegion;
         if (m_showOriginalFrame) {
@@ -7699,6 +9744,7 @@ void MainWindow::handleToolDrag(bool isFrame,
             if (m_showBackgroundLayer) {
                 base = applyBackgroundComposite(index, base, m_useHdFrame);
             }
+            base = applySpritesToFrame(index, base, m_useHdFrame, true);
             cv::Mat preview = buildCombinedMaskPreview(base, reference, previewMask, color, gapColor);
             m_framesCanvas->canvas()->setPreviewImage(preview);
             QRect outlineRegion;
@@ -7712,6 +9758,209 @@ void MainWindow::handleToolDrag(bool isFrame,
                 m_framesCanvas->canvas()->setMaskOutline(previewMask, QColor(200, 0, 200), outlineRegion);
             } else {
                 m_framesCanvas->canvas()->setMaskOutline(previewMask, QColor(255, 200, 0), outlineRegion);
+            }
+        }
+        return;
+    }
+    if (!isFrame && m_spriteDetAreaMode) {
+        const int index = m_spritesList ? m_spritesList->currentRow() : -1;
+        if (index < 0) {
+            return;
+        }
+        if (!m_spriteHasStart) {
+            return;
+        }
+        const cv::Mat* spriteImage = m_spriteStore ? m_spriteStore->at(index) : nullptr;
+        if (!spriteImage || spriteImage->empty()) {
+            return;
+        }
+        const QRect contentRect = spriteContentRect(index);
+        const int offsetX = contentRect.isValid() ? contentRect.x() : 0;
+        const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
+        const int baseWidth = contentRect.isValid() ? contentRect.width() : spriteImage->cols;
+        const int baseHeight = contentRect.isValid() ? contentRect.height() : spriteImage->rows;
+        cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
+            ? m_spriteOriginals[static_cast<std::size_t>(index)](
+                cv::Rect(offsetX, offsetY, baseWidth, baseHeight))
+            : cv::Mat();
+        if (originalRef.empty()) {
+            return;
+        }
+        cv::Mat cleaned = originalRef.clone();
+        for (int yy = 0; yy < cleaned.rows; ++yy) {
+            uint8_t* row = cleaned.ptr<uint8_t>(yy);
+            for (int xx = 0; xx < cleaned.cols; ++xx) {
+                if (row[xx] == 255) {
+                    row[xx] = 0;
+                }
+            }
+        }
+        cv::Mat original = buildOriginalFrame(cleaned);
+        cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseWidth, baseHeight));
+        FrameLayout layout = BuildFrameLayout(baseWidth, baseHeight,
+                                              displayOriginal.cols, displayOriginal.rows);
+        const int gap = kFrameGapPixels;
+        if (y < layout.topHeight + gap || y >= layout.topHeight + gap + layout.bottomHeight ||
+            x < layout.bottomX || x >= layout.bottomX + layout.bottomWidth) {
+            return;
+        }
+        const int localX = x - layout.bottomX;
+        const int localY = y - (layout.topHeight + gap);
+        const int scaleX = (layout.bottomWidth > 0 && original.cols > 0) ? layout.bottomWidth / original.cols : 1;
+        const int scaleY = (layout.bottomHeight > 0 && original.rows > 0) ? layout.bottomHeight / original.rows : 1;
+        const int mappedX = (scaleX > 1) ? localX / scaleX : localX;
+        const int mappedY = (scaleY > 1) ? localY / scaleY : localY;
+        const int maxX = original.cols - 1;
+        const int maxY = original.rows - 1;
+        const int x0 = std::clamp(m_spriteStart.x(), 0, maxX);
+        const int y0 = std::clamp(m_spriteStart.y(), 0, maxY);
+        const int x1 = std::clamp(mappedX, 0, maxX);
+        const int y1 = std::clamp(mappedY, 0, maxY);
+        const int left = std::min(x0, x1);
+        const int top = std::min(y0, y1);
+        const int right = std::max(x0, x1);
+        const int bottom = std::max(y0, y1);
+        const cv::Rect rect(left, top, right - left + 1, bottom - top + 1);
+        cv::Mat previewMask(original.size(), CV_8UC1, cv::Scalar(0));
+        cv::rectangle(previewMask, rect, cv::Scalar(1), 1);
+        cv::Mat otherMask(original.size(), CV_8UC1, cv::Scalar(0));
+        const std::size_t base = static_cast<std::size_t>(index) * MAX_SPRITE_DETECT_AREAS * 4;
+        for (int area = 0; area < MAX_SPRITE_DETECT_AREAS; ++area) {
+            if (area == m_spriteDetAreaIndex) {
+                continue;
+            }
+            const std::size_t areaBase = base + static_cast<std::size_t>(area) * 4;
+            if (areaBase + 3 >= m_spriteDetAreas.size()) {
+                continue;
+            }
+            const uint16_t leftVal = m_spriteDetAreas[areaBase];
+            if (leftVal == 0xffff) {
+                continue;
+            }
+            const int fullX = static_cast<int>(leftVal);
+            const int fullY = static_cast<int>(m_spriteDetAreas[areaBase + 1]);
+            const int aw = static_cast<int>(m_spriteDetAreas[areaBase + 2]);
+            const int ah = static_cast<int>(m_spriteDetAreas[areaBase + 3]);
+            cv::Rect rect(fullX - offsetX, fullY - offsetY, aw, ah);
+            rect &= cv::Rect(0, 0, original.cols, original.rows);
+            if (rect.width <= 0 || rect.height <= 0) {
+                continue;
+            }
+            cv::rectangle(otherMask, rect, cv::Scalar(1), 1);
+        }
+        QRect region(layout.bottomX,
+                     layout.topHeight + kFrameGapPixels,
+                     layout.bottomWidth,
+                     layout.bottomHeight);
+        m_spritesCanvas->canvas()->setMaskOutline(previewMask, QColor(255, 200, 0), region);
+        if (MaskHasContent(otherMask)) {
+            m_spritesCanvas->canvas()->setSecondaryMaskOutline(otherMask, QColor(0, 200, 255), region);
+        } else {
+            m_spritesCanvas->canvas()->setSecondaryMaskOutline(cv::Mat(), QColor());
+        }
+        return;
+    }
+    if (!isFrame && m_spriteDynamicMaskMode) {
+        const int index = m_spritesList ? m_spritesList->currentRow() : -1;
+        if (index < 0) {
+            return;
+        }
+        ensureSpriteDataSize();
+        cv::Mat* map = activeSpriteDynamicMask(index);
+        if (!map || map->empty()) {
+            return;
+        }
+        const cv::Mat* spriteImage = m_spriteStore ? m_spriteStore->at(index) : nullptr;
+        const QRect contentRect = spriteContentRect(index);
+        const int offsetX = contentRect.isValid() ? contentRect.x() : 0;
+        const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
+        const QSize baseSize = contentRect.isValid()
+            ? QSize(contentRect.width(), contentRect.height())
+            : QSize(spriteImage && !spriteImage->empty() ? spriteImage->cols : map->cols,
+                    spriteImage && !spriteImage->empty() ? spriteImage->rows : map->rows);
+        cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
+            ? m_spriteOriginals[static_cast<std::size_t>(index)](
+                cv::Rect(offsetX, offsetY, baseSize.width(), baseSize.height()))
+            : cv::Mat();
+        cv::Mat original = originalRef.empty() ? cv::Mat() : buildOriginalFrame(originalRef);
+        cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseSize.width(), baseSize.height()));
+        FrameLayout layout = BuildFrameLayout(baseSize.width(), baseSize.height(),
+                                              displayOriginal.cols, displayOriginal.rows);
+        if (x < layout.topX || x >= layout.topX + layout.topWidth ||
+            y < 0 || y >= layout.topHeight) {
+            return;
+        }
+        const QPoint mappedLocal = ScalePointToSize(QPoint(x - layout.topX, y),
+                                                    QSize(layout.topWidth, layout.topHeight),
+                                                    QSize(baseSize.width(), baseSize.height()));
+        const QPoint mapped(mappedLocal.x() + offsetX, mappedLocal.y() + offsetY);
+        if (mapped.x() < 0 || mapped.y() < 0 || mapped.x() >= map->cols || mapped.y() >= map->rows) {
+            return;
+        }
+        const cv::Mat* spriteMask = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
+            ? &m_spriteOriginals[static_cast<std::size_t>(index)]
+            : nullptr;
+        cv::Mat maskScaled;
+        if (spriteMask && !spriteMask->empty()) {
+            if (spriteMask->size() != map->size()) {
+                cv::resize(*spriteMask, maskScaled, map->size(), 0.0, 0.0, cv::INTER_NEAREST);
+            } else {
+                maskScaled = *spriteMask;
+            }
+            if (maskScaled.at<uint8_t>(mapped.y(), mapped.x()) == 255) {
+                return;
+            }
+        }
+        if (m_drawTool == DrawTool::Point) {
+            const bool erase = buttons.testFlag(Qt::RightButton) || modifiers.testFlag(Qt::ShiftModifier);
+            applyToolToDynamicMask(*map, m_spriteDynamicSetIndex, DrawTool::Point, mapped, mapped, erase);
+            if (!maskScaled.empty()) {
+                ApplySpriteMaskConstraints(*map, maskScaled);
+            }
+            updateSpriteCanvasImage(index);
+            return;
+        }
+        if (!m_spriteHasStart) {
+            return;
+        }
+        cv::Mat previewMap = map->clone();
+        const bool erase = buttons.testFlag(Qt::RightButton) || modifiers.testFlag(Qt::ShiftModifier);
+        applyToolToDynamicMask(previewMap, m_spriteDynamicSetIndex, m_drawTool, m_spriteStart, mapped, erase);
+        if (!maskScaled.empty()) {
+            ApplySpriteMaskConstraints(previewMap, maskScaled);
+        }
+        if (spriteImage && !spriteImage->empty()) {
+            cv::Mat baseFull = applySpriteDynamicColors(index, *spriteImage);
+            cv::Mat previewMaskFull = buildDynamicMaskFromMap(previewMap, m_spriteDynamicSetIndex);
+            cv::Rect roi(offsetX, offsetY, baseSize.width(), baseSize.height());
+            cv::Mat base = baseFull(roi).clone();
+            cv::Mat previewMask = previewMaskFull(roi).clone();
+            cv::Mat preview = buildMaskPreview(base, previewMask, cv::Vec3b(0, 200, 255));
+            cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
+                ? m_spriteOriginals[static_cast<std::size_t>(index)](roi).clone()
+                : cv::Mat();
+            cv::Mat original;
+            if (!originalRef.empty()) {
+                cv::Mat cleaned = originalRef.clone();
+                for (int yy = 0; yy < cleaned.rows; ++yy) {
+                    uint8_t* row = cleaned.ptr<uint8_t>(yy);
+                    for (int xx = 0; xx < cleaned.cols; ++xx) {
+                        if (row[xx] == 255) {
+                            row[xx] = 0;
+                        }
+                    }
+                }
+                original = buildOriginalFrame(cleaned);
+            }
+            if (!original.empty()) {
+                cv::Mat displayOriginal = BuildDisplayOriginal(original, preview.size());
+                const QColor gap = m_spritesCanvas->palette().color(QPalette::Window);
+                cv::Mat combined = buildCombinedFrame(preview,
+                                                      displayOriginal,
+                                                      cv::Scalar(gap.blue(), gap.green(), gap.red()));
+                m_spritesCanvas->canvas()->setPreviewImage(combined);
+            } else {
+                m_spritesCanvas->canvas()->setPreviewImage(preview);
             }
         }
         return;
@@ -7730,6 +9979,28 @@ void MainWindow::handleToolDrag(bool isFrame,
             return;
         }
         x -= layout.topX;
+    } else {
+        const int index = m_spritesList ? m_spritesList->currentRow() : -1;
+        const QRect contentRect = spriteContentRect(index);
+        const int offsetX = contentRect.isValid() ? contentRect.x() : 0;
+        const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
+        const int baseWidth = contentRect.isValid() ? contentRect.width() : image->cols;
+        const int baseHeight = contentRect.isValid() ? contentRect.height() : image->rows;
+        cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
+            ? m_spriteOriginals[static_cast<std::size_t>(index)](
+                cv::Rect(offsetX, offsetY, baseWidth, baseHeight))
+            : cv::Mat();
+        cv::Mat original = originalRef.empty() ? cv::Mat() : buildOriginalFrame(originalRef);
+        cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseWidth, baseHeight));
+        FrameLayout layout = BuildFrameLayout(baseWidth, baseHeight,
+                                              displayOriginal.cols, displayOriginal.rows);
+        if (y < 0 || y >= layout.topHeight ||
+            x < layout.topX || x >= layout.topX + layout.topWidth) {
+            return;
+        }
+        x -= layout.topX;
+        x += offsetX;
+        y += offsetY;
     }
     if (m_drawTool == DrawTool::Point) {
         const bool erase = buttons.testFlag(Qt::RightButton);
@@ -7744,6 +10015,13 @@ void MainWindow::handleToolDrag(bool isFrame,
                 }
                 const QPoint mapped = ScalePointToSize(basePoint, baseSize,
                                                        QSize(target->cols, target->rows));
+                const cv::Mat spriteMask = buildSpriteCoverageMask(frameIndex, m_useHdFrame);
+                if (!spriteMask.empty() &&
+                    mapped.y() >= 0 && mapped.y() < spriteMask.rows &&
+                    mapped.x() >= 0 && mapped.x() < spriteMask.cols &&
+                    spriteMask.at<uint8_t>(mapped.y(), mapped.x())) {
+                    continue;
+                }
                 applyToolToImage(*target, DrawTool::Point, mapped, mapped, erase);
                 updateFramePreviewAt(frameIndex);
             }
@@ -7751,7 +10029,7 @@ void MainWindow::handleToolDrag(bool isFrame,
             updateMaskPreviewForFrame(m_framesList->currentRow());
         } else {
             applyToolToImage(*image, DrawTool::Point, QPoint(x, y), QPoint(x, y), erase);
-            m_spritesCanvas->setImage(*image);
+            updateSpriteCanvasImage(m_spritesList ? m_spritesList->currentRow() : -1);
         }
         return;
     }
@@ -7771,6 +10049,7 @@ void MainWindow::handleToolDrag(bool isFrame,
         cv::Mat composed = m_showBackgroundLayer
             ? applyBackgroundComposite(frameIndex, previewBase, m_useHdFrame)
             : previewBase;
+        composed = applySpritesToFrame(frameIndex, composed, m_useHdFrame, true);
         if (original.empty()) {
             m_framesCanvas->canvas()->setPreviewImage(composed);
         } else {
@@ -7782,7 +10061,43 @@ void MainWindow::handleToolDrag(bool isFrame,
             m_framesCanvas->canvas()->setPreviewImage(combined);
         }
     } else {
-        m_spritesCanvas->canvas()->setPreviewImage(preview);
+        const int spriteIndex = m_spritesList ? m_spritesList->currentRow() : -1;
+        const QRect contentRect = spriteContentRect(spriteIndex);
+        const int offsetX = contentRect.isValid() ? contentRect.x() : 0;
+        const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
+        const int baseWidth = contentRect.isValid() ? contentRect.width() : preview.cols;
+        const int baseHeight = contentRect.isValid() ? contentRect.height() : preview.rows;
+        cv::Mat previewDisplay = applySpriteDynamicColors(spriteIndex, preview);
+        if (contentRect.isValid()) {
+            previewDisplay = previewDisplay(cv::Rect(offsetX, offsetY, baseWidth, baseHeight)).clone();
+        }
+        cv::Mat originalRef = (spriteIndex >= 0 && spriteIndex < static_cast<int>(m_spriteOriginals.size()))
+            ? m_spriteOriginals[static_cast<std::size_t>(spriteIndex)](
+                cv::Rect(offsetX, offsetY, baseWidth, baseHeight))
+            : cv::Mat();
+        cv::Mat original;
+        if (!originalRef.empty()) {
+            cv::Mat cleaned = originalRef.clone();
+            for (int yy = 0; yy < cleaned.rows; ++yy) {
+                uint8_t* row = cleaned.ptr<uint8_t>(yy);
+                for (int xx = 0; xx < cleaned.cols; ++xx) {
+                    if (row[xx] == 255) {
+                        row[xx] = 0;
+                    }
+                }
+            }
+            original = buildOriginalFrame(cleaned);
+        }
+        if (!original.empty()) {
+            cv::Mat displayOriginal = BuildDisplayOriginal(original, previewDisplay.size());
+            const QColor gap = m_spritesCanvas->palette().color(QPalette::Window);
+            cv::Mat combined = buildCombinedFrame(previewDisplay,
+                                                  displayOriginal,
+                                                  cv::Scalar(gap.blue(), gap.green(), gap.red()));
+            m_spritesCanvas->canvas()->setPreviewImage(combined);
+        } else {
+            m_spritesCanvas->canvas()->setPreviewImage(previewDisplay);
+        }
     }
 }
 
@@ -7793,6 +10108,101 @@ void MainWindow::handleToolRelease(bool isFrame,
                                    Qt::KeyboardModifiers modifiers)
 {
     if (!m_drawPointEnabled) {
+        return;
+    }
+    if (isFrame && m_frameDrawOnZone) {
+        if (!m_frameHasStart) {
+            return;
+        }
+        const int index = m_framesList ? m_framesList->currentRow() : -1;
+        if (index < 0) {
+            m_frameHasStart = false;
+            m_frameDrawOnZone = false;
+            return;
+        }
+        ensureMaskDataSize();
+        const cv::Mat* topFrame = activeFrameImage(index, false);
+        if (!topFrame || topFrame->empty()) {
+            m_frameHasStart = false;
+            m_frameDrawOnZone = false;
+            return;
+        }
+        cv::Mat reference = buildOriginalPreviewForIndex(index);
+        FrameLayout layout = BuildFrameLayout(*topFrame, reference);
+        const bool useBottom = m_showOriginalFrame && !reference.empty();
+        int localX = x;
+        int localY = y;
+        if (useBottom) {
+            const int gap = kFrameGapPixels;
+            if (y < layout.topHeight + gap || y >= layout.topHeight + gap + layout.bottomHeight ||
+                x < layout.bottomX || x >= layout.bottomX + layout.bottomWidth) {
+                m_frameHasStart = false;
+                m_frameDrawOnZone = false;
+                return;
+            }
+            localX = x - layout.bottomX;
+            localY = y - (layout.topHeight + gap);
+        } else {
+            if (y < 0 || y >= layout.topHeight ||
+                x < layout.topX || x >= layout.topX + layout.topWidth) {
+                m_frameHasStart = false;
+                m_frameDrawOnZone = false;
+                return;
+            }
+            localX = x - layout.topX;
+            localY = y;
+        }
+        const int baseWidth = reference.empty() ? topFrame->cols : reference.cols;
+        const int baseHeight = reference.empty() ? topFrame->rows : reference.rows;
+        const int scaleX = (useBottom && baseWidth > 0) ? layout.bottomWidth / baseWidth : 1;
+        const int scaleY = (useBottom && baseHeight > 0) ? layout.bottomHeight / baseHeight : 1;
+        const int mappedX = (scaleX > 1) ? localX / scaleX : localX;
+        const int mappedY = (scaleY > 1) ? localY / scaleY : localY;
+        if (mappedX < 0 || mappedY < 0 || mappedX >= baseWidth || mappedY >= baseHeight) {
+            m_frameHasStart = false;
+            m_frameDrawOnZone = false;
+            return;
+        }
+        const QPoint baseStart = m_frameStart;
+        const QPoint baseEnd(mappedX, mappedY);
+        const QSize baseSize(baseWidth, baseHeight);
+        if (m_selectedSpriteSlot < 0 || m_selectedSpriteSlot >= MAX_SPRITES_PER_FRAME) {
+            statusBar()->showMessage("Select a sprite slot before editing zones.", 2000);
+            m_frameHasStart = false;
+            m_frameDrawOnZone = false;
+            return;
+        }
+        const std::vector<int> targets = targetFrameIndices();
+        for (int frameIndex : targets) {
+            if (frameIndex < 0) {
+                continue;
+            }
+            cv::Mat targetReference = buildOriginalPreviewForIndex(frameIndex);
+            const QSize targetSize = targetReference.empty()
+                ? baseSize
+                : QSize(targetReference.cols, targetReference.rows);
+            const QPoint mappedStart = ScalePointToSize(baseStart, baseSize, targetSize);
+            const QPoint mappedEnd = ScalePointToSize(baseEnd, baseSize, targetSize);
+            const int left = std::min(mappedStart.x(), mappedEnd.x());
+            const int top = std::min(mappedStart.y(), mappedEnd.y());
+            const int right = std::max(mappedStart.x(), mappedEnd.x());
+            const int bottom = std::max(mappedStart.y(), mappedEnd.y());
+            const std::size_t bboxIndex = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME * 4 +
+                static_cast<std::size_t>(m_selectedSpriteSlot) * 4;
+            if (bboxIndex + 3 >= m_frameSpriteBBoxes.size()) {
+                continue;
+            }
+            m_frameSpriteBBoxes[bboxIndex] = static_cast<uint16_t>(std::clamp(left, 0, targetSize.width() - 1));
+            m_frameSpriteBBoxes[bboxIndex + 1] = static_cast<uint16_t>(std::clamp(top, 0, targetSize.height() - 1));
+            m_frameSpriteBBoxes[bboxIndex + 2] = static_cast<uint16_t>(std::clamp(right, 0, targetSize.width() - 1));
+            m_frameSpriteBBoxes[bboxIndex + 3] = static_cast<uint16_t>(std::clamp(bottom, 0, targetSize.height() - 1));
+            updateFramePreviewAt(frameIndex);
+        }
+        m_frameHasStart = false;
+        m_frameDrawOnZone = false;
+        refreshSpriteZoneList();
+        refreshFrameSpriteSlotCombo();
+        updateMaskPreviewForFrame(index);
         return;
     }
     if (isFrame && m_backgroundMaskMode) {
@@ -7950,6 +10360,173 @@ void MainWindow::handleToolRelease(bool isFrame,
         m_frameUndoActive = false;
         return;
     }
+    if (!isFrame && m_spriteDetAreaMode) {
+        if (m_drawTool == DrawTool::ColorPicker) {
+            m_spriteUndoActive = false;
+            return;
+        }
+        if (!m_spriteHasStart) {
+            return;
+        }
+        const int index = m_spritesList ? m_spritesList->currentRow() : -1;
+        if (index < 0) {
+            m_spriteHasStart = false;
+            return;
+        }
+        ensureSpriteDataSize();
+        const cv::Mat* spriteImage = m_spriteStore ? m_spriteStore->at(index) : nullptr;
+        if (!spriteImage || spriteImage->empty()) {
+            m_spriteHasStart = false;
+            return;
+        }
+        const QRect contentRect = spriteContentRect(index);
+        const int offsetX = contentRect.isValid() ? contentRect.x() : 0;
+        const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
+        const int baseWidth = contentRect.isValid() ? contentRect.width() : spriteImage->cols;
+        const int baseHeight = contentRect.isValid() ? contentRect.height() : spriteImage->rows;
+        cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
+            ? m_spriteOriginals[static_cast<std::size_t>(index)](
+                cv::Rect(offsetX, offsetY, baseWidth, baseHeight))
+            : cv::Mat();
+        if (originalRef.empty()) {
+            m_spriteHasStart = false;
+            return;
+        }
+        cv::Mat cleaned = originalRef.clone();
+        for (int yy = 0; yy < cleaned.rows; ++yy) {
+            uint8_t* row = cleaned.ptr<uint8_t>(yy);
+            for (int xx = 0; xx < cleaned.cols; ++xx) {
+                if (row[xx] == 255) {
+                    row[xx] = 0;
+                }
+            }
+        }
+        cv::Mat original = buildOriginalFrame(cleaned);
+        cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseWidth, baseHeight));
+        FrameLayout layout = BuildFrameLayout(baseWidth, baseHeight,
+                                              displayOriginal.cols, displayOriginal.rows);
+        const int gap = kFrameGapPixels;
+        if (y < layout.topHeight + gap || y >= layout.topHeight + gap + layout.bottomHeight ||
+            x < layout.bottomX || x >= layout.bottomX + layout.bottomWidth) {
+            m_spriteHasStart = false;
+            return;
+        }
+        const int localX = x - layout.bottomX;
+        const int localY = y - (layout.topHeight + gap);
+        const int scaleX = (layout.bottomWidth > 0 && original.cols > 0) ? layout.bottomWidth / original.cols : 1;
+        const int scaleY = (layout.bottomHeight > 0 && original.rows > 0) ? layout.bottomHeight / original.rows : 1;
+        const int mappedX = (scaleX > 1) ? localX / scaleX : localX;
+        const int mappedY = (scaleY > 1) ? localY / scaleY : localY;
+        const int maxX = original.cols - 1;
+        const int maxY = original.rows - 1;
+        const int x0 = std::clamp(m_spriteStart.x(), 0, maxX);
+        const int y0 = std::clamp(m_spriteStart.y(), 0, maxY);
+        const int x1 = std::clamp(mappedX, 0, maxX);
+        const int y1 = std::clamp(mappedY, 0, maxY);
+        const int left = std::min(x0, x1);
+        const int top = std::min(y0, y1);
+        const int right = std::max(x0, x1);
+        const int bottom = std::max(y0, y1);
+        const int width = right - left + 1;
+        const int height = bottom - top + 1;
+        const int fullLeft = left + offsetX;
+        const int fullTop = top + offsetY;
+        const int fullMaxX = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
+            ? m_spriteOriginals[static_cast<std::size_t>(index)].cols - 1
+            : fullLeft + width - 1;
+        const int fullMaxY = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
+            ? m_spriteOriginals[static_cast<std::size_t>(index)].rows - 1
+            : fullTop + height - 1;
+        const int clippedLeft = std::clamp(fullLeft, 0, fullMaxX);
+        const int clippedTop = std::clamp(fullTop, 0, fullMaxY);
+        const int clippedWidth = std::clamp(width, 1, fullMaxX - clippedLeft + 1);
+        const int clippedHeight = std::clamp(height, 1, fullMaxY - clippedTop + 1);
+        const std::size_t base = static_cast<std::size_t>(index) * MAX_SPRITE_DETECT_AREAS * 4 +
+            static_cast<std::size_t>(m_spriteDetAreaIndex) * 4;
+        if (base + 3 < m_spriteDetAreas.size()) {
+            m_spriteDetAreas[base] = static_cast<uint16_t>(clippedLeft);
+            m_spriteDetAreas[base + 1] = static_cast<uint16_t>(clippedTop);
+            m_spriteDetAreas[base + 2] = static_cast<uint16_t>(clippedWidth);
+            m_spriteDetAreas[base + 3] = static_cast<uint16_t>(clippedHeight);
+        }
+        m_spriteHasStart = false;
+        m_spriteUndoActive = false;
+        updateSpriteCanvasImage(index);
+        return;
+    }
+    if (!isFrame && m_spriteDynamicMaskMode) {
+        if (m_drawTool == DrawTool::Point ||
+            m_drawTool == DrawTool::ColorPicker ||
+            m_drawTool == DrawTool::MagicFill) {
+            m_spriteUndoActive = false;
+            return;
+        }
+        if (!m_spriteHasStart) {
+            return;
+        }
+        const int index = m_spritesList ? m_spritesList->currentRow() : -1;
+        if (index < 0) {
+            m_spriteHasStart = false;
+            return;
+        }
+        ensureSpriteDataSize();
+        cv::Mat* map = activeSpriteDynamicMask(index);
+        if (!map || map->empty()) {
+            m_spriteHasStart = false;
+            return;
+        }
+        const cv::Mat* spriteImage = m_spriteStore ? m_spriteStore->at(index) : nullptr;
+        const QRect contentRect = spriteContentRect(index);
+        const int offsetX = contentRect.isValid() ? contentRect.x() : 0;
+        const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
+        const QSize baseSize = contentRect.isValid()
+            ? QSize(contentRect.width(), contentRect.height())
+            : QSize(spriteImage && !spriteImage->empty() ? spriteImage->cols : map->cols,
+                    spriteImage && !spriteImage->empty() ? spriteImage->rows : map->rows);
+        cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
+            ? m_spriteOriginals[static_cast<std::size_t>(index)](
+                cv::Rect(offsetX, offsetY, baseSize.width(), baseSize.height()))
+            : cv::Mat();
+        cv::Mat original = originalRef.empty() ? cv::Mat() : buildOriginalFrame(originalRef);
+        cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseSize.width(), baseSize.height()));
+        FrameLayout layout = BuildFrameLayout(baseSize.width(), baseSize.height(),
+                                              displayOriginal.cols, displayOriginal.rows);
+        if (x < layout.topX || x >= layout.topX + layout.topWidth ||
+            y < 0 || y >= layout.topHeight) {
+            m_spriteHasStart = false;
+            return;
+        }
+        const QPoint mappedLocal = ScalePointToSize(QPoint(x - layout.topX, y),
+                                                    QSize(layout.topWidth, layout.topHeight),
+                                                    QSize(baseSize.width(), baseSize.height()));
+        const QPoint mapped(mappedLocal.x() + offsetX, mappedLocal.y() + offsetY);
+        if (mapped.x() < 0 || mapped.y() < 0 || mapped.x() >= map->cols || mapped.y() >= map->rows) {
+            m_spriteHasStart = false;
+            return;
+        }
+        const cv::Mat* spriteMask = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
+            ? &m_spriteOriginals[static_cast<std::size_t>(index)]
+            : nullptr;
+        cv::Mat maskScaled;
+        if (spriteMask && !spriteMask->empty()) {
+            if (spriteMask->size() != map->size()) {
+                cv::resize(*spriteMask, maskScaled, map->size(), 0.0, 0.0, cv::INTER_NEAREST);
+            } else {
+                maskScaled = *spriteMask;
+            }
+        }
+        const bool erase = (m_spriteStartButton == Qt::RightButton || button == Qt::RightButton ||
+                            modifiers.testFlag(Qt::ShiftModifier));
+        applyToolToDynamicMask(*map, m_spriteDynamicSetIndex, m_drawTool, m_spriteStart, mapped, erase);
+        if (!maskScaled.empty()) {
+            ApplySpriteMaskConstraints(*map, maskScaled);
+        }
+        m_spriteHasStart = false;
+        m_spritesCanvas->canvas()->clearPreviewImage();
+        updateSpriteCanvasImage(index);
+        m_spriteUndoActive = false;
+        return;
+    }
     if (m_drawTool == DrawTool::Point ||
         m_drawTool == DrawTool::ColorPicker ||
         m_drawTool == DrawTool::MagicFill) {
@@ -7988,6 +10565,29 @@ void MainWindow::handleToolRelease(bool isFrame,
             return;
         }
         x -= layout.topX;
+    } else {
+        const int index = m_spritesList ? m_spritesList->currentRow() : -1;
+        const QRect contentRect = spriteContentRect(index);
+        const int offsetX = contentRect.isValid() ? contentRect.x() : 0;
+        const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
+        const int baseWidth = contentRect.isValid() ? contentRect.width() : image->cols;
+        const int baseHeight = contentRect.isValid() ? contentRect.height() : image->rows;
+        cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
+            ? m_spriteOriginals[static_cast<std::size_t>(index)](
+                cv::Rect(offsetX, offsetY, baseWidth, baseHeight))
+            : cv::Mat();
+        cv::Mat original = originalRef.empty() ? cv::Mat() : buildOriginalFrame(originalRef);
+        cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseWidth, baseHeight));
+        FrameLayout layout = BuildFrameLayout(baseWidth, baseHeight,
+                                              displayOriginal.cols, displayOriginal.rows);
+        if (y < 0 || y >= layout.topHeight ||
+            x < layout.topX || x >= layout.topX + layout.topWidth) {
+            m_spriteHasStart = false;
+            return;
+        }
+        x -= layout.topX;
+        x += offsetX;
+        y += offsetY;
     }
     const bool erase = (startButton == Qt::RightButton || button == Qt::RightButton);
     if (isFrame) {
@@ -8004,7 +10604,15 @@ void MainWindow::handleToolRelease(bool isFrame,
                                                         QSize(target->cols, target->rows));
             const QPoint mappedEnd = ScalePointToSize(baseEnd, baseSize,
                                                       QSize(target->cols, target->rows));
+            const cv::Mat spriteMask = buildSpriteCoverageMask(frameIndex, m_useHdFrame);
+            cv::Mat before;
+            if (!spriteMask.empty()) {
+                before = target->clone();
+            }
             applyToolToImage(*target, m_drawTool, mappedStart, mappedEnd, erase);
+            if (!spriteMask.empty()) {
+                restoreSpriteCoverage(*target, before, spriteMask);
+            }
             updateFramePreviewAt(frameIndex);
         }
         m_framesCanvas->canvas()->clearPreviewImage();
@@ -8014,7 +10622,7 @@ void MainWindow::handleToolRelease(bool isFrame,
     } else {
         applyToolToImage(*image, m_drawTool, start, QPoint(x, y), erase);
         m_spritesCanvas->canvas()->clearPreviewImage();
-        m_spritesCanvas->setImage(*image);
+        updateSpriteCanvasImage(m_spritesList ? m_spritesList->currentRow() : -1);
         m_spriteUndoActive = false;
     }
 }
@@ -8249,9 +10857,11 @@ void MainWindow::cancelCurrentDraw()
     m_frameUndoActive = false;
     m_spriteUndoActive = false;
     m_frameDrawOnMask = false;
+    m_frameDrawOnZone = false;
     m_framesCanvas->canvas()->clearPreviewImage();
     m_spritesCanvas->canvas()->clearPreviewImage();
     updateMaskPreviewForFrame(m_framesList->currentRow());
+    updateSpriteCanvasImage(m_spritesList ? m_spritesList->currentRow() : -1);
     statusBar()->showMessage("Draw canceled", 1500);
 }
 
@@ -8287,6 +10897,9 @@ void MainWindow::updateMetadataForSprite(int index)
 {
     if (index < 0 || index >= static_cast<int>(m_spriteNames.size())) {
         m_spriteMetaLabel->setText("-");
+        if (m_spriteDynamicSetCombo) {
+            m_spriteDynamicSetCombo->setEnabled(false);
+        }
         return;
     }
     const std::string& name = m_spriteNames[index];
@@ -8294,6 +10907,9 @@ void MainWindow::updateMetadataForSprite(int index)
         m_spriteMetaLabel->setText("-");
     } else {
         m_spriteMetaLabel->setText(QString::fromStdString(name));
+    }
+    if (m_spriteDynamicSetCombo) {
+        m_spriteDynamicSetCombo->setEnabled(true);
     }
 }
 

@@ -152,11 +152,36 @@ void GLCanvasWidget::setSecondaryMaskOutline(const cv::Mat& mask, const QColor& 
     update();
 }
 
+void GLCanvasWidget::setTertiaryMaskOutline(const cv::Mat& mask, const QColor& color, const QRect& region)
+{
+    if (mask.empty()) {
+        m_outlineMaskTertiary.release();
+        m_outlineTertiaryEnabled = false;
+        m_outlineTertiaryHasRegion = false;
+        update();
+        return;
+    }
+    m_outlineMaskTertiary = mask.clone();
+    m_outlineColorTertiary = color;
+    m_outlineTertiaryEnabled = true;
+    m_outlineRegionTertiary = region;
+    m_outlineTertiaryHasRegion = region.isValid() && !region.isEmpty();
+    update();
+}
+
 void GLCanvasWidget::clearPrimaryOutline()
 {
     m_outlineMask.release();
     m_outlineEnabled = false;
     m_outlineHasRegion = false;
+    update();
+}
+
+void GLCanvasWidget::clearTertiaryOutline()
+{
+    m_outlineMaskTertiary.release();
+    m_outlineTertiaryEnabled = false;
+    m_outlineTertiaryHasRegion = false;
     update();
 }
 
@@ -168,6 +193,9 @@ void GLCanvasWidget::clearMaskOutline()
     m_outlineMaskSecondary.release();
     m_outlineSecondaryEnabled = false;
     m_outlineSecondaryHasRegion = false;
+    m_outlineMaskTertiary.release();
+    m_outlineTertiaryEnabled = false;
+    m_outlineTertiaryHasRegion = false;
     update();
 }
 
@@ -366,6 +394,11 @@ void GLCanvasWidget::paintGL()
                 m_outlineSecondaryEnabled,
                 m_outlineSecondaryHasRegion,
                 m_outlineRegionSecondary);
+    drawOutline(m_outlineMaskTertiary,
+                m_outlineColorTertiary,
+                m_outlineTertiaryEnabled,
+                m_outlineTertiaryHasRegion,
+                m_outlineRegionTertiary);
 
     if (m_hoverValid && !m_image.empty()) {
         painter.save();

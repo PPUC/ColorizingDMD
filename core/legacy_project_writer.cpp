@@ -123,7 +123,7 @@ bool SaveLegacyProject(const std::string& crom_path,
     const uint32_t no_colors = project.no_colors > 0 ? project.no_colors : 64;
     uint32_t n_comp_masks = 0;
     const uint16_t n_backgrounds = static_cast<uint16_t>(project.background_frames.size());
-    const uint32_t length_header = 14 * sizeof(uint32_t);
+    const uint32_t length_header = 19 * sizeof(uint32_t);
 
     const std::size_t mask_pixels = static_cast<std::size_t>(frame_width) * frame_height;
     if (!project.comp_masks.empty() || !project.frame_comp_mask_ids.empty()) {
@@ -223,11 +223,36 @@ bool SaveLegacyProject(const std::string& crom_path,
     std::vector<uint16_t> sprite_colored(n_sprites * MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT, 0);
     std::vector<uint8_t> sprite_mask_x(sprite_original.size(), 255);
     std::vector<uint16_t> sprite_colored_x(sprite_colored.size(), 0);
+    std::vector<uint16_t> sprite_dyna_cols(n_sprites * MAX_DYNA_SETS_PER_SPRITE * no_colors, 0);
+    std::vector<uint16_t> sprite_dyna_cols_x(sprite_dyna_cols.size(), 0);
+    std::vector<uint8_t> sprite_dyna_masks(sprite_original.size(), 255);
+    std::vector<uint8_t> sprite_dyna_masks_x(sprite_original.size(), 255);
+    std::vector<uint8_t> sprite_shape_mode(n_sprites, 0);
     std::vector<uint8_t> background_flags(n_backgrounds, 0);
     std::vector<uint16_t> background_frames_565(static_cast<std::size_t>(n_backgrounds) *
                                                 frame_width * frame_height, 0);
     std::vector<uint16_t> background_frames_x_565(static_cast<std::size_t>(n_backgrounds) *
                                                   frame_width_x * frame_height_x, 0);
+
+    if (!project.sprite_extra_flags.empty()) {
+        for (std::size_t i = 0; i < std::min(project.sprite_extra_flags.size(),
+                                             static_cast<std::size_t>(extra_sprite.size())); ++i) {
+            extra_sprite[i] = project.sprite_extra_flags[i];
+        }
+    } else if (!project.sprite_colored_x.empty() || !project.sprite_masks_x.empty()) {
+        for (std::size_t i = 0; i < extra_sprite.size(); ++i) {
+            if ((i < project.sprite_colored_x.size() && !project.sprite_colored_x[i].empty()) ||
+                (i < project.sprite_masks_x.size() && !project.sprite_masks_x[i].empty())) {
+                extra_sprite[i] = 1;
+            }
+        }
+    }
+    if (!project.frame_sprites.empty()) {
+        for (std::size_t i = 0; i < std::min(project.frame_sprites.size(),
+                                             static_cast<std::size_t>(frame_sprites.size())); ++i) {
+            frame_sprites[i] = project.frame_sprites[i];
+        }
+    }
 
     if (!project.frame_comp_mask_ids.empty()) {
         for (std::size_t i = 0; i < std::min(project.frame_comp_mask_ids.size(),
@@ -328,14 +353,98 @@ bool SaveLegacyProject(const std::string& crom_path,
     }
 
     for (uint32_t index = 0; index < n_sprites; ++index) {
-        cv::Mat sprite = EnsureBgr(project.sprites[index], cv::Size(MAX_SPRITE_WIDTH, MAX_SPRITE_HEIGHT));
+        const cv::Mat* sprite_source = nullptr;
+        if (index < project.sprite_colored.size() && !project.sprite_colored[index].empty()) {
+            sprite_source = &project.sprite_colored[index];
+        } else if (index < project.sprites.size() && !project.sprites[index].empty()) {
+            sprite_source = &project.sprites[index];
+        }
+        cv::Mat sprite = sprite_source
+            ? EnsureBgr(*sprite_source, cv::Size(MAX_SPRITE_WIDTH, MAX_SPRITE_HEIGHT))
+            : cv::Mat();
         const std::size_t offset = static_cast<std::size_t>(index) * MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT;
-        for (uint32_t y = 0; y < MAX_SPRITE_HEIGHT; ++y) {
-            const cv::Vec3b* row = sprite.ptr<cv::Vec3b>(static_cast<int>(y));
-            for (uint32_t x = 0; x < MAX_SPRITE_WIDTH; ++x) {
-                sprite_original[offset + y * MAX_SPRITE_WIDTH + x] = 0;
-                sprite_colored[offset + y * MAX_SPRITE_WIDTH + x] = BgrToRgb565(row[x]);
+        bool has_orig = false;
+        if (index < project.sprite_originals.size()) {
+            const cv::Mat& orig = project.sprite_originals[index];
+            if (!orig.empty() && orig.rows == MAX_SPRITE_HEIGHT && orig.cols == MAX_SPRITE_WIDTH) {
+                std::memcpy(sprite_original.data() + offset,
+                            orig.data,
+                            MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT);
+                has_orig = true;
             }
+        }
+        if (!sprite.empty()) {
+            for (uint32_t y = 0; y < MAX_SPRITE_HEIGHT; ++y) {
+                const cv::Vec3b* row = sprite.ptr<cv::Vec3b>(static_cast<int>(y));
+                for (uint32_t x = 0; x < MAX_SPRITE_WIDTH; ++x) {
+                    const std::size_t idx = offset + y * MAX_SPRITE_WIDTH + x;
+                    if (!has_orig && sprite_original[idx] == 255) {
+                        sprite_original[idx] = 0;
+                    }
+                    sprite_colored[idx] = BgrToRgb565(row[x]);
+                }
+            }
+        }
+        if (index < project.sprite_masks_x.size()) {
+            const cv::Mat& mask_x = project.sprite_masks_x[index];
+            if (!mask_x.empty() && mask_x.rows == MAX_SPRITE_HEIGHT && mask_x.cols == MAX_SPRITE_WIDTH) {
+                std::memcpy(sprite_mask_x.data() + offset,
+                            mask_x.data,
+                            MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT);
+            }
+        }
+        if (index < project.sprite_colored_x.size()) {
+            const cv::Mat& sprite_x_src = project.sprite_colored_x[index];
+            if (!sprite_x_src.empty()) {
+                cv::Mat sprite_x = EnsureBgr(sprite_x_src, cv::Size(MAX_SPRITE_WIDTH, MAX_SPRITE_HEIGHT));
+                if (!sprite_x.empty()) {
+                    for (uint32_t y = 0; y < MAX_SPRITE_HEIGHT; ++y) {
+                        const cv::Vec3b* row = sprite_x.ptr<cv::Vec3b>(static_cast<int>(y));
+                        for (uint32_t x = 0; x < MAX_SPRITE_WIDTH; ++x) {
+                            sprite_colored_x[offset + y * MAX_SPRITE_WIDTH + x] = BgrToRgb565(row[x]);
+                        }
+                    }
+                }
+            }
+        }
+        if (index < project.sprite_dynamic_colors.size()) {
+            const std::vector<uint16_t>& colors = project.sprite_dynamic_colors[index];
+            const std::size_t colors_offset =
+                static_cast<std::size_t>(index) * MAX_DYNA_SETS_PER_SPRITE * no_colors;
+            if (colors.size() >= MAX_DYNA_SETS_PER_SPRITE * no_colors) {
+                std::memcpy(sprite_dyna_cols.data() + colors_offset,
+                            colors.data(),
+                            MAX_DYNA_SETS_PER_SPRITE * no_colors * sizeof(uint16_t));
+            }
+        }
+        if (index < project.sprite_dynamic_colors_x.size()) {
+            const std::vector<uint16_t>& colors = project.sprite_dynamic_colors_x[index];
+            const std::size_t colors_offset =
+                static_cast<std::size_t>(index) * MAX_DYNA_SETS_PER_SPRITE * no_colors;
+            if (colors.size() >= MAX_DYNA_SETS_PER_SPRITE * no_colors) {
+                std::memcpy(sprite_dyna_cols_x.data() + colors_offset,
+                            colors.data(),
+                            MAX_DYNA_SETS_PER_SPRITE * no_colors * sizeof(uint16_t));
+            }
+        }
+        if (index < project.sprite_dynamic_masks.size()) {
+            const cv::Mat& mask = project.sprite_dynamic_masks[index];
+            if (!mask.empty() && mask.rows == MAX_SPRITE_HEIGHT && mask.cols == MAX_SPRITE_WIDTH) {
+                std::memcpy(sprite_dyna_masks.data() + offset,
+                            mask.data,
+                            MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT);
+            }
+        }
+        if (index < project.sprite_dynamic_masks_x.size()) {
+            const cv::Mat& mask = project.sprite_dynamic_masks_x[index];
+            if (!mask.empty() && mask.rows == MAX_SPRITE_HEIGHT && mask.cols == MAX_SPRITE_WIDTH) {
+                std::memcpy(sprite_dyna_masks_x.data() + offset,
+                            mask.data,
+                            MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT);
+            }
+        }
+        if (index < project.sprite_shape_modes.size()) {
+            sprite_shape_mode[index] = project.sprite_shape_modes[index];
         }
     }
 
@@ -414,6 +523,18 @@ bool SaveLegacyProject(const std::string& crom_path,
     std::vector<uint32_t> det_dwords(det_dwords_count, 0);
     std::vector<uint16_t> det_dword_pos(det_dwords_count, 0);
     std::vector<uint16_t> det_areas(det_dwords_count * 4, 0xffff);
+    if (!project.sprite_det_dwords.empty()) {
+        const std::size_t copy = std::min(project.sprite_det_dwords.size(), det_dwords.size());
+        std::copy_n(project.sprite_det_dwords.begin(), copy, det_dwords.begin());
+    }
+    if (!project.sprite_det_dword_pos.empty()) {
+        const std::size_t copy = std::min(project.sprite_det_dword_pos.size(), det_dword_pos.size());
+        std::copy_n(project.sprite_det_dword_pos.begin(), copy, det_dword_pos.begin());
+    }
+    if (!project.sprite_det_areas.empty()) {
+        const std::size_t copy = std::min(project.sprite_det_areas.size(), det_areas.size());
+        std::copy_n(project.sprite_det_areas.begin(), copy, det_areas.begin());
+    }
     if (!WriteExact(crom, det_dwords.data(), det_dwords.size() * sizeof(uint32_t)) ||
         !WriteExact(crom, det_dword_pos.data(), det_dword_pos.size() * sizeof(uint16_t)) ||
         !WriteExact(crom, det_areas.data(), det_areas.size() * sizeof(uint16_t))) {
@@ -432,11 +553,16 @@ bool SaveLegacyProject(const std::string& crom_path,
     }
 
     std::vector<uint16_t> frame_sprite_bb(n_frames * MAX_SPRITES_PER_FRAME * 4, 0);
-    for (uint32_t i = 0; i < n_frames; ++i) {
-        for (uint32_t j = 0; j < MAX_SPRITES_PER_FRAME; ++j) {
-            const std::size_t offset = (static_cast<std::size_t>(i) * MAX_SPRITES_PER_FRAME + j) * 4;
-            frame_sprite_bb[offset + 2] = static_cast<uint16_t>(frame_width - 1);
-            frame_sprite_bb[offset + 3] = static_cast<uint16_t>(frame_height - 1);
+    if (!project.frame_sprite_bboxes.empty()) {
+        const std::size_t copy = std::min(project.frame_sprite_bboxes.size(), frame_sprite_bb.size());
+        std::copy_n(project.frame_sprite_bboxes.begin(), copy, frame_sprite_bb.begin());
+    } else {
+        for (uint32_t i = 0; i < n_frames; ++i) {
+            for (uint32_t j = 0; j < MAX_SPRITES_PER_FRAME; ++j) {
+                const std::size_t offset = (static_cast<std::size_t>(i) * MAX_SPRITES_PER_FRAME + j) * 4;
+                frame_sprite_bb[offset + 2] = static_cast<uint16_t>(frame_width - 1);
+                frame_sprite_bb[offset + 3] = static_cast<uint16_t>(frame_height - 1);
+            }
         }
     }
     if (!WriteExact(crom, frame_sprite_bb.data(), frame_sprite_bb.size() * sizeof(uint16_t))) {
@@ -483,6 +609,41 @@ bool SaveLegacyProject(const std::string& crom_path,
         !WriteExact(crom, background_mask_x.data(), background_mask_x.size())) {
         if (error) {
             *error = "Failed to write .cROM background info";
+        }
+        return false;
+    }
+
+    const std::size_t dyna_shadow_dirs =
+        static_cast<std::size_t>(n_frames) * MAX_DYNA_SETS_PER_FRAMEN;
+    const std::size_t dyna_shadow_cols =
+        static_cast<std::size_t>(n_frames) * MAX_DYNA_SETS_PER_FRAMEN * sizeof(uint16_t);
+    std::vector<uint8_t> dyna_shadow_dir_o(dyna_shadow_dirs, 0);
+    std::vector<uint16_t> dyna_shadow_col_o(dyna_shadow_dirs, 0);
+    std::vector<uint8_t> dyna_shadow_dir_x(dyna_shadow_dirs, 0);
+    std::vector<uint16_t> dyna_shadow_col_x(dyna_shadow_dirs, 0);
+    if (!WriteExact(crom, dyna_shadow_dir_o.data(), dyna_shadow_dir_o.size()) ||
+        !WriteExact(crom, dyna_shadow_col_o.data(), dyna_shadow_col_o.size() * sizeof(uint16_t)) ||
+        !WriteExact(crom, dyna_shadow_dir_x.data(), dyna_shadow_dir_x.size()) ||
+        !WriteExact(crom, dyna_shadow_col_x.data(), dyna_shadow_col_x.size() * sizeof(uint16_t))) {
+        if (error) {
+            *error = "Failed to write .cROM dynamic shadows";
+        }
+        return false;
+    }
+
+    if (!WriteExact(crom, sprite_dyna_cols.data(), sprite_dyna_cols.size() * sizeof(uint16_t)) ||
+        !WriteExact(crom, sprite_dyna_cols_x.data(), sprite_dyna_cols_x.size() * sizeof(uint16_t)) ||
+        !WriteExact(crom, sprite_dyna_masks.data(), sprite_dyna_masks.size()) ||
+        !WriteExact(crom, sprite_dyna_masks_x.data(), sprite_dyna_masks_x.size())) {
+        if (error) {
+            *error = "Failed to write .cROM sprite dynamic data";
+        }
+        return false;
+    }
+
+    if (!WriteExact(crom, sprite_shape_mode.data(), sprite_shape_mode.size())) {
+        if (error) {
+            *error = "Failed to write .cROM sprite shape mode";
         }
         return false;
     }
@@ -555,6 +716,11 @@ bool SaveLegacyProject(const std::string& crom_path,
     }
 
     std::vector<uint32_t> sprite_col_from_frame(MAX_SPRITES, 0);
+    if (!project.sprite_col_from_frame.empty()) {
+        const std::size_t copy = std::min(project.sprite_col_from_frame.size(),
+                                          sprite_col_from_frame.size());
+        std::copy_n(project.sprite_col_from_frame.begin(), copy, sprite_col_from_frame.begin());
+    }
     std::vector<uint32_t> frame_duration(n_frames, 30);
     if (!project.frame_durations.empty()) {
         for (uint32_t i = 0; i < n_frames && i < project.frame_durations.size(); ++i) {
@@ -601,6 +767,14 @@ bool SaveLegacyProject(const std::string& crom_path,
 
     std::vector<uint16_t> sprite_rect(4 * MAX_SPRITES, 0);
     std::vector<uint32_t> sprite_rect_mirror(2 * MAX_SPRITES, 0);
+    if (!project.sprite_rects.empty()) {
+        const std::size_t copy = std::min(project.sprite_rects.size(), sprite_rect.size());
+        std::copy_n(project.sprite_rects.begin(), copy, sprite_rect.begin());
+    }
+    if (!project.sprite_rect_mirror.empty()) {
+        const std::size_t copy = std::min(project.sprite_rect_mirror.size(), sprite_rect_mirror.size());
+        std::copy_n(project.sprite_rect_mirror.begin(), copy, sprite_rect_mirror.begin());
+    }
     std::vector<uint16_t> palette(N_PALETTES * 64, 0);
     std::vector<uint16_t> edit_colors(16, 0);
     uint32_t n_image_pos_saves = 0;

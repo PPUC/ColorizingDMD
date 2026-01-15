@@ -23,7 +23,9 @@ public:
     void setGridScales(int topScale, int bottomScale);
     void setMaskOutline(const cv::Mat& mask, const QColor& color, const QRect& region = QRect());
     void setSecondaryMaskOutline(const cv::Mat& mask, const QColor& color, const QRect& region = QRect());
+    void setTertiaryMaskOutline(const cv::Mat& mask, const QColor& color, const QRect& region = QRect());
     void clearPrimaryOutline();
+    void clearTertiaryOutline();
     void clearMaskOutline();
     void setHoverPixelEnabled(bool enabled);
     void scaleZoom(double factor);
@@ -72,6 +74,11 @@ private:
     bool m_outlineSecondaryEnabled = false;
     QRect m_outlineRegionSecondary;
     bool m_outlineSecondaryHasRegion = false;
+    cv::Mat m_outlineMaskTertiary;
+    QColor m_outlineColorTertiary = QColor(255, 220, 0);
+    bool m_outlineTertiaryEnabled = false;
+    QRect m_outlineRegionTertiary;
+    bool m_outlineTertiaryHasRegion = false;
     bool m_hoverValid = false;
     int m_hoverX = -1;
     int m_hoverY = -1;

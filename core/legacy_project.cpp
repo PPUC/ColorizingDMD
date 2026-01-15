@@ -12,6 +12,26 @@ bool ReadExact(std::ifstream& file, void* dst, std::size_t size)
     return static_cast<bool>(file.read(reinterpret_cast<char*>(dst), static_cast<std::streamsize>(size)));
 }
 
+std::size_t BytesRemaining(std::ifstream& file)
+{
+    const std::streampos current = file.tellg();
+    if (current < 0) {
+        return 0;
+    }
+    file.seekg(0, std::ios::end);
+    const std::streampos end = file.tellg();
+    if (end < 0) {
+        file.seekg(current);
+        return 0;
+    }
+    file.seekg(current);
+    const std::streamoff remaining = end - current;
+    if (remaining <= 0) {
+        return 0;
+    }
+    return static_cast<std::size_t>(remaining);
+}
+
 bool SkipExact(std::ifstream& file, std::size_t size)
 {
     return static_cast<bool>(file.seekg(static_cast<std::streamoff>(size), std::ios::cur));
@@ -201,7 +221,8 @@ bool LoadLegacyMetadataFromRP(const std::string& path,
         return false;
     }
 
-    if (!SkipExact(file, MAX_SPRITES * sizeof(uint32_t))) {
+    std::vector<uint32_t> sprite_col_from_frame(MAX_SPRITES, 0);
+    if (!ReadExact(file, sprite_col_from_frame.data(), sprite_col_from_frame.size() * sizeof(uint32_t))) {
         if (error) {
             *error = "Unexpected end of .cRP file (sprite colors)";
         }
@@ -216,13 +237,15 @@ bool LoadLegacyMetadataFromRP(const std::string& path,
         return false;
     }
 
-    if (!SkipExact(file, 4 * MAX_SPRITES * sizeof(uint16_t))) {
+    std::vector<uint16_t> sprite_rects(4 * MAX_SPRITES, 0);
+    if (!ReadExact(file, sprite_rects.data(), sprite_rects.size() * sizeof(uint16_t))) {
         if (error) {
             *error = "Unexpected end of .cRP file (sprite rects)";
         }
         return false;
     }
-    if (!SkipExact(file, 2 * MAX_SPRITES * sizeof(uint32_t))) {
+    std::vector<uint32_t> sprite_rect_mirror(2 * MAX_SPRITES, 0);
+    if (!ReadExact(file, sprite_rect_mirror.data(), sprite_rect_mirror.size() * sizeof(uint32_t))) {
         if (error) {
             *error = "Unexpected end of .cRP file (sprite rect mirrors)";
         }
@@ -307,6 +330,9 @@ bool LoadLegacyMetadataFromRP(const std::string& path,
     for (uint32_t i = 0; i < sprites_to_use; ++i) {
         sprite_names.push_back(TrimName(sprite_names_raw, i * SIZE_SECTION_NAMES, SIZE_SECTION_NAMES));
     }
+    out.sprite_col_from_frame = sprite_col_from_frame;
+    out.sprite_rects = sprite_rects;
+    out.sprite_rect_mirror = sprite_rect_mirror;
 
     return true;
 }
@@ -558,19 +584,25 @@ bool LoadLegacyProject(const std::string& path,
         }
     }
 
-    if (!SkipExact(file, static_cast<std::size_t>(n_sprites))) {
-        if (error) {
-            *error = "Unexpected end of file (sprite flags)";
+    std::vector<uint8_t> extra_sprite(n_sprites, 0);
+    if (n_sprites > 0) {
+        if (!ReadExact(file, extra_sprite.data(), extra_sprite.size())) {
+            if (error) {
+                *error = "Unexpected end of file (sprite flags)";
+            }
+            return false;
         }
-        return false;
     }
 
     const std::size_t frame_sprites_bytes = static_cast<std::size_t>(n_frames) * MAX_SPRITES_PER_FRAME;
-    if (!SkipExact(file, frame_sprites_bytes)) {
-        if (error) {
-            *error = "Unexpected end of file (frame sprite indices)";
+    std::vector<uint8_t> frame_sprites(frame_sprites_bytes, 255);
+    if (frame_sprites_bytes > 0) {
+        if (!ReadExact(file, frame_sprites.data(), frame_sprites_bytes)) {
+            if (error) {
+                *error = "Unexpected end of file (frame sprite indices)";
+            }
+            return false;
         }
-        return false;
     }
 
     const std::size_t sprite_pixels = static_cast<std::size_t>(n_sprites) * MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT;
@@ -594,13 +626,21 @@ bool LoadLegacyProject(const std::string& path,
         }
     }
 
-    const std::size_t sprite_masks_x_bytes = sprite_pixels;
-    const std::size_t sprite_colored_x_bytes = sprite_pixels * sizeof(uint16_t);
-    if (!SkipExact(file, sprite_masks_x_bytes + sprite_colored_x_bytes)) {
-        if (error) {
-            *error = "Unexpected end of file (sprite extra data)";
+    std::vector<uint8_t> sprite_mask_x(sprite_pixels, 255);
+    std::vector<uint16_t> sprites_x_565(sprite_pixels, 0);
+    if (sprite_pixels > 0) {
+        if (!ReadExact(file, sprite_mask_x.data(), sprite_pixels)) {
+            if (error) {
+                *error = "Unexpected end of file (sprite extra masks)";
+            }
+            return false;
         }
-        return false;
+        if (!ReadExact(file, sprites_x_565.data(), sprite_pixels * sizeof(uint16_t))) {
+            if (error) {
+                *error = "Unexpected end of file (sprite extra data)";
+            }
+            return false;
+        }
     }
 
     if (!SkipExact(file, static_cast<std::size_t>(n_frames))) {
@@ -635,12 +675,20 @@ bool LoadLegacyProject(const std::string& path,
                 static_cast<std::size_t>(n_sprites) * MAX_SPRITE_DETECT_AREAS * sizeof(uint16_t);
             const std::size_t det_areas_bytes =
                 static_cast<std::size_t>(n_sprites) * MAX_SPRITE_DETECT_AREAS * 4 * sizeof(uint16_t);
-            if (!SkipExact(file, det_dwords_bytes + det_dword_pos_bytes + det_areas_bytes)) {
+            std::vector<uint32_t> det_dwords(det_dwords_bytes / sizeof(uint32_t), 0);
+            std::vector<uint16_t> det_dword_pos(det_dword_pos_bytes / sizeof(uint16_t), 0);
+            std::vector<uint16_t> det_areas(det_areas_bytes / sizeof(uint16_t), 0xffff);
+            if ((det_dwords_bytes > 0 && !ReadExact(file, det_dwords.data(), det_dwords_bytes)) ||
+                (det_dword_pos_bytes > 0 && !ReadExact(file, det_dword_pos.data(), det_dword_pos_bytes)) ||
+                (det_areas_bytes > 0 && !ReadExact(file, det_areas.data(), det_areas_bytes))) {
                 if (error) {
                     *error = "Unexpected end of file (sprite detection)";
                 }
                 return false;
             }
+            out.sprite_det_dwords = std::move(det_dwords);
+            out.sprite_det_dword_pos = std::move(det_dword_pos);
+            out.sprite_det_areas = std::move(det_areas);
             if (length_header >= 11 * sizeof(uint32_t)) {
                 const std::size_t trigger_bytes = static_cast<std::size_t>(n_frames) * sizeof(uint32_t);
                 if (!SkipExact(file, trigger_bytes)) {
@@ -652,12 +700,15 @@ bool LoadLegacyProject(const std::string& path,
                 if (length_header >= 12 * sizeof(uint32_t)) {
                     const std::size_t frame_sprite_bb_bytes =
                         static_cast<std::size_t>(n_frames) * MAX_SPRITES_PER_FRAME * 4 * sizeof(uint16_t);
-                    if (!SkipExact(file, frame_sprite_bb_bytes)) {
+                    std::vector<uint16_t> frame_sprite_bb(frame_sprite_bb_bytes / sizeof(uint16_t), 0);
+                    if (frame_sprite_bb_bytes > 0 &&
+                        !ReadExact(file, frame_sprite_bb.data(), frame_sprite_bb_bytes)) {
                         if (error) {
                             *error = "Unexpected end of file (frame sprite bounding boxes)";
                         }
                         return false;
                     }
+                    out.frame_sprite_bboxes = std::move(frame_sprite_bb);
                     if (length_header >= 13 * sizeof(uint32_t)) {
                         const std::size_t background_flags_bytes = static_cast<std::size_t>(n_backgrounds);
                         const std::size_t background_frames =
@@ -710,42 +761,90 @@ bool LoadLegacyProject(const std::string& path,
                                 const std::size_t sprite_dyna_cols_bytes =
                                     static_cast<std::size_t>(n_sprites) * MAX_DYNA_SETS_PER_SPRITE * no_colors * sizeof(uint16_t);
                                 const std::size_t sprite_masks = static_cast<std::size_t>(n_sprites) * MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT;
-                                sprite_dyna_cols.resize(sprite_dyna_cols_bytes / sizeof(uint16_t));
-                                sprite_dyna_masks.resize(sprite_masks);
-                                if (sprite_dyna_cols_bytes > 0) {
-                                    if (!ReadExact(file, sprite_dyna_cols.data(), sprite_dyna_cols_bytes)) {
-                                        if (error) {
-                                            *error = "Unexpected end of file (sprite dyna colors)";
+                                std::vector<uint16_t> sprite_dyna_cols_x;
+                                std::vector<uint8_t> sprite_dyna_masks_x;
+                                const std::size_t sprite_dyna_bytes =
+                                    sprite_dyna_cols_bytes * 2 + sprite_masks * 2;
+                                const bool sprite_dyna_present = BytesRemaining(file) >= sprite_dyna_bytes;
+                                if (sprite_dyna_present) {
+                                    sprite_dyna_cols.resize(sprite_dyna_cols_bytes / sizeof(uint16_t));
+                                    sprite_dyna_cols_x.resize(sprite_dyna_cols_bytes / sizeof(uint16_t));
+                                    sprite_dyna_masks.resize(sprite_masks);
+                                    sprite_dyna_masks_x.resize(sprite_masks);
+                                    if (sprite_dyna_cols_bytes > 0) {
+                                        if (!ReadExact(file, sprite_dyna_cols.data(), sprite_dyna_cols_bytes)) {
+                                            if (error) {
+                                                *error = "Unexpected end of file (sprite dyna colors)";
+                                            }
+                                            return false;
                                         }
-                                        return false;
-                                    }
-                                }
-                                if (!SkipExact(file, sprite_dyna_cols_bytes)) {
-                                    if (error) {
-                                        *error = "Unexpected end of file (sprite dyna colors extra)";
-                                    }
-                                    return false;
-                                }
-                                if (sprite_masks > 0) {
-                                    if (!ReadExact(file, sprite_dyna_masks.data(), sprite_masks)) {
-                                        if (error) {
-                                            *error = "Unexpected end of file (sprite dyna masks)";
+                                        if (!ReadExact(file, sprite_dyna_cols_x.data(), sprite_dyna_cols_bytes)) {
+                                            if (error) {
+                                                *error = "Unexpected end of file (sprite dyna colors extra)";
+                                            }
+                                            return false;
                                         }
-                                        return false;
+                                    }
+                                    if (sprite_masks > 0) {
+                                        if (!ReadExact(file, sprite_dyna_masks.data(), sprite_masks)) {
+                                            if (error) {
+                                                *error = "Unexpected end of file (sprite dyna masks)";
+                                            }
+                                            return false;
+                                        }
+                                        if (!ReadExact(file, sprite_dyna_masks_x.data(), sprite_masks)) {
+                                            if (error) {
+                                                *error = "Unexpected end of file (sprite dyna masks extra)";
+                                            }
+                                            return false;
+                                        }
                                     }
                                 }
-                                if (!SkipExact(file, sprite_masks)) {
-                                    if (error) {
-                                        *error = "Unexpected end of file (sprite dyna masks extra)";
+                                out.sprite_dynamic_colors_x.clear();
+                                out.sprite_dynamic_masks_x.clear();
+                                out.sprite_dynamic_colors_x.reserve(n_sprites);
+                                out.sprite_dynamic_masks_x.reserve(n_sprites);
+                                if (!sprite_dyna_cols_x.empty()) {
+                                    const std::size_t per_sprite = MAX_DYNA_SETS_PER_SPRITE * no_colors;
+                                    for (uint32_t i = 0; i < n_sprites; ++i) {
+                                        std::vector<uint16_t> colors(per_sprite, 0);
+                                        const std::size_t offset = static_cast<std::size_t>(i) * per_sprite;
+                                        if (offset + per_sprite <= sprite_dyna_cols_x.size()) {
+                                            std::memcpy(colors.data(),
+                                                        sprite_dyna_cols_x.data() + offset,
+                                                        per_sprite * sizeof(uint16_t));
+                                        }
+                                        out.sprite_dynamic_colors_x.push_back(std::move(colors));
                                     }
-                                    return false;
+                                }
+                                if (!sprite_dyna_masks_x.empty()) {
+                                    for (uint32_t i = 0; i < n_sprites; ++i) {
+                                        cv::Mat mask(static_cast<int>(MAX_SPRITE_HEIGHT),
+                                                     static_cast<int>(MAX_SPRITE_WIDTH),
+                                                     CV_8UC1,
+                                                     cv::Scalar(255));
+                                        const std::size_t offset = static_cast<std::size_t>(i) *
+                                            MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT;
+                                        if (offset + MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT <= sprite_dyna_masks_x.size()) {
+                                            std::memcpy(mask.data,
+                                                        sprite_dyna_masks_x.data() + offset,
+                                                        MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT);
+                                        }
+                                        out.sprite_dynamic_masks_x.push_back(mask);
+                                    }
                                 }
                                 if (length_header >= 19 * sizeof(uint32_t)) {
-                                    if (!SkipExact(file, static_cast<std::size_t>(n_sprites))) {
-                                        if (error) {
-                                            *error = "Unexpected end of file (sprite shape mode)";
+                                    if (sprite_dyna_present &&
+                                        BytesRemaining(file) >= static_cast<std::size_t>(n_sprites)) {
+                                        std::vector<uint8_t> sprite_shape_mode(n_sprites, 0);
+                                        if (n_sprites > 0 &&
+                                            !ReadExact(file, sprite_shape_mode.data(), sprite_shape_mode.size())) {
+                                            if (error) {
+                                                *error = "Unexpected end of file (sprite shape mode)";
+                                            }
+                                            return false;
                                         }
-                                        return false;
+                                        out.sprite_shape_modes = std::move(sprite_shape_mode);
                                     }
                                 }
                             }
@@ -937,14 +1036,56 @@ bool LoadLegacyProject(const std::string& path,
         out.background_masks_x.resize(n_frames);
     }
 
+    out.sprite_extra_flags = extra_sprite;
+    out.frame_sprites = frame_sprites;
+
     out.sprites.reserve(n_sprites);
+    out.sprites_x.reserve(n_sprites);
+    out.sprite_colored.reserve(n_sprites);
+    out.sprite_colored_x.reserve(n_sprites);
+    out.sprite_originals.reserve(n_sprites);
+    out.sprite_masks_x.reserve(n_sprites);
+    out.sprite_dynamic_colors.reserve(n_sprites);
+    out.sprite_dynamic_masks.reserve(n_sprites);
     for (uint32_t index = 0; index < n_sprites; ++index) {
+        const bool has_extra_sprite = index < extra_sprite.size() && extra_sprite[index] != 0;
         const std::size_t offset = static_cast<std::size_t>(index) * MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT;
         const uint16_t* sprite_colored = sprites_565.data() + offset;
         const uint8_t* sprite_orig = sprite_original.data() + offset;
         const uint8_t* sprite_mask = sprite_dyna_masks.empty() ? nullptr : sprite_dyna_masks.data() + offset;
         const uint16_t* sprite_cols = sprite_dyna_cols.empty() ? nullptr :
             sprite_dyna_cols.data() + static_cast<std::size_t>(index) * MAX_DYNA_SETS_PER_SPRITE * no_colors;
+        cv::Mat sprite_original_mat(static_cast<int>(MAX_SPRITE_HEIGHT),
+                                    static_cast<int>(MAX_SPRITE_WIDTH),
+                                    CV_8UC1,
+                                    cv::Scalar(255));
+        if (!sprite_original.empty()) {
+            std::memcpy(sprite_original_mat.data, sprite_orig,
+                        MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT);
+        }
+        out.sprite_originals.push_back(sprite_original_mat.clone());
+
+        if (has_extra_sprite) {
+            cv::Mat sprite_mask_x_mat(static_cast<int>(MAX_SPRITE_HEIGHT),
+                                      static_cast<int>(MAX_SPRITE_WIDTH),
+                                      CV_8UC1,
+                                      cv::Scalar(255));
+            if (!sprite_mask_x.empty()) {
+                std::memcpy(sprite_mask_x_mat.data, sprite_mask_x.data() + offset,
+                            MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT);
+            }
+            out.sprite_masks_x.push_back(sprite_mask_x_mat.clone());
+        } else {
+            out.sprite_masks_x.emplace_back();
+        }
+
+        out.sprite_colored.push_back(BuildSpriteImage(MAX_SPRITE_WIDTH,
+                                                      MAX_SPRITE_HEIGHT,
+                                                      sprite_colored,
+                                                      sprite_orig,
+                                                      nullptr,
+                                                      nullptr,
+                                                      no_colors));
         out.sprites.push_back(BuildSpriteImage(MAX_SPRITE_WIDTH,
                                                MAX_SPRITE_HEIGHT,
                                                sprite_colored,
@@ -952,6 +1093,64 @@ bool LoadLegacyProject(const std::string& path,
                                                sprite_mask,
                                                sprite_cols,
                                                no_colors));
+
+        if (has_extra_sprite) {
+            const uint8_t* sprite_mask_x_ptr = sprite_mask_x.empty()
+                ? nullptr
+                : sprite_mask_x.data() + offset;
+            const uint16_t* sprite_colored_x = sprites_x_565.empty() ? nullptr : sprites_x_565.data() + offset;
+            out.sprite_colored_x.push_back(BuildSpriteImage(MAX_SPRITE_WIDTH,
+                                                            MAX_SPRITE_HEIGHT,
+                                                            sprite_colored_x,
+                                                            sprite_mask_x_ptr,
+                                                            nullptr,
+                                                            nullptr,
+                                                            no_colors));
+            const cv::Mat* sprite_dyn_mask_x = (!out.sprite_dynamic_masks_x.empty() &&
+                index < out.sprite_dynamic_masks_x.size())
+                ? &out.sprite_dynamic_masks_x[index]
+                : nullptr;
+            const std::vector<uint16_t>* sprite_dyn_cols_x = (!out.sprite_dynamic_colors_x.empty() &&
+                index < out.sprite_dynamic_colors_x.size())
+                ? &out.sprite_dynamic_colors_x[index]
+                : nullptr;
+            out.sprites_x.push_back(BuildSpriteImage(MAX_SPRITE_WIDTH,
+                                                     MAX_SPRITE_HEIGHT,
+                                                     sprite_colored_x,
+                                                     sprite_mask_x_ptr,
+                                                     sprite_dyn_mask_x ? sprite_dyn_mask_x->data : nullptr,
+                                                     sprite_dyn_cols_x && !sprite_dyn_cols_x->empty()
+                                                        ? sprite_dyn_cols_x->data()
+                                                        : nullptr,
+                                                     no_colors));
+        } else {
+            out.sprite_colored_x.emplace_back();
+            out.sprites_x.emplace_back();
+            if (index < out.sprite_dynamic_masks_x.size()) {
+                out.sprite_dynamic_masks_x[index] = cv::Mat();
+            }
+            if (index < out.sprite_dynamic_colors_x.size()) {
+                out.sprite_dynamic_colors_x[index].clear();
+            }
+        }
+
+        std::vector<uint16_t> colors(MAX_DYNA_SETS_PER_SPRITE * no_colors, 0);
+        if (sprite_cols) {
+            std::memcpy(colors.data(), sprite_cols, colors.size() * sizeof(uint16_t));
+        }
+        out.sprite_dynamic_colors.push_back(std::move(colors));
+        cv::Mat dyna_mask(static_cast<int>(MAX_SPRITE_HEIGHT),
+                          static_cast<int>(MAX_SPRITE_WIDTH),
+                          CV_8UC1,
+                          cv::Scalar(255));
+        if (sprite_mask) {
+            std::memcpy(dyna_mask.data, sprite_mask,
+                        MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT);
+        }
+        out.sprite_dynamic_masks.push_back(dyna_mask);
+    }
+    if (out.sprite_shape_modes.empty() && n_sprites > 0) {
+        out.sprite_shape_modes.resize(n_sprites, 0);
     }
 
     if (!rp_path.empty()) {
