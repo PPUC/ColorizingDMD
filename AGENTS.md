@@ -1,4 +1,4 @@
-# Codex Notes: ColorizingDMD Editor + libserum
+# Codex Notes: PPUC-Serum-Colorizer Editor + libserum
 
 ## Scope
 - This file documents development context and non-obvious legacy-format behavior.

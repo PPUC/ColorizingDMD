@@ -1,14 +1,34 @@
-# ColorizingDMD
+# PPUC-Serum-Colorizer
 
-ColorizingDMD is a software to colorize VPinMAME DMD using the Serum colorization format.
+PPUC-Serum-Colorizer is a software to colorize VPinMAME DMD using the Serum colorization format.
 
 # Downloads
 
-Click on the "releases" link on the right hand side of this page. Or [Click Here](https://github.com/zesinger/ColorizingDMD/releases)
+Click on the "releases" link on the right hand side of this page.
 
-# ColorizingDMD Serum Editor
+# Build
 
-To install the editor, just download the zip from the "ColorizingDMD editor" directory and save it anywhere on your disk (DO NOT unzip ColorizingDMD and SortingCDump in the same directory!).
+## macOS (Homebrew)
+1. `brew install qt opencv`
+2. `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix qt)" -DOpenCV_DIR="$(brew --prefix opencv)/lib/cmake/opencv4"`
+3. `cmake --build build`
+
+## Linux (Ubuntu/Debian)
+1. `sudo apt-get install -y cmake pkg-config qt6-base-dev qt6-base-dev-tools libqt6opengl6-dev libopencv-dev`
+2. `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release`
+3. `cmake --build build`
+
+## Windows (vcpkg + Visual Studio)
+1. Install Visual Studio 2022 with C++ workload.
+2. `git clone https://github.com/microsoft/vcpkg.git`
+3. `vcpkg\bootstrap-vcpkg.bat`
+4. `vcpkg\vcpkg.exe install qtbase opencv --triplet x64-windows`
+5. `cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=%CD%\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake`
+6. `cmake --build build --config Release`
+
+# PPUC-Serum-Colorizer Serum Editor
+
+To install the editor, just download the zip from the "PPUC-Serum-Colorizer editor" directory and save it anywhere on your disk (DO NOT unzip PPUC-Serum-Colorizer and SortingCDump in the same directory!).
 
 If you are using Windows 10 or more recent, right click on the file and choose "Properties". If in the Properties window, there is a box "Unblock" in the bottom right, check it and click "OK".
 Then uncompress the ZIP file.

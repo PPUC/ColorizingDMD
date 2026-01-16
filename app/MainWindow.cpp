@@ -661,7 +661,11 @@ MainWindow::MainWindow(QWidget* parent)
     , m_spriteStore(new IndexedImageStore())
     , m_backgroundStore(new IndexedImageStore())
 {
-    setWindowTitle("ColorizingDMD");
+    const QString appName = QCoreApplication::applicationName().isEmpty()
+        ? QString("PPUC-Serum-Colorizer")
+        : QCoreApplication::applicationName();
+    const QString appVersion = QCoreApplication::applicationVersion();
+    setWindowTitle(appVersion.isEmpty() ? appName : QString("%1 v%2").arg(appName, appVersion));
     setWindowIcon(QIcon(":/app/app.ico"));
     setMinimumSize(1200, 800);
 
@@ -1972,7 +1976,15 @@ MainWindow::MainWindow(QWidget* parent)
     auto* aboutAction = new QAction("&About", this);
     helpMenu->addAction(aboutAction);
     connect(aboutAction, &QAction::triggered, this, [this]() {
-        QMessageBox::information(this, "About ColorizingDMD", "ColorizingDMD Qt port (UI scaffolding).");
+        const QString appName = QCoreApplication::applicationName().isEmpty()
+            ? QString("PPUC-Serum-Colorizer")
+            : QCoreApplication::applicationName();
+        const QString appVersion = QCoreApplication::applicationVersion().isEmpty()
+            ? QString("0.1.0")
+            : QCoreApplication::applicationVersion();
+        QMessageBox::information(this,
+                                 QString("About %1").arg(appName),
+                                 QString("%1 v%2 (Qt port).").arg(appName, appVersion));
     });
 
     connect(m_state, &ProjectState::projectPathChanged, this, [this](const QString& path) {
@@ -3446,7 +3458,7 @@ MainWindow::MainWindow(QWidget* parent)
     refreshFrameSpriteLists();
     updateUndoActions();
 
-    QSettings settings("PPUC", "ColorizingDMD");
+    QSettings settings("PPUC", "PPUC-Serum-Colorizer");
     const QStringList recent = settings.value("recentFiles").toStringList();
     if (!recent.isEmpty()) {
         m_state->setRecentFiles(recent);
@@ -3458,16 +3470,20 @@ MainWindow::MainWindow(QWidget* parent)
 
 void MainWindow::updateWindowTitle()
 {
+    const QString appName = QCoreApplication::applicationName().isEmpty()
+        ? QString("PPUC-Serum-Colorizer")
+        : QCoreApplication::applicationName();
+    const QString appVersion = QCoreApplication::applicationVersion();
     if (m_state->projectPath().isEmpty()) {
-        setWindowTitle("ColorizingDMD");
+        setWindowTitle(appVersion.isEmpty() ? appName : QString("%1 v%2").arg(appName, appVersion));
         return;
     }
-    setWindowTitle(QString("ColorizingDMD - %1").arg(m_state->projectPath()));
+    setWindowTitle(QString("%1 - %2").arg(appName, m_state->projectPath()));
 }
 
 void MainWindow::persistRecentFiles()
 {
-    QSettings settings("PPUC", "ColorizingDMD");
+    QSettings settings("PPUC", "PPUC-Serum-Colorizer");
     settings.setValue("recentFiles", m_state->recentFiles());
     settings.sync();
 }
@@ -7767,7 +7783,7 @@ void MainWindow::showSettingsDialog()
     trimHistory(m_backgroundHistory);
     updateNavigationButtons();
     trimUndoStacks();
-    QSettings settings("PPUC", "ColorizingDMD");
+    QSettings settings("PPUC", "PPUC-Serum-Colorizer");
     settings.setValue("maxHistoryDepth", m_maxHistoryDepth);
     settings.setValue("maxUndoDepth", m_maxUndoDepth);
     settings.sync();

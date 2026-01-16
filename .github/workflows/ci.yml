@@ -1,0 +1,82 @@
+name: PPUC-Serum-Colorizer
+
+on:
+  push:
+  pull_request:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+          - os: macos-14
+            platform: macos
+            arch: arm64
+          - os: macos-13
+            platform: macos
+            arch: x64
+          - os: windows-2025
+            platform: win
+            arch: x64
+          - os: windows-2025
+            platform: win
+            arch: x86
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch libserum
+        run: |
+          rm -rf libserum
+          git clone https://github.com/PPUC/libserum.git libserum
+          (cd libserum && git checkout c8f94a5df229888428a4421e42c1d1b640ec98b7)
+
+      - if: matrix.platform == 'linux'
+        name: Install dependencies (linux)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y cmake ninja-build pkg-config qt6-base-dev qt6-base-dev-tools libqt6opengl6-dev libopencv-dev
+
+      - if: matrix.platform == 'macos'
+        name: Install dependencies (macOS)
+        run: |
+          brew install qt opencv
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix qt)" >> "$GITHUB_ENV"
+          echo "OpenCV_DIR=$(brew --prefix opencv)/lib/cmake/opencv4" >> "$GITHUB_ENV"
+
+      - if: matrix.platform == 'win'
+        name: Setup vcpkg (Windows)
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:GITHUB_WORKSPACE "vcpkg"
+          git clone https://github.com/microsoft/vcpkg.git $root
+          & "$root/bootstrap-vcpkg.bat"
+          $triplet = if ("${{ matrix.arch }}" -eq "x86") { "x86-windows" } else { "x64-windows" }
+          & "$root/vcpkg.exe" install opencv qtbase --triplet $triplet
+          "VCPKG_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "VCPKG_DEFAULT_TRIPLET=$triplet" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - if: matrix.platform == 'win'
+        name: Add msbuild (Windows)
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build
+        env:
+          BUILD_TYPE: Release
+        run: |
+          chmod +x platforms/**/build.sh platforms/**/external.sh
+          ./platforms/${{ matrix.platform }}/${{ matrix.arch }}/build.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PPUC-Serum-Colorizer-${{ matrix.platform }}-${{ matrix.arch }}
+          path: artifacts/${{ matrix.platform }}-${{ matrix.arch }}

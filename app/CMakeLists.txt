@@ -1,6 +1,7 @@
-add_executable(ColorizingDMD)
+set(APP_NAME "PPUC-Serum-Colorizer")
+add_executable(${APP_NAME})
 
-target_sources(ColorizingDMD PRIVATE
+target_sources(${APP_NAME} PRIVATE
     main.cpp
     MainWindow.cpp
     MainWindow.h
@@ -25,7 +26,7 @@ target_sources(ColorizingDMD PRIVATE
 option(COLORIZINGDMD_BUILD_WIN32_APP "Build the legacy Win32 UI sources" OFF)
 
 if (WIN32 AND COLORIZINGDMD_BUILD_WIN32_APP)
-    target_sources(ColorizingDMD PRIVATE
+    target_sources(${APP_NAME} PRIVATE
         ../ColorizingDMD.cpp
         ../OGL_Immediate_2D.cpp
         ../dmddevice.cpp
@@ -38,7 +39,7 @@ if (WIN32 AND COLORIZINGDMD_BUILD_WIN32_APP)
     )
 endif ()
 
-target_link_libraries(ColorizingDMD PRIVATE
+target_link_libraries(${APP_NAME} PRIVATE
     colorizing_core
     Qt6::Widgets
     Qt6::Gui
@@ -46,7 +47,7 @@ target_link_libraries(ColorizingDMD PRIVATE
     Qt6::OpenGLWidgets
 )
 
-target_include_directories(ColorizingDMD PRIVATE
+target_include_directories(${APP_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/libserum/src
 )
