@@ -28,9 +28,19 @@ jobs:
           - os: windows-2025
             platform: win
             arch: x64
+            static: false
           - os: windows-2025
             platform: win
             arch: x86
+            static: false
+          - os: windows-2025
+            platform: win
+            arch: x64
+            static: true
+          - os: windows-2025
+            platform: win
+            arch: x86
+            static: true
     steps:
       - uses: actions/checkout@v4
       - name: Fetch libserum
@@ -53,13 +63,38 @@ jobs:
           echo "OpenCV_DIR=$(brew --prefix opencv)/lib/cmake/opencv4" >> "$GITHUB_ENV"
 
       - if: matrix.platform == 'win'
+        name: Prepare vcpkg cache dir
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\\vcpkg" | Out-Null
+
+      - if: matrix.platform == 'win'
+        name: Cache vcpkg (Windows)
+        uses: actions/cache@v4
+        with:
+          path: |
+            vcpkg/installed
+            vcpkg/buildtrees
+            vcpkg/packages
+            vcpkg/downloads
+            vcpkg/registry
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-${{ matrix.static }}-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ matrix.arch }}-${{ matrix.static }}-
+
+      - if: matrix.platform == 'win'
         name: Setup vcpkg (Windows)
         shell: pwsh
         run: |
           $root = Join-Path $env:GITHUB_WORKSPACE "vcpkg"
-          git clone https://github.com/microsoft/vcpkg.git $root
+          if (-not (Test-Path "$root\\.git")) {
+            git clone https://github.com/microsoft/vcpkg.git $root
+          }
           & "$root/bootstrap-vcpkg.bat"
           $triplet = if ("${{ matrix.arch }}" -eq "x86") { "x86-windows" } else { "x64-windows" }
+          if ("${{ matrix.static }}" -eq "true") {
+            $triplet = if ("${{ matrix.arch }}" -eq "x86") { "x86-windows-static" } else { "x64-windows-static" }
+          }
           & "$root/vcpkg.exe" install opencv qtbase --triplet $triplet
           "VCPKG_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VCPKG_DEFAULT_TRIPLET=$triplet" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -71,6 +106,7 @@ jobs:
       - name: Build
         env:
           BUILD_TYPE: Release
+          STATIC_LINKING: ${{ matrix.static && '1' || '' }}
         run: |
           find platforms \( -name "build.sh" -o -name "external.sh" \) -exec chmod +x {} \;
           ./platforms/${{ matrix.platform }}/${{ matrix.arch }}/build.sh
@@ -78,5 +114,5 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: PPUC-Serum-Colorizer-${{ matrix.platform }}-${{ matrix.arch }}
-          path: artifacts/${{ matrix.platform }}-${{ matrix.arch }}
+          name: PPUC-Serum-Colorizer-${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.static && '-static' || '' }}
+          path: artifacts/${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.static && '-static' || '' }}

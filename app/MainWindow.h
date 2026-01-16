@@ -136,6 +136,7 @@ private:
     void setCanvasRotationEnabled(bool enabled);
     void updateCanvasRotationFrame();
     void resetCanvasRotationState();
+    void schedulePreviewRotationUpdate();
     void updateFrameUsageHighlights(int frameIndex);
     const cv::Mat* activeSpriteImage(int index) const;
     cv::Mat* activeSpriteImageMutable(int index);
@@ -455,7 +456,9 @@ private:
     bool m_rotationUseHd = false;
     class QTimer* m_rotationTimer;
     QElapsedTimer m_rotationClock;
+    QElapsedTimer m_previewRotationClock;
     SerumEditorRotationState m_rotationState;
+    class QTimer* m_previewRotationTimer;
     std::vector<int> m_previewSelectedFrames;
     bool m_restorePreviewSelection = false;
     int m_restorePreviewCurrent = -1;

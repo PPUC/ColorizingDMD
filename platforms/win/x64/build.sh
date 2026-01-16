@@ -12,6 +12,12 @@ BUILD_TYPE=${BUILD_TYPE:-Release}
 BUILD_TYPE=${BUILD_TYPE} ./platforms/win/x64/external.sh
 
 CMAKE_ARGS=("-G" "Visual Studio 17 2022" "-A" "x64")
+if [ "${STATIC_LINKING}" = "1" ]; then
+   BUILD_DIR="${BUILD_DIR}-static"
+   ARTIFACT_DIR="${ARTIFACT_DIR}-static"
+   CMAKE_ARGS+=("-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded")
+fi
+
 if [ -n "${VCPKG_ROOT}" ]; then
    CMAKE_ARGS+=("-DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
 fi

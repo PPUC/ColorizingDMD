@@ -36,6 +36,7 @@
 #include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
+#include <QScrollBar>
 #include <QSize>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -3226,6 +3227,12 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(m_previewRotateButton, &QToolButton::toggled, this, [this](bool enabled) {
         m_previewRotateEnabled = enabled;
+        if (enabled) {
+            m_previewRotationClock.restart();
+            schedulePreviewRotationUpdate();
+        } else if (m_previewRotationTimer) {
+            m_previewRotationTimer->stop();
+        }
         refreshFramePreviews();
     });
     connect(m_previewRefreshButton, &QToolButton::clicked, this, [this]() {
@@ -3235,6 +3242,12 @@ MainWindow::MainWindow(QWidget* parent)
     m_rotationTimer->setSingleShot(true);
     connect(m_rotationTimer, &QTimer::timeout, this, [this]() {
         updateCanvasRotationFrame();
+    });
+    m_previewRotationTimer = new QTimer(this);
+    m_previewRotationTimer->setSingleShot(true);
+    connect(m_previewRotationTimer, &QTimer::timeout, this, [this]() {
+        refreshFramePreviews();
+        schedulePreviewRotationUpdate();
     });
     initPalette();
     refreshPaletteList();
@@ -4302,6 +4315,10 @@ void MainWindow::refreshAllPreviews()
 
 void MainWindow::refreshFramePreviews()
 {
+    int scrollValue = 0;
+    if (m_framePreviewList && m_framePreviewList->horizontalScrollBar()) {
+        scrollValue = m_framePreviewList->horizontalScrollBar()->value();
+    }
     const std::vector<int> selectedBefore = selectedPreviewFrameIndices();
     if (!selectedBefore.empty()) {
         m_previewSelectedFrames = selectedBefore;
@@ -4375,6 +4392,12 @@ void MainWindow::refreshFramePreviews()
     refreshFramePreviewSelection();
     updatePreviewSelectionStyles();
     m_framePreviewList->doItemsLayout();
+    if (m_framePreviewList && m_framePreviewList->horizontalScrollBar()) {
+        m_framePreviewList->horizontalScrollBar()->setValue(scrollValue);
+    }
+    if (m_previewRotateEnabled && m_previewRotationTimer && !m_previewRotationTimer->isActive()) {
+        schedulePreviewRotationUpdate();
+    }
 }
 
 void MainWindow::updateFramePreviewAt(int index)
@@ -4484,19 +4507,24 @@ cv::Mat MainWindow::applyRotationPreview(const cv::Mat& colorized,
         return EnsureBgr(colorized);
     }
 
+    const uint32_t elapsed = m_previewRotationClock.isValid()
+        ? static_cast<uint32_t>(m_previewRotationClock.elapsed())
+        : 0;
     std::vector<uint16_t> mapping(65536, 0);
     std::vector<uint8_t> mapped(65536, 0);
     const uint16_t* data = rotations.data() + offset;
     for (int rot = 0; rot < MAX_COLOR_ROTATIONN; ++rot) {
         const std::size_t base = static_cast<std::size_t>(rot) * MAX_LENGTH_COLOR_ROTATION;
         const uint16_t length = data[base];
-        if (length == 0 || length > MAX_LENGTH_COLOR_ROTATION - 2) {
+        const uint16_t delay = data[base + 1];
+        if (length == 0 || length > MAX_LENGTH_COLOR_ROTATION - 2 || delay == 0) {
             continue;
         }
         const uint16_t* colors = data + base + 2;
+        const uint16_t step = static_cast<uint16_t>((elapsed / delay) % length);
         for (uint16_t pos = 0; pos < length; ++pos) {
             const uint16_t from = colors[pos];
-            const uint16_t to = colors[(pos + 1) % length];
+            const uint16_t to = colors[(pos + step) % length];
             mapping[from] = to;
             mapped[from] = 1;
         }
@@ -4599,8 +4627,73 @@ void MainWindow::resetCanvasRotationState()
         updateCanvasRotationFrame();
     }
     if (m_previewRotateEnabled) {
+        m_previewRotationClock.restart();
+        schedulePreviewRotationUpdate();
         refreshFramePreviews();
     }
+}
+
+void MainWindow::schedulePreviewRotationUpdate()
+{
+    if (!m_previewRotateEnabled || !m_previewRotationTimer) {
+        return;
+    }
+    const std::vector<int> indices = buildPreviewFrameIndices();
+    if (indices.empty()) {
+        m_previewRotationTimer->stop();
+        return;
+    }
+    const auto minDelayForFrame = [](const std::vector<uint16_t>& rotations, int frameIndex) -> uint32_t {
+        if (rotations.empty()) {
+            return 0;
+        }
+        const std::size_t blockSize = static_cast<std::size_t>(MAX_COLOR_ROTATIONN) *
+            MAX_LENGTH_COLOR_ROTATION;
+        const std::size_t offset = static_cast<std::size_t>(frameIndex) * blockSize;
+        if (offset + blockSize > rotations.size()) {
+            return 0;
+        }
+        const uint16_t* data = rotations.data() + offset;
+        uint32_t best = 0;
+        for (int rot = 0; rot < MAX_COLOR_ROTATIONN; ++rot) {
+            const std::size_t base = static_cast<std::size_t>(rot) * MAX_LENGTH_COLOR_ROTATION;
+            const uint16_t length = data[base];
+            const uint16_t delay = data[base + 1];
+            if (length == 0 || delay == 0) {
+                continue;
+            }
+            if (best == 0 || delay < best) {
+                best = delay;
+            }
+        }
+        return best;
+    };
+
+    uint32_t nextDelay = 0;
+    for (int frameIndex : indices) {
+        if (frameIndex < 0) {
+            continue;
+        }
+        uint32_t delay = minDelayForFrame(m_frameRotations, frameIndex);
+        if (delay == 0 && !m_frameRotationsX.empty()) {
+            delay = minDelayForFrame(m_frameRotationsX, frameIndex);
+        } else if (!m_frameRotationsX.empty()) {
+            const uint32_t hdDelay = minDelayForFrame(m_frameRotationsX, frameIndex);
+            if (hdDelay > 0) {
+                delay = (delay == 0) ? hdDelay : std::min(delay, hdDelay);
+            }
+        }
+        if (delay > 0) {
+            if (nextDelay == 0 || delay < nextDelay) {
+                nextDelay = delay;
+            }
+        }
+    }
+    if (nextDelay == 0) {
+        m_previewRotationTimer->stop();
+        return;
+    }
+    m_previewRotationTimer->start(static_cast<int>(std::max<uint32_t>(nextDelay, 16)));
 }
 
 void MainWindow::updateFrameUsageHighlights(int frameIndex)
