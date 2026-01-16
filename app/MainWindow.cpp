@@ -32,6 +32,8 @@
 #include <QMessageBox>
 #include <QInputDialog>
 #include <QSettings>
+#include <QDrag>
+#include <QMouseEvent>
 #include <QSpinBox>
 #include <QStatusBar>
 #include <QStyle>
@@ -618,6 +620,33 @@ QSize PreviewItemSizeForIcon(const QSize& iconSize, const QFont& font)
     const int height = iconSize.height() + textHeight + padding * 2;
     const int width = std::max(iconSize.width() + padding * 2, kPreviewItemWidth);
     return QSize(width, height);
+}
+
+constexpr const char* kPaletteColorMime = "application/x-ppuc-color";
+
+QByteArray EncodePaletteColor(const QColor& color)
+{
+    QByteArray data;
+    QDataStream stream(&data, QIODevice::WriteOnly);
+    stream << static_cast<quint8>(color.red())
+           << static_cast<quint8>(color.green())
+           << static_cast<quint8>(color.blue());
+    return data;
+}
+
+bool DecodePaletteColor(const QMimeData* mimeData, QColor& color)
+{
+    if (!mimeData || !mimeData->hasFormat(kPaletteColorMime)) {
+        return false;
+    }
+    const QByteArray data = mimeData->data(kPaletteColorMime);
+    QDataStream stream(data);
+    quint8 r = 0;
+    quint8 g = 0;
+    quint8 b = 0;
+    stream >> r >> g >> b;
+    color = QColor(r, g, b);
+    return true;
 }
 
 bool ExtractListDrop(const QMimeData* mimeData, QString& kind, int& index)
@@ -1385,6 +1414,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_currentColorButton->setAutoRaise(true);
     m_currentColorButton->setFixedSize(32, 32);
     m_currentColorButton->setToolTip("Current color");
+    m_currentColorButton->installEventFilter(this);
     m_colorInfoLabel = new QLabel("RGB565: 0xFFFF\nRGB: 255,255,255", colorsTab);
     m_colorInfoLabel->setFixedWidth(160);
     m_paletteSetCombo = new QComboBox(colorsTab);
@@ -1417,6 +1447,9 @@ MainWindow::MainWindow(QWidget* parent)
     m_paletteList->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     m_paletteList->setFixedHeight(paletteGridWidth);
     m_paletteList->setProperty("selectionColor", QColor(255, 140, 0));
+    m_paletteList->setAcceptDrops(true);
+    m_paletteList->viewport()->installEventFilter(this);
+    m_paletteList->viewport()->setAcceptDrops(true);
 
     m_reducedSetCombo = new QComboBox(colorsTab);
     m_reducedAssignButton = new QPushButton("Set Slot", colorsTab);
@@ -1435,6 +1468,9 @@ MainWindow::MainWindow(QWidget* parent)
     m_reducedPaletteList->setFrameShape(QFrame::NoFrame);
     m_reducedPaletteList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_reducedPaletteList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_reducedPaletteList->setAcceptDrops(true);
+    m_reducedPaletteList->viewport()->installEventFilter(this);
+    m_reducedPaletteList->viewport()->setAcceptDrops(true);
     const int reducedGridWidth = paletteCellSize * 8 + m_reducedPaletteList->frameWidth() * 2 + 4;
     const int reducedGridHeight = paletteCellSize * 2 + m_reducedPaletteList->frameWidth() * 2 + 4;
     m_reducedPaletteList->setFixedSize(reducedGridWidth, reducedGridHeight);
@@ -1507,6 +1543,9 @@ MainWindow::MainWindow(QWidget* parent)
     m_dynamicPaletteList->setFrameShape(QFrame::NoFrame);
     m_dynamicPaletteList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_dynamicPaletteList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_dynamicPaletteList->setAcceptDrops(true);
+    m_dynamicPaletteList->viewport()->installEventFilter(this);
+    m_dynamicPaletteList->viewport()->setAcceptDrops(true);
     const int dynamicGridWidth = paletteCellSize * 8 + m_dynamicPaletteList->frameWidth() * 2 + 4;
     const int dynamicGridHeight = paletteCellSize * 2 + m_dynamicPaletteList->frameWidth() * 2 + 4;
     m_dynamicPaletteList->setFixedSize(dynamicGridWidth, dynamicGridHeight);
@@ -1591,6 +1630,9 @@ MainWindow::MainWindow(QWidget* parent)
     m_rotationList->setFrameShape(QFrame::NoFrame);
     m_rotationList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_rotationList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_rotationList->setAcceptDrops(true);
+    m_rotationList->viewport()->installEventFilter(this);
+    m_rotationList->viewport()->setAcceptDrops(true);
     m_rotationList->setProperty("selectionColor", QColor(255, 140, 0));
     m_rotationAddButton = new QPushButton("Add Color", colorsTab);
     m_rotationRemoveButton = new QPushButton("Remove", colorsTab);
@@ -3520,6 +3562,15 @@ MainWindow::MainWindow(QWidget* parent)
         refreshFramePreviews();
         schedulePreviewRotationUpdate();
     });
+    m_paletteBlinkTimer = new QTimer(this);
+    m_paletteBlinkTimer->setInterval(350);
+    connect(m_paletteBlinkTimer, &QTimer::timeout, this, [this]() {
+        if (!m_paletteBlinkActive) {
+            return;
+        }
+        m_paletteBlinkOn = !m_paletteBlinkOn;
+        updatePaletteBlinkPreview();
+    });
     initPalette();
     refreshPaletteList();
     refreshReducedPaletteUI();
@@ -3546,11 +3597,13 @@ MainWindow::MainWindow(QWidget* parent)
                 const QColor current(static_cast<int>(m_drawColor[2]),
                                      static_cast<int>(m_drawColor[1]),
                                      static_cast<int>(m_drawColor[0]));
+                const std::vector<QColor> before(m_paletteColors.begin(), m_paletteColors.end());
                 pushPaletteUndoSnapshot();
                 m_paletteColors[row] = current;
                 if (m_paletteSetIndex >= 0 && m_paletteSetIndex < m_fullPalettes.size()) {
                     m_fullPalettes[m_paletteSetIndex] = m_paletteColors;
                 }
+                applyPaletteColorChanges(before, std::vector<QColor>(m_paletteColors.begin(), m_paletteColors.end()));
                 m_currentPaletteIndex = row;
                 m_paletteSelectionIsReference = false;
                 if (m_paletteList) {
@@ -3577,10 +3630,12 @@ MainWindow::MainWindow(QWidget* parent)
                 return;
             }
             if (m_paletteGradientActive && m_paletteGradientStartIndex >= 0 && m_paletteGradientStartIndex != row) {
+                const std::vector<QColor> before(m_paletteColors.begin(), m_paletteColors.end());
                 pushPaletteUndoSnapshot();
                 applyPaletteGradient(m_paletteGradientStartIndex, row);
                 cancelPaletteGradient();
                 refreshPaletteList();
+                applyPaletteColorChanges(before, std::vector<QColor>(m_paletteColors.begin(), m_paletteColors.end()));
             }
             if (!reference) {
                 if (m_reducedPaletteList) {
@@ -3617,6 +3672,7 @@ MainWindow::MainWindow(QWidget* parent)
         if (!picked.isValid()) {
             return;
         }
+        const std::vector<QColor> before(m_paletteColors.begin(), m_paletteColors.end());
         pushPaletteUndoSnapshot();
         const cv::Vec3b quant = Rgb565ToBgr(BgrToRgb565(cv::Vec3b(picked.blue(), picked.green(), picked.red())));
         m_paletteColors[row] = QColor(quant[2], quant[1], quant[0]);
@@ -3624,6 +3680,7 @@ MainWindow::MainWindow(QWidget* parent)
             m_fullPalettes[m_paletteSetIndex] = m_paletteColors;
         }
         refreshPaletteList();
+        applyPaletteColorChanges(before, std::vector<QColor>(m_paletteColors.begin(), m_paletteColors.end()));
         m_paletteList->setCurrentRow(row);
     });
     connect(m_paletteList, &QListWidget::itemClicked, this, [this](QListWidgetItem*) {
@@ -3750,6 +3807,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_maxUndoDepth = std::clamp(settings.value("maxUndoDepth", kDefaultUndoDepth).toInt(), 1, 1000);
     m_maxHistoryDepth = std::clamp(settings.value("maxHistoryDepth", kDefaultHistoryDepth).toInt(), 1, 1000);
     resetNavigationHistory();
+    m_uiReady = true;
 }
 
 void MainWindow::updateWindowTitle()
@@ -9160,6 +9218,189 @@ void MainWindow::refreshPaletteList()
     }
 }
 
+void MainWindow::applyPaletteColorChanges(const std::vector<QColor>& before,
+                                          const std::vector<QColor>& after)
+{
+    if (before.size() != after.size() || before.empty()) {
+        return;
+    }
+    std::vector<uint16_t> mapping(65536);
+    for (std::size_t i = 0; i < mapping.size(); ++i) {
+        mapping[i] = static_cast<uint16_t>(i);
+    }
+    bool hasChange = false;
+    for (std::size_t i = 0; i < before.size(); ++i) {
+        if (before[i] == after[i]) {
+            continue;
+        }
+        const cv::Vec3b oldBgr(static_cast<uint8_t>(before[i].blue()),
+                               static_cast<uint8_t>(before[i].green()),
+                               static_cast<uint8_t>(before[i].red()));
+        const cv::Vec3b newBgr(static_cast<uint8_t>(after[i].blue()),
+                               static_cast<uint8_t>(after[i].green()),
+                               static_cast<uint8_t>(after[i].red()));
+        const uint16_t old565 = BgrToRgb565(oldBgr);
+        const uint16_t new565 = BgrToRgb565(newBgr);
+        if (old565 != new565) {
+            mapping[old565] = new565;
+            hasChange = true;
+        }
+    }
+    if (!hasChange) {
+        return;
+    }
+    const std::vector<int> targets = targetFrameIndices();
+    if (targets.empty()) {
+        return;
+    }
+    for (int frameIndex : targets) {
+        cv::Mat* image = activeFrameImage(frameIndex, true);
+        if (!image || image->empty()) {
+            continue;
+        }
+        pushUndoSnapshot(true, frameIndex);
+        if (image->type() == CV_8UC3) {
+            for (int y = 0; y < image->rows; ++y) {
+                cv::Vec3b* row = image->ptr<cv::Vec3b>(y);
+                for (int x = 0; x < image->cols; ++x) {
+                    const uint16_t old565 = BgrToRgb565(row[x]);
+                    const uint16_t new565 = mapping[old565];
+                    if (new565 != old565) {
+                        row[x] = Rgb565ToBgr(new565);
+                    }
+                }
+            }
+        } else if (image->type() == CV_8UC4) {
+            for (int y = 0; y < image->rows; ++y) {
+                cv::Vec4b* row = image->ptr<cv::Vec4b>(y);
+                for (int x = 0; x < image->cols; ++x) {
+                    const cv::Vec3b bgr(row[x][0], row[x][1], row[x][2]);
+                    const uint16_t old565 = BgrToRgb565(bgr);
+                    const uint16_t new565 = mapping[old565];
+                    if (new565 != old565) {
+                        const cv::Vec3b converted = Rgb565ToBgr(new565);
+                        row[x][0] = converted[0];
+                        row[x][1] = converted[1];
+                        row[x][2] = converted[2];
+                    }
+                }
+            }
+        }
+        updateFramePreviewAt(frameIndex);
+    }
+    const int current = m_framesList ? m_framesList->currentRow() : -1;
+    if (current >= 0) {
+        updateFrameCanvasImage(current);
+        updateMaskPreviewForFrame(current);
+    }
+}
+
+void MainWindow::startPaletteBlink(int slot)
+{
+    if (!m_framesCanvas || slot < 0 || slot >= m_paletteColors.size()) {
+        return;
+    }
+    if (m_paletteBlinkActive) {
+        stopPaletteBlink();
+    }
+    const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
+    if (frameIndex < 0) {
+        return;
+    }
+    m_paletteBlinkActive = true;
+    m_paletteBlinkOn = true;
+    m_paletteBlinkSlot = slot;
+    m_paletteBlinkFrameIndex = frameIndex;
+    m_paletteBlinkUseHd = m_useHdFrame;
+    updatePaletteBlinkPreview();
+    if (m_paletteBlinkTimer) {
+        m_paletteBlinkTimer->start();
+    }
+}
+
+void MainWindow::stopPaletteBlink()
+{
+    if (!m_paletteBlinkActive) {
+        return;
+    }
+    m_paletteBlinkActive = false;
+    m_paletteBlinkOn = false;
+    m_paletteBlinkSlot = -1;
+    m_paletteBlinkFrameIndex = -1;
+    if (m_paletteBlinkTimer) {
+        m_paletteBlinkTimer->stop();
+    }
+    const int current = m_framesList ? m_framesList->currentRow() : -1;
+    if (current >= 0) {
+        updateFrameCanvasImage(current);
+        updateMaskPreviewForFrame(current);
+    }
+}
+
+void MainWindow::updatePaletteBlinkPreview()
+{
+    if (!m_paletteBlinkActive || !m_framesCanvas) {
+        return;
+    }
+    if (!m_paletteBlinkOn) {
+        const int current = m_framesList ? m_framesList->currentRow() : -1;
+        if (current >= 0) {
+            updateFrameCanvasImage(current);
+        }
+        return;
+    }
+    if (m_canvasRotateEnabled) {
+        return;
+    }
+    const int frameIndex = m_paletteBlinkFrameIndex;
+    if (frameIndex < 0) {
+        return;
+    }
+    const cv::Mat* baseFrame = nullptr;
+    if (m_paletteBlinkUseHd && hasHdFrame(frameIndex)) {
+        if (frameIndex >= 0 && frameIndex < static_cast<int>(m_frameExtraFrames.size())) {
+            baseFrame = &m_frameExtraFrames[static_cast<std::size_t>(frameIndex)];
+        }
+    }
+    if (!baseFrame && m_frameStore) {
+        baseFrame = m_frameStore->at(frameIndex);
+    }
+    if (!baseFrame || baseFrame->empty()) {
+        return;
+    }
+    const QColor target = m_paletteColors[m_paletteBlinkSlot];
+    const cv::Vec3b targetBgr(static_cast<uint8_t>(target.blue()),
+                              static_cast<uint8_t>(target.green()),
+                              static_cast<uint8_t>(target.red()));
+    const uint16_t target565 = BgrToRgb565(targetBgr);
+    const cv::Vec3b highlight(0, 220, 255);
+    cv::Mat preview = baseFrame->clone();
+    if (preview.type() == CV_8UC3) {
+        for (int y = 0; y < preview.rows; ++y) {
+            cv::Vec3b* row = preview.ptr<cv::Vec3b>(y);
+            for (int x = 0; x < preview.cols; ++x) {
+                if (BgrToRgb565(row[x]) == target565) {
+                    row[x] = highlight;
+                }
+            }
+        }
+    } else if (preview.type() == CV_8UC4) {
+        for (int y = 0; y < preview.rows; ++y) {
+            cv::Vec4b* row = preview.ptr<cv::Vec4b>(y);
+            for (int x = 0; x < preview.cols; ++x) {
+                const cv::Vec3b bgr(row[x][0], row[x][1], row[x][2]);
+                if (BgrToRgb565(bgr) == target565) {
+                    row[x][0] = highlight[0];
+                    row[x][1] = highlight[1];
+                    row[x][2] = highlight[2];
+                }
+            }
+        }
+    }
+    const cv::Mat composed = renderFrameWithSerum(frameIndex, m_paletteBlinkUseHd, preview);
+    setFrameCanvasFromComposed(frameIndex, composed);
+}
+
 void MainWindow::pushPaletteUndoSnapshot()
 {
     if (m_paletteSetIndex < 0 || m_paletteSetIndex >= m_fullPalettes.size()) {
@@ -9276,11 +9517,16 @@ bool MainWindow::undoPaletteEdit()
 
     if (previous.kind == PaletteUndoState::Kind::Full) {
         if (previous.palette_index >= 0 && previous.palette_index < m_fullPalettes.size()) {
+            const std::vector<QColor> before(m_fullPalettes[previous.palette_index].begin(),
+                                             m_fullPalettes[previous.palette_index].end());
             m_paletteSetIndex = previous.palette_index;
             m_fullPalettes[m_paletteSetIndex] = previous.full_colors;
             m_paletteColors = previous.full_colors;
             m_currentPaletteIndex = 0;
             refreshPaletteList();
+            applyPaletteColorChanges(before,
+                                     std::vector<QColor>(m_fullPalettes[m_paletteSetIndex].begin(),
+                                                         m_fullPalettes[m_paletteSetIndex].end()));
         }
     } else if (previous.kind == PaletteUndoState::Kind::Reduced) {
         if (previous.set_index >= 0 && previous.set_index < kReducedPaletteCount &&
@@ -9362,11 +9608,16 @@ bool MainWindow::redoPaletteEdit()
 
     if (next.kind == PaletteUndoState::Kind::Full) {
         if (next.palette_index >= 0 && next.palette_index < m_fullPalettes.size()) {
+            const std::vector<QColor> before(m_fullPalettes[next.palette_index].begin(),
+                                             m_fullPalettes[next.palette_index].end());
             m_paletteSetIndex = next.palette_index;
             m_fullPalettes[m_paletteSetIndex] = next.full_colors;
             m_paletteColors = next.full_colors;
             m_currentPaletteIndex = 0;
             refreshPaletteList();
+            applyPaletteColorChanges(before,
+                                     std::vector<QColor>(m_fullPalettes[m_paletteSetIndex].begin(),
+                                                         m_fullPalettes[m_paletteSetIndex].end()));
         }
     } else if (next.kind == PaletteUndoState::Kind::Reduced) {
         if (next.set_index >= 0 && next.set_index < kReducedPaletteCount &&
@@ -10832,6 +11083,266 @@ void MainWindow::updateSelectionFromLists()
 
 bool MainWindow::eventFilter(QObject* obj, QEvent* event)
 {
+    if (!m_uiReady) {
+        return QMainWindow::eventFilter(obj, event);
+    }
+    if (m_paletteList &&
+        (obj == m_paletteList || obj == m_paletteList->viewport())) {
+        if (event->type() == QEvent::MouseButtonPress) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            QPoint pos = mouseEvent->pos();
+            if (obj == m_paletteList) {
+                pos = m_paletteList->viewport()->mapFrom(m_paletteList, pos);
+            }
+            QListWidgetItem* item = m_paletteList->itemAt(pos);
+            const int row = item ? item->data(Qt::UserRole).toInt() : -1;
+            if (mouseEvent->button() == Qt::RightButton) {
+                if (row >= 0 && row < m_paletteColors.size()) {
+                    const QColor picked = QColorDialog::getColor(m_paletteColors[row], this, "Select palette color");
+                    if (picked.isValid()) {
+                        const std::vector<QColor> before(m_paletteColors.begin(), m_paletteColors.end());
+                        pushPaletteUndoSnapshot();
+                        const cv::Vec3b quant =
+                            Rgb565ToBgr(BgrToRgb565(cv::Vec3b(picked.blue(), picked.green(), picked.red())));
+                        m_paletteColors[row] = QColor(quant[2], quant[1], quant[0]);
+                        if (m_paletteSetIndex >= 0 && m_paletteSetIndex < m_fullPalettes.size()) {
+                            m_fullPalettes[m_paletteSetIndex] = m_paletteColors;
+                        }
+                        refreshPaletteList();
+                        applyPaletteColorChanges(before, std::vector<QColor>(m_paletteColors.begin(), m_paletteColors.end()));
+                        if (m_paletteList) {
+                            m_paletteList->setCurrentRow(row);
+                        }
+                    }
+                }
+                return true;
+            }
+            if (mouseEvent->button() == Qt::LeftButton) {
+                m_paletteDragPending = row >= 0;
+                m_paletteDragSlot = row;
+                m_paletteDragStart = pos;
+                if (row >= 0 && row < m_paletteColors.size()) {
+                    startPaletteBlink(row);
+                }
+            }
+        }
+        if (event->type() == QEvent::MouseMove) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            QPoint pos = mouseEvent->pos();
+            if (obj == m_paletteList) {
+                pos = m_paletteList->viewport()->mapFrom(m_paletteList, pos);
+            }
+            if (m_paletteDragPending &&
+                (mouseEvent->buttons() & Qt::LeftButton) &&
+                (pos - m_paletteDragStart).manhattanLength() >= QApplication::startDragDistance()) {
+                if (m_paletteDragSlot >= 0 && m_paletteDragSlot < m_paletteColors.size()) {
+                    stopPaletteBlink();
+                    m_paletteDragPending = false;
+                    QDrag* drag = new QDrag(m_paletteList);
+                    QMimeData* mime = new QMimeData();
+                    const QColor color = m_paletteColors[m_paletteDragSlot];
+                    mime->setData(kPaletteColorMime, EncodePaletteColor(color));
+                    drag->setMimeData(mime);
+                    QPixmap pixmap(kPaletteSwatchSize, kPaletteSwatchSize);
+                    pixmap.fill(color);
+                    drag->setPixmap(pixmap);
+                    drag->setHotSpot(QPoint(pixmap.width() / 2, pixmap.height() / 2));
+                    drag->exec(Qt::CopyAction);
+                }
+                return true;
+            }
+        }
+        if (event->type() == QEvent::MouseButtonRelease) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (mouseEvent->button() == Qt::LeftButton) {
+                stopPaletteBlink();
+                m_paletteDragPending = false;
+                m_paletteDragSlot = -1;
+            }
+        }
+        if (event->type() == QEvent::Leave) {
+            stopPaletteBlink();
+            m_paletteDragPending = false;
+            m_paletteDragSlot = -1;
+        }
+        if (event->type() == QEvent::DragEnter || event->type() == QEvent::DragMove) {
+            auto* dragEvent = static_cast<QDragMoveEvent*>(event);
+            QColor color;
+            if (DecodePaletteColor(dragEvent->mimeData(), color)) {
+                dragEvent->setDropAction(Qt::CopyAction);
+                dragEvent->accept();
+                return true;
+            }
+            dragEvent->ignore();
+            return true;
+        }
+        if (event->type() == QEvent::Drop) {
+            auto* dropEvent = static_cast<QDropEvent*>(event);
+            QColor color;
+            if (!DecodePaletteColor(dropEvent->mimeData(), color)) {
+                dropEvent->ignore();
+                return true;
+            }
+            QPoint pos = dropEvent->position().toPoint();
+            if (obj == m_paletteList) {
+                pos = m_paletteList->viewport()->mapFrom(m_paletteList, pos);
+            }
+            QListWidgetItem* item = m_paletteList->itemAt(pos);
+            const int row = item ? item->data(Qt::UserRole).toInt() : -1;
+            if (row >= 0 && row < m_paletteColors.size()) {
+                const std::vector<QColor> before(m_paletteColors.begin(), m_paletteColors.end());
+                pushPaletteUndoSnapshot();
+                const cv::Vec3b quant = Rgb565ToBgr(BgrToRgb565(cv::Vec3b(color.blue(), color.green(), color.red())));
+                m_paletteColors[row] = QColor(quant[2], quant[1], quant[0]);
+                if (m_paletteSetIndex >= 0 && m_paletteSetIndex < m_fullPalettes.size()) {
+                    m_fullPalettes[m_paletteSetIndex] = m_paletteColors;
+                }
+                refreshPaletteList();
+                applyPaletteColorChanges(before, std::vector<QColor>(m_paletteColors.begin(), m_paletteColors.end()));
+                m_paletteList->setCurrentRow(row);
+                dropEvent->setDropAction(Qt::CopyAction);
+                dropEvent->accept();
+                return true;
+            }
+            dropEvent->ignore();
+            return true;
+        }
+    }
+    if (m_currentColorButton && obj == m_currentColorButton) {
+        if (event->type() == QEvent::MouseButtonPress) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (mouseEvent->button() == Qt::LeftButton) {
+                m_currentColorDragPending = true;
+                m_currentColorDragStart = mouseEvent->pos();
+            }
+        }
+        if (event->type() == QEvent::MouseMove) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (m_currentColorDragPending &&
+                (mouseEvent->buttons() & Qt::LeftButton) &&
+                (mouseEvent->pos() - m_currentColorDragStart).manhattanLength() >= QApplication::startDragDistance()) {
+                m_currentColorDragPending = false;
+                const QColor color(static_cast<int>(m_drawColor[2]),
+                                   static_cast<int>(m_drawColor[1]),
+                                   static_cast<int>(m_drawColor[0]));
+                QDrag* drag = new QDrag(m_currentColorButton);
+                QMimeData* mime = new QMimeData();
+                mime->setData(kPaletteColorMime, EncodePaletteColor(color));
+                drag->setMimeData(mime);
+                QPixmap pixmap(kPaletteSwatchSize, kPaletteSwatchSize);
+                pixmap.fill(color);
+                drag->setPixmap(pixmap);
+                drag->setHotSpot(QPoint(pixmap.width() / 2, pixmap.height() / 2));
+                drag->exec(Qt::CopyAction);
+                return true;
+            }
+        }
+        if (event->type() == QEvent::MouseButtonRelease) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (mouseEvent->button() == Qt::LeftButton) {
+                m_currentColorDragPending = false;
+            }
+        }
+    }
+    auto handlePaletteDrop = [this, obj](QListWidget* list,
+                                    QEvent* event,
+                                    auto applyFn) -> bool {
+        if (!list || (event->type() != QEvent::DragEnter &&
+                      event->type() != QEvent::DragMove &&
+                      event->type() != QEvent::Drop)) {
+            return false;
+        }
+        if (event->type() == QEvent::DragEnter || event->type() == QEvent::DragMove) {
+            auto* dragEvent = static_cast<QDragMoveEvent*>(event);
+            QColor color;
+            if (DecodePaletteColor(dragEvent->mimeData(), color)) {
+                dragEvent->setDropAction(Qt::CopyAction);
+                dragEvent->accept();
+                return true;
+            }
+            dragEvent->ignore();
+            return true;
+        }
+        auto* dropEvent = static_cast<QDropEvent*>(event);
+        QColor color;
+        if (!DecodePaletteColor(dropEvent->mimeData(), color)) {
+            dropEvent->ignore();
+            return true;
+        }
+        QPoint pos = dropEvent->position().toPoint();
+        if (obj == list) {
+            pos = list->viewport()->mapFrom(list, pos);
+        }
+        QListWidgetItem* item = list->itemAt(pos);
+        const int row = item ? item->listWidget()->row(item) : -1;
+        if (row >= 0) {
+            applyFn(row, color);
+            dropEvent->setDropAction(Qt::CopyAction);
+            dropEvent->accept();
+            return true;
+        }
+        dropEvent->ignore();
+        return true;
+    };
+    if (m_reducedPaletteList &&
+        (obj == m_reducedPaletteList || obj == m_reducedPaletteList->viewport())) {
+        return handlePaletteDrop(m_reducedPaletteList, event, [this](int row, const QColor& color) {
+            pushReducedUndoSnapshot(m_reducedPaletteIndex);
+            setReducedSlotColor(m_reducedPaletteIndex, row, color);
+            refreshReducedPaletteButtons();
+            if (m_reducedPaletteList) {
+                m_reducedPaletteList->setCurrentRow(row);
+            }
+        });
+    }
+    if (m_dynamicPaletteList &&
+        (obj == m_dynamicPaletteList || obj == m_dynamicPaletteList->viewport())) {
+        return handlePaletteDrop(m_dynamicPaletteList, event, [this](int row, const QColor& color) {
+            const std::vector<int> targets = targetFrameIndices();
+            for (int frameIndex : targets) {
+                if (frameIndex < 0 || frameIndex >= static_cast<int>(m_frameDynamicColors.size())) {
+                    continue;
+                }
+                pushDynamicUndoSnapshot(frameIndex, m_dynamicSetIndex);
+                setDynamicSlotColor(frameIndex, m_dynamicSetIndex, row, color);
+            }
+            refreshDynamicPaletteButtons();
+            if (m_dynamicPaletteList) {
+                m_dynamicPaletteList->setCurrentRow(row);
+            }
+        });
+    }
+    if (m_rotationList &&
+        (obj == m_rotationList || obj == m_rotationList->viewport())) {
+        return handlePaletteDrop(m_rotationList, event, [this](int row, const QColor& color) {
+            const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
+            if (frameIndex < 0) {
+                return;
+            }
+            const std::size_t blockSize =
+                static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
+            const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize +
+                static_cast<std::size_t>(m_rotationSetIndex) * MAX_LENGTH_COLOR_ROTATION;
+            std::vector<uint16_t>& rotations = (m_useHdFrame && hasHdFrame(frameIndex))
+                ? m_frameRotationsX
+                : m_frameRotations;
+            if (base + MAX_LENGTH_COLOR_ROTATION > rotations.size()) {
+                return;
+            }
+            const uint16_t length = rotations[base];
+            if (row < 0 || row >= static_cast<int>(length)) {
+                return;
+            }
+            const cv::Vec3b bgr(color.blue(), color.green(), color.red());
+            const uint16_t value = BgrToRgb565(bgr);
+            rotations[base + 2 + static_cast<std::size_t>(row)] = value;
+            refreshRotationList();
+            if (m_rotationList) {
+                m_rotationList->setCurrentRow(row);
+            }
+            resetCanvasRotationState();
+        });
+    }
     if (m_framePreviewList &&
         (obj == m_framePreviewList || obj == m_framePreviewList->viewport())) {
         if (event->type() == QEvent::DragEnter) {

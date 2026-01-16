@@ -258,6 +258,10 @@ private:
     void applyToolToDynamicMask(cv::Mat& map, int setId, DrawTool tool, const QPoint& start, const QPoint& end, bool erase);
     void applyDynamicMaskFill(cv::Mat& map, int setId, int x, int y, bool erase);
     void initPalette();
+    void applyPaletteColorChanges(const std::vector<QColor>& before, const std::vector<QColor>& after);
+    void startPaletteBlink(int slot);
+    void stopPaletteBlink();
+    void updatePaletteBlinkPreview();
     void refreshPaletteList();
     int reducedSlotCount() const;
     int dynamicSlotCount() const;
@@ -463,6 +467,7 @@ private:
     int m_rotationFrameIndex = -1;
     bool m_rotationUseHd = false;
     class QTimer* m_rotationTimer;
+    class QTimer* m_paletteBlinkTimer = nullptr;
     QElapsedTimer m_rotationClock;
     QElapsedTimer m_previewRotationClock;
     SerumEditorRotationState m_rotationState;
@@ -490,6 +495,17 @@ private:
     bool m_paletteGradientActive = false;
     int m_paletteGradientStartIndex = -1;
     bool m_paletteSetSlotActive = false;
+    bool m_paletteBlinkActive = false;
+    bool m_paletteBlinkOn = false;
+    int m_paletteBlinkSlot = -1;
+    int m_paletteBlinkFrameIndex = -1;
+    bool m_paletteBlinkUseHd = false;
+    bool m_paletteDragPending = false;
+    int m_paletteDragSlot = -1;
+    QPoint m_paletteDragStart;
+    bool m_currentColorDragPending = false;
+    QPoint m_currentColorDragStart;
+    bool m_uiReady = false;
     bool m_reducedSetSlotActive = false;
     bool m_dynamicSetSlotActive = false;
     bool m_rotationSetSlotActive = false;

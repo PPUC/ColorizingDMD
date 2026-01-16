@@ -16,6 +16,7 @@ This handbook captures editor behaviors and workflows that differ from the legac
 - Use the HD filter button to show only frames that have HD data.
 - Use the mask overlay toggle to show masks on the original preview frames.
 - Use the rotate toggle to preview color rotations in the preview row.
+- Use the refresh button to rebuild previews after bulk edits.
 
 ## Canvas Controls
 
@@ -26,12 +27,14 @@ This handbook captures editor behaviors and workflows that differ from the legac
 - **Background Mask** is independent and edits the background mask on the colorized frame.
 - **Background toggle** shows/hides the background layer while editing frames.
 - **HD toggle** switches between SD and HD for frames, sprites, and backgrounds.
+- The status bar shows pixel coordinates for the canvas under the cursor.
 
 ## Drawing Tools
 
 - Tools: point, line, rectangle, filled rectangle, circle, filled circle, ellipse, filled ellipse, magic fill, color picker.
 - Right-click erases for pixel edits; Shift erases when editing masks/dynamic masks.
 - ESC cancels the current drawing preview or palette action.
+- Live preview shows a semi-transparent overlay while drawing shapes.
 
 ## Frames and Multi-Frame Editing
 
@@ -39,12 +42,14 @@ This handbook captures editor behaviors and workflows that differ from the legac
 - Mask edits apply to the assigned mask, which is shared across all frames using it.
 - Dynamic mask edits apply to the current dynamic set for all selected frames.
 - Background assignment and background mask edits apply to all selected frames.
+- Frame history supports back/forward navigation per canvas.
 
 ## Masks (Comparison Masks)
 
 - 64 shared masks; each frame references exactly one.
 - Edit masks on the **original** (orange) frame.
 - Reorder masks with `Up`/`Down` without breaking frame assignments.
+- Shape comparison mode is available per frame (compares black vs. non-black).
 
 ## Dynamic Masks
 
@@ -52,12 +57,14 @@ This handbook captures editor behaviors and workflows that differ from the legac
 - Edit dynamic masks on the **original** (orange) frame.
 - Dynamic masks use per-frame dynamic color sets (2-bit or 4-bit).
 - The dynamic mask list shows a mask preview plus a mini color strip.
+- Hold Shift while drawing to subtract from the current dynamic mask.
 
 ## Backgrounds
 
 - Assign backgrounds per frame (drag & drop or inspector).
 - Each frame has a background mask drawn on the **colorized** frame.
 - Backgrounds can be edited on the Background canvas with the same drawing tools.
+- Background previews and assignments are available from the Components list and the Inspector.
 
 ## Sprites
 
@@ -65,6 +72,7 @@ This handbook captures editor behaviors and workflows that differ from the legac
 - Sprite detection areas (4) are edited on the original (bottom) sprite.
 - Drag & drop sprites onto a selected frame zone to assign.
 - Sprite overlays are drawn on top of frames and cannot be painted over.
+- Sprite dynamic masks use per-sprite dynamic color sets.
 
 ## Sprite Zones (Frame Detection Zones)
 
@@ -88,6 +96,7 @@ This handbook captures editor behaviors and workflows that differ from the legac
 - Upscaling modes include nearest/scale2x/bilinear/bicubic with brightness correction.
 - HD previews are double-size in Components and preview row.
 - An all-black HD background is treated as “missing.”
+- HD background masks are double-scaled when generated from SD.
 
 ## Colors, Palettes, and Rotations
 
@@ -96,9 +105,21 @@ This handbook captures editor behaviors and workflows that differ from the legac
 - Dynamic color sets: 32 per frame, used by dynamic masks.
 - Rotation sets: editable in the Colors tab; use `Set Slot` to assign, and the gradient tool for ranges.
 - Selecting a color sets the active draw color; the color picker updates the active draw color.
+- Gradient tool fills a range between two selected palette slots.
+- Set Slot applies the current draw color to a chosen slot.
+- Left-clicking a full palette slot blinks matching foreground pixels on the canvas while the mouse is held.
+- Right-clicking a full palette slot opens the color picker.
+- Changing a full palette slot recolors matching foreground pixels on selected frames; backgrounds, sprites, and dynamic masks are not modified.
+- Drag the current color onto a full palette slot to set it; drag a full palette color onto reduced, dynamic, or rotation slots to assign it.
 
 ## Undo/Redo and Settings
 
 - Undo/redo stacks are separated for frames, masks, backgrounds, sprites, and palettes.
 - Undo/redo applies to all selected frames where relevant.
 - Settings dialog allows adjusting undo and navigation history sizes.
+
+## Open/Save and Legacy Compatibility
+
+- Legacy cROM/cROMc project load/save is supported.
+- “Open Recent” persists across app restarts.
+- The editor targets Serum V2 while preserving legacy file compatibility.

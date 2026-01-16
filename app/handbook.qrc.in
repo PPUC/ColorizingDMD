@@ -1,5 +1,5 @@
 <RCC>
     <qresource prefix="/docs">
-        <file alias="handbook.md">@HANDBOOK_MD_COPY@</file>
+        <file alias="handbook.md">@HANDBOOK_MD@</file>
     </qresource>
 </RCC>

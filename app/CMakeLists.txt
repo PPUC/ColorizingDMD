@@ -2,20 +2,10 @@ set(APP_NAME "PPUC-Serum-Colorizer")
 add_executable(${APP_NAME})
 
 set(HANDBOOK_MD ${CMAKE_SOURCE_DIR}/handbook.md)
-set(HANDBOOK_MD_COPY ${CMAKE_CURRENT_BINARY_DIR}/handbook.md)
 set(HANDBOOK_QRC ${CMAKE_CURRENT_BINARY_DIR}/handbook.qrc)
 
-add_custom_command(
-    OUTPUT ${HANDBOOK_MD_COPY}
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${HANDBOOK_MD} ${HANDBOOK_MD_COPY}
-    DEPENDS ${HANDBOOK_MD}
-    VERBATIM
-)
-add_custom_target(handbook_md DEPENDS ${HANDBOOK_MD_COPY})
-add_dependencies(${APP_NAME} handbook_md)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/handbook.qrc.in ${HANDBOOK_QRC} @ONLY)
 set_source_files_properties(${HANDBOOK_QRC} PROPERTIES GENERATED TRUE)
-set_source_files_properties(${HANDBOOK_MD_COPY} PROPERTIES GENERATED TRUE)
 
 target_sources(${APP_NAME} PRIVATE
     main.cpp
