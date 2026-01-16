@@ -22,7 +22,7 @@ jobs:
           - os: macos-14
             platform: macos
             arch: arm64
-          - os: macos-13
+          - os: macos-15-intel
             platform: macos
             arch: x64
           - os: windows-2025
@@ -72,7 +72,7 @@ jobs:
         env:
           BUILD_TYPE: Release
         run: |
-          chmod +x platforms/**/build.sh platforms/**/external.sh
+          find platforms -name "build.sh" -o -name "external.sh" -exec chmod +x {} \;
           ./platforms/${{ matrix.platform }}/${{ matrix.arch }}/build.sh
 
       - name: Upload artifacts
