@@ -12,6 +12,8 @@
 #include "legacy_project.h"
 #include "serum-editor.h"
 
+class QListWidget;
+
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -51,6 +53,12 @@ private:
     struct UndoStack {
         std::vector<UndoState> undo;
         std::vector<UndoState> redo;
+    };
+    struct NavigationHistory {
+        QVector<int> back;
+        QVector<int> forward;
+        int current = -1;
+        bool navigating = false;
     };
     struct SpriteZoneGroup {
         QRect rect;
@@ -128,6 +136,10 @@ private:
     void setCanvasRotationEnabled(bool enabled);
     void updateCanvasRotationFrame();
     void resetCanvasRotationState();
+    void updateFrameUsageHighlights(int frameIndex);
+    const cv::Mat* activeSpriteImage(int index) const;
+    cv::Mat* activeSpriteImageMutable(int index);
+    QRect spriteDisplayRect(int index, const cv::Mat& image) const;
     void refreshRotationEditor();
     void refreshRotationList();
     void updateRotationDelay(int delayMs);
@@ -143,6 +155,12 @@ private:
     std::vector<SpriteZoneGroup> buildSpriteZonesForFrame(int frameIndex) const;
     void resetUndoStacks();
     void ensureUndoStacksSize();
+    void resetNavigationHistory();
+    void recordHistory(NavigationHistory& history, int newIndex);
+    bool navigateHistory(NavigationHistory& history, QListWidget* list, bool forward);
+    void updateNavigationButtons();
+    void trimUndoStacks();
+    void showSettingsDialog();
     void pushPaletteUndoSnapshot();
     void pushReducedUndoSnapshot(int setIndex);
     void pushDynamicUndoSnapshot(int frameIndex, int setIndex);
@@ -464,6 +482,7 @@ private:
     bool m_reducedSetSlotActive = false;
     bool m_dynamicSetSlotActive = false;
     bool m_rotationSetSlotActive = false;
+    bool m_useHdSprite = false;
     struct PaletteUndoState {
         enum class Kind {
             Full,
@@ -486,4 +505,11 @@ private:
     Qt::MouseButton m_frameStartButton = Qt::NoButton;
     Qt::MouseButton m_spriteStartButton = Qt::NoButton;
     uint32_t m_noColors = 64;
+    int m_maxUndoDepth = 50;
+    int m_maxHistoryDepth = 100;
+    NavigationHistory m_frameHistory;
+    NavigationHistory m_spriteHistory;
+    NavigationHistory m_imageHistory;
+    NavigationHistory m_backgroundHistory;
+    QAction* m_settingsAction = nullptr;
 };

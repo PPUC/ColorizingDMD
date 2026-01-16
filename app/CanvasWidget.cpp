@@ -13,6 +13,8 @@ CanvasWidget::CanvasWidget(const QString& title, QWidget* parent)
     , m_canvas(new GLCanvasWidget(this))
     , m_label(new QLabel(title, this))
     , m_fitButton(new QToolButton(m_canvas))
+    , m_backButton(new QToolButton(m_canvas))
+    , m_forwardButton(new QToolButton(m_canvas))
     , m_gridButton(new QToolButton(m_canvas))
     , m_originalButton(new QToolButton(m_canvas))
     , m_backgroundButton(new QToolButton(m_canvas))
@@ -35,6 +37,20 @@ CanvasWidget::CanvasWidget(const QString& title, QWidget* parent)
     m_fitButton->setToolTip("Fit to view");
     m_fitButton->setCursor(Qt::PointingHandCursor);
     connect(m_fitButton, &QToolButton::clicked, this, &CanvasWidget::fitRequested);
+
+    m_backButton->setText("<");
+    m_backButton->setAutoRaise(true);
+    m_backButton->setToolTip("Back");
+    m_backButton->setCursor(Qt::PointingHandCursor);
+    m_backButton->setEnabled(false);
+    connect(m_backButton, &QToolButton::clicked, this, &CanvasWidget::backRequested);
+
+    m_forwardButton->setText(">");
+    m_forwardButton->setAutoRaise(true);
+    m_forwardButton->setToolTip("Forward");
+    m_forwardButton->setCursor(Qt::PointingHandCursor);
+    m_forwardButton->setEnabled(false);
+    connect(m_forwardButton, &QToolButton::clicked, this, &CanvasWidget::forwardRequested);
 
     m_gridButton->setText("Grid");
     m_gridButton->setCheckable(true);
@@ -261,6 +277,22 @@ void CanvasWidget::setRotateEnabled(bool enabled)
     m_rotateButton->setEnabled(enabled);
 }
 
+void CanvasWidget::setBackEnabled(bool enabled)
+{
+    if (!m_backButton) {
+        return;
+    }
+    m_backButton->setEnabled(enabled);
+}
+
+void CanvasWidget::setForwardEnabled(bool enabled)
+{
+    if (!m_forwardButton) {
+        return;
+    }
+    m_forwardButton->setEnabled(enabled);
+}
+
 void CanvasWidget::setBackgroundChecked(bool enabled)
 {
     if (!m_backgroundButton) {
@@ -306,20 +338,30 @@ void CanvasWidget::setHdButtonEnabled(bool enabled)
 void CanvasWidget::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
-    if (!m_fitButton || !m_gridButton || !m_originalButton || !m_backgroundButton ||
+    if (!m_fitButton || !m_backButton || !m_forwardButton || !m_gridButton || !m_originalButton || !m_backgroundButton ||
         !m_maskButton || !m_dynamicButton || !m_backgroundMaskButton || !m_zoneButton || !m_hdButton ||
         !m_rotateButton) {
         return;
     }
     const int margin = 8;
-    const QSize buttonSize = m_fitButton->sizeHint();
-    const int x = m_canvas->width() - buttonSize.width() - margin;
+    const QSize forwardSize = m_forwardButton->sizeHint();
+    const int x = m_canvas->width() - forwardSize.width() - margin;
     const int y = margin;
-    m_fitButton->move(x, y);
+    m_forwardButton->move(x, y);
+    m_forwardButton->raise();
+
+    const QSize backSize = m_backButton->sizeHint();
+    const int backX = x - backSize.width() - 6;
+    m_backButton->move(backX, y);
+    m_backButton->raise();
+
+    const QSize fitSize = m_fitButton->sizeHint();
+    const int fitX = backX - fitSize.width() - 6;
+    m_fitButton->move(fitX, y);
     m_fitButton->raise();
 
     const QSize gridSize = m_gridButton->sizeHint();
-    const int gridX = x - gridSize.width() - 6;
+    const int gridX = fitX - gridSize.width() - 6;
     m_gridButton->move(gridX, y);
     m_gridButton->raise();
 

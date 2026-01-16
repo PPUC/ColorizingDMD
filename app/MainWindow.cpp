@@ -7,6 +7,8 @@
 #include <QAbstractItemModel>
 #include <QComboBox>
 #include <QDockWidget>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QLabel>
 #include <QFile>
 #include <QFileDialog>
@@ -57,6 +59,7 @@
 #include <cmath>
 #include <cctype>
 #include <cstring>
+#include <array>
 #include <unordered_set>
 #include <unordered_map>
 #include <map>
@@ -94,7 +97,8 @@ constexpr int kDynamicMaskItemWidth = kDynamicMaskIconWidth + 12;
 constexpr int kPaletteSwatchSize = 26;
 constexpr int kPaletteItemSize = 32;
 constexpr int kReducedPaletteCount = 64;
-constexpr int kMaxUndoDepth = 50;
+constexpr int kDefaultUndoDepth = 50;
+constexpr int kDefaultHistoryDepth = 100;
 constexpr int kFrameGapPixels = 8;
 
 constexpr int kFrameIndexRole = Qt::UserRole + 1;
@@ -103,6 +107,7 @@ constexpr int kPreviewIconSizeRole = Qt::UserRole + 3;
 constexpr int kPaletteDisabledRole = Qt::UserRole + 4;
 constexpr int kPreviewSecondarySelectedRole = Qt::UserRole + 5;
 constexpr int kSpriteZoneIndexRole = Qt::UserRole + 6;
+constexpr int kPreviewUsageRole = Qt::UserRole + 7;
 
 cv::Mat EnsureBgr(const cv::Mat& source);
 uint16_t BgrToRgb565(const cv::Vec3b& color);
@@ -357,7 +362,12 @@ public:
         QStyleOptionViewItem opt = option;
         initStyleOption(&opt, index);
         const bool selected = (opt.state & QStyle::State_Selected);
-        painter->fillRect(opt.rect, selected ? opt.palette.highlight() : opt.palette.base());
+        const bool used = index.data(kPreviewUsageRole).toBool();
+        const QColor usedColor(170, 200, 255);
+        painter->fillRect(opt.rect,
+                          selected ? opt.palette.highlight()
+                                   : used ? usedColor
+                                          : opt.palette.base());
 
         const QFontMetrics metrics(opt.font);
         const int padding = 6;
@@ -697,6 +707,7 @@ MainWindow::MainWindow(QWidget* parent)
     toolMagicFillAction->setCheckable(true);
     auto* cancelDrawAction = new QAction("&Cancel Draw", this);
     cancelDrawAction->setShortcut(QKeySequence(Qt::Key_Escape));
+    m_settingsAction = new QAction("&Settings...", this);
     auto* fitToViewAction = new QAction("Fit to &View", this);
     removeSelectedAction->setShortcut(QKeySequence::Delete);
     removeSelectedAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
@@ -718,6 +729,8 @@ MainWindow::MainWindow(QWidget* parent)
     editMenu->addAction(addSpriteAction);
     editMenu->addSeparator();
     editMenu->addAction(removeSelectedAction);
+    editMenu->addSeparator();
+    editMenu->addAction(m_settingsAction);
     auto* drawMenu = editMenu->addMenu("&Draw");
     drawMenu->addAction(enableDrawAction);
     drawMenu->addSeparator();
@@ -868,6 +881,7 @@ MainWindow::MainWindow(QWidget* parent)
         m_frameShapeCompModes.clear();
         m_noColors = 64;
         resetUndoStacks();
+        resetNavigationHistory();
         updateMetadataForFrame(-1);
         updateMetadataForSprite(-1);
         populateBookmarks({}, {});
@@ -1001,6 +1015,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(toolColorPickerAction, &QAction::triggered, this, [this]() { m_drawTool = DrawTool::ColorPicker; });
     connect(toolMagicFillAction, &QAction::triggered, this, [this]() { m_drawTool = DrawTool::MagicFill; });
     connect(cancelDrawAction, &QAction::triggered, this, [this]() { cancelCurrentDraw(); });
+    connect(m_settingsAction, &QAction::triggered, this, [this]() { showSettingsDialog(); });
     connect(fitToViewAction, &QAction::triggered, this, [this]() {
         m_framesCanvas->canvas()->requestFitOnResize(true);
         m_spritesCanvas->canvas()->requestFitOnResize(true);
@@ -1128,7 +1143,7 @@ MainWindow::MainWindow(QWidget* parent)
         updateHdControlsForContext();
     });
 
-    auto* toolDock = new QDockWidget("Tools", this);
+    auto* toolDock = new QDockWidget("Components", this);
     toolDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
     auto* toolsTabs = new QTabWidget(toolDock);
     m_toolsTabs = toolsTabs;
@@ -1175,11 +1190,23 @@ MainWindow::MainWindow(QWidget* parent)
     m_spriteFilter->setPlaceholderText("Filter sprites...");
     m_spritesList = new QListWidget(spritesTab);
     m_spritesList->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_spritesList->setViewMode(QListView::IconMode);
+    m_spritesList->setFlow(QListView::TopToBottom);
+    m_spritesList->setWrapping(false);
+    m_spritesList->setMovement(QListView::Snap);
+    m_spritesList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_spritesList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+    m_spritesList->setResizeMode(QListView::Adjust);
+    m_spritesList->setUniformItemSizes(false);
     m_spritesList->setDragDropMode(QAbstractItemView::DragOnly);
     m_spritesList->setDragDropOverwriteMode(false);
     m_spritesList->setDragEnabled(true);
     m_spritesList->setAcceptDrops(false);
     m_spritesList->setDropIndicatorShown(false);
+    m_spritesList->setIconSize(QSize(kPreviewIconWidthHd, kPreviewIconHeightHd));
+    m_spritesList->setGridSize(QSize());
+    m_spritesList->setSpacing(4);
+    m_spritesList->setItemDelegate(new ToolPreviewDelegate(m_spritesList));
     auto* spritesLayout = new QVBoxLayout(spritesTab);
     spritesLayout->addWidget(m_spriteFilter);
     spritesLayout->addWidget(m_spritesList, 1);
@@ -1783,9 +1810,10 @@ MainWindow::MainWindow(QWidget* parent)
     toolDock->setWidget(toolsTabs);
     addDockWidget(Qt::LeftDockWidgetArea, toolDock);
 
-    auto* inspectorDock = new QDockWidget("Inspector", this);
+    auto* inspectorDock = new QDockWidget("Tools", this);
     inspectorDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
-    auto* inspectorWidget = new QWidget(inspectorDock);
+    auto* inspectorTabs = new QTabWidget(inspectorDock);
+    auto* inspectorWidget = new QWidget(inspectorTabs);
     auto* inspectorLayout = new QFormLayout(inspectorWidget);
     m_projectLabel = new QLabel("None", inspectorWidget);
     m_projectLabel->setWordWrap(true);
@@ -1847,12 +1875,17 @@ MainWindow::MainWindow(QWidget* parent)
     inspectorLayout->addRow("Sprite slot", m_frameSpriteSlotCombo);
     inspectorLayout->addRow(m_backgroundAssignLabel, m_frameBackgroundAssign);
     inspectorLayout->addRow("Shape compare", m_shapeCompToggle);
-    inspectorLayout->addRow("HD source", m_hdSourceCombo);
-    inspectorLayout->addRow("HD scale", m_hdScaleCombo);
-    inspectorLayout->addRow("HD create", m_hdCreateButton);
-    inspectorLayout->addRow("HD delete", m_hdDeleteButton);
     inspectorWidget->setLayout(inspectorLayout);
-    inspectorDock->setWidget(inspectorWidget);
+    auto* hdWidget = new QWidget(inspectorTabs);
+    auto* hdLayout = new QFormLayout(hdWidget);
+    hdLayout->addRow("HD source", m_hdSourceCombo);
+    hdLayout->addRow("HD scale", m_hdScaleCombo);
+    hdLayout->addRow("HD create", m_hdCreateButton);
+    hdLayout->addRow("HD delete", m_hdDeleteButton);
+    hdWidget->setLayout(hdLayout);
+    inspectorTabs->addTab(inspectorWidget, "Inspector");
+    inspectorTabs->addTab(hdWidget, "HD");
+    inspectorDock->setWidget(inspectorTabs);
     addDockWidget(Qt::RightDockWidgetArea, inspectorDock);
 
     auto* previewDock = new QDockWidget("Frame Preview", this);
@@ -2048,6 +2081,74 @@ MainWindow::MainWindow(QWidget* parent)
             statusBar()->showMessage("HD background created.", 2000);
             return;
         }
+        if (m_canvasTabs && m_canvasTabs->currentWidget() == m_spritesCanvas) {
+            const int index = m_spritesList ? m_spritesList->currentRow() : -1;
+            if (index < 0 || !m_spriteStore) {
+                return;
+            }
+            if (index < static_cast<int>(m_spriteColoredX.size()) &&
+                !m_spriteColoredX[static_cast<std::size_t>(index)].empty()) {
+                statusBar()->showMessage("HD sprite already exists.", 2000);
+                return;
+            }
+            const cv::Mat* src = m_spriteStore->at(index);
+            if (!src || src->empty()) {
+                statusBar()->showMessage("No sprite image to upscale.", 2000);
+                return;
+            }
+            if (m_spriteColoredX.size() <= static_cast<std::size_t>(index)) {
+                m_spriteColoredX.resize(static_cast<std::size_t>(index + 1));
+            }
+            if (m_spriteExtraFlags.size() <= static_cast<std::size_t>(index)) {
+                m_spriteExtraFlags.resize(static_cast<std::size_t>(index + 1), 0);
+            }
+            const int interpolation = m_hdScaleCombo ? m_hdScaleCombo->currentData().toInt() : cv::INTER_NEAREST;
+            cv::Mat hd;
+            if (interpolation == -1) {
+                hd = Scale2xBgr(EnsureBgr(*src));
+            } else {
+                cv::resize(EnsureBgr(*src), hd, cv::Size(src->cols * 2, src->rows * 2), 0.0, 0.0, interpolation);
+                if (interpolation == cv::INTER_LINEAR || interpolation == cv::INTER_CUBIC) {
+                    hd = AdjustBrightnessToSource(*src, hd);
+                }
+            }
+            if (hd.empty()) {
+                statusBar()->showMessage("HD sprite create failed.", 2000);
+                return;
+            }
+            m_spriteColoredX[static_cast<std::size_t>(index)] = hd;
+            m_spriteExtraFlags[static_cast<std::size_t>(index)] = 1;
+            if (m_spriteDynamicMasksX.size() <= static_cast<std::size_t>(index)) {
+                m_spriteDynamicMasksX.resize(static_cast<std::size_t>(index + 1));
+            }
+            if (index < static_cast<int>(m_spriteDynamicMasks.size())) {
+                const cv::Mat& sdMask = m_spriteDynamicMasks[static_cast<std::size_t>(index)];
+                cv::Mat& hdMask = m_spriteDynamicMasksX[static_cast<std::size_t>(index)];
+                if (!sdMask.empty() && (hdMask.empty() || hdMask.size() != hd.size())) {
+                    cv::resize(sdMask, hdMask, hd.size(), 0.0, 0.0, cv::INTER_NEAREST);
+                }
+            }
+            if (m_spriteMasksX.size() <= static_cast<std::size_t>(index)) {
+                m_spriteMasksX.resize(static_cast<std::size_t>(index + 1));
+            }
+            if (index < static_cast<int>(m_spriteOriginals.size())) {
+                const cv::Mat& sdOriginal = m_spriteOriginals[static_cast<std::size_t>(index)];
+                cv::Mat& hdMask = m_spriteMasksX[static_cast<std::size_t>(index)];
+                if (!sdOriginal.empty() && (hdMask.empty() || hdMask.size() != hd.size())) {
+                    cv::resize(sdOriginal, hdMask, hd.size(), 0.0, 0.0, cv::INTER_NEAREST);
+                }
+            }
+            m_useHdSprite = true;
+            if (m_spritesCanvas) {
+                m_spritesCanvas->setHdButtonChecked(true);
+                m_spritesCanvas->setHdButtonEnabled(true);
+            }
+            updateHdControlsForContext();
+            refreshFrameSpriteLists();
+            updateSpriteCanvasImage(index);
+            statusBar()->showMessage("HD sprite created.", 2000);
+            return;
+        }
         const int frameCount = m_frameStore ? m_frameStore->count() : 0;
         if (frameCount <= 0) {
             return;
@@ -2155,6 +2256,30 @@ MainWindow::MainWindow(QWidget* parent)
             refreshFramePreviews();
             updateFrameCanvasImage(m_framesList ? m_framesList->currentRow() : -1);
             statusBar()->showMessage("HD background deleted.", 2000);
+            return;
+        }
+        if (m_canvasTabs && m_canvasTabs->currentWidget() == m_spritesCanvas) {
+            const int index = m_spritesList ? m_spritesList->currentRow() : -1;
+            if (index < 0 || index >= static_cast<int>(m_spriteColoredX.size())) {
+                return;
+            }
+            m_spriteColoredX[static_cast<std::size_t>(index)] = cv::Mat();
+            if (index < static_cast<int>(m_spriteMasksX.size())) {
+                m_spriteMasksX[static_cast<std::size_t>(index)] = cv::Mat();
+            }
+            if (index < static_cast<int>(m_spriteDynamicMasksX.size())) {
+                m_spriteDynamicMasksX[static_cast<std::size_t>(index)] = cv::Mat();
+            }
+            if (index < static_cast<int>(m_spriteDynamicColorsX.size())) {
+                m_spriteDynamicColorsX[static_cast<std::size_t>(index)].clear();
+            }
+            if (index < static_cast<int>(m_spriteExtraFlags.size())) {
+                m_spriteExtraFlags[static_cast<std::size_t>(index)] = 0;
+            }
+            updateHdControlsForContext();
+            refreshFrameSpriteLists();
+            updateSpriteCanvasImage(index);
+            statusBar()->showMessage("HD sprite deleted.", 2000);
             return;
         }
         const int frameCount = m_frameStore ? m_frameStore->count() : 0;
@@ -2332,6 +2457,7 @@ MainWindow::MainWindow(QWidget* parent)
             updatePreviewFilterState();
         }
         updateHdControlsForContext();
+        recordHistory(m_backgroundHistory, row);
     });
     connect(m_maskMoveUp, &QToolButton::clicked, this, [this]() {
         const int index = m_maskList->currentRow();
@@ -2485,6 +2611,7 @@ MainWindow::MainWindow(QWidget* parent)
             m_framesCanvas->setStatusText(QString("Selected %1").arg(frameText));
         }
         updateMetadataForFrame(frameIndex);
+        recordHistory(m_frameHistory, frameIndex);
         updateUndoActions();
     });
     connect(m_framePreviewList, &QListWidget::itemPressed, this, [this](QListWidgetItem* item) {
@@ -2587,6 +2714,7 @@ MainWindow::MainWindow(QWidget* parent)
             if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::DynamicMask) {
                 updatePreviewFilterState();
             }
+            recordHistory(m_frameHistory, m_framesList->currentRow());
         } else {
             updateSelectionFromLists();
         }
@@ -2602,6 +2730,7 @@ MainWindow::MainWindow(QWidget* parent)
             if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::Sprite) {
                 updatePreviewFilterState();
             }
+            recordHistory(m_spriteHistory, m_spritesList->currentRow());
         } else {
             updateSelectionFromLists();
         }
@@ -2614,6 +2743,7 @@ MainWindow::MainWindow(QWidget* parent)
             if (m_state->images().contains(text)) {
                 showImageForPath(text);
             }
+            recordHistory(m_imageHistory, m_imagesList->currentRow());
         } else {
             updateSelectionFromLists();
         }
@@ -2726,14 +2856,15 @@ MainWindow::MainWindow(QWidget* parent)
             return;
         }
         const int index = m_spritesList ? m_spritesList->currentRow() : -1;
-        const cv::Mat* sprite = (index >= 0) ? m_spriteStore->at(index) : nullptr;
+        const cv::Mat* sprite = (index >= 0) ? activeSpriteImage(index) : nullptr;
         if (!sprite || sprite->empty()) {
             m_coordLabel->setText(QString());
             return;
         }
         const QRect contentRect = spriteContentRect(index);
-        const int baseWidth = contentRect.isValid() ? contentRect.width() : sprite->cols;
-        const int baseHeight = contentRect.isValid() ? contentRect.height() : sprite->rows;
+        const QRect displayRect = spriteDisplayRect(index, *sprite);
+        const int baseWidth = displayRect.isValid() ? displayRect.width() : sprite->cols;
+        const int baseHeight = displayRect.isValid() ? displayRect.height() : sprite->rows;
         cv::Mat originalRef;
         if (index >= 0 && index < static_cast<int>(m_spriteOriginals.size())) {
             if (contentRect.isValid() && !contentRect.isEmpty()) {
@@ -2946,11 +3077,35 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_framesCanvas, &CanvasWidget::fitRequested, this, [this]() {
         m_framesCanvas->canvas()->requestFitOnResize(true);
     });
+    connect(m_framesCanvas, &CanvasWidget::backRequested, this, [this]() {
+        navigateHistory(m_frameHistory, m_framesList, false);
+    });
+    connect(m_framesCanvas, &CanvasWidget::forwardRequested, this, [this]() {
+        navigateHistory(m_frameHistory, m_framesList, true);
+    });
     connect(m_spritesCanvas, &CanvasWidget::fitRequested, this, [this]() {
         m_spritesCanvas->canvas()->requestFitOnResize(true);
     });
+    connect(m_spritesCanvas, &CanvasWidget::backRequested, this, [this]() {
+        navigateHistory(m_spriteHistory, m_spritesList, false);
+    });
+    connect(m_spritesCanvas, &CanvasWidget::forwardRequested, this, [this]() {
+        navigateHistory(m_spriteHistory, m_spritesList, true);
+    });
     connect(m_backgroundsCanvas, &CanvasWidget::fitRequested, this, [this]() {
         m_backgroundsCanvas->canvas()->requestFitOnResize(true);
+    });
+    connect(m_backgroundsCanvas, &CanvasWidget::backRequested, this, [this]() {
+        navigateHistory(m_backgroundHistory, m_backgroundList, false);
+    });
+    connect(m_backgroundsCanvas, &CanvasWidget::forwardRequested, this, [this]() {
+        navigateHistory(m_backgroundHistory, m_backgroundList, true);
+    });
+    connect(m_imagesCanvas, &CanvasWidget::backRequested, this, [this]() {
+        navigateHistory(m_imageHistory, m_imagesList, false);
+    });
+    connect(m_imagesCanvas, &CanvasWidget::forwardRequested, this, [this]() {
+        navigateHistory(m_imageHistory, m_imagesList, true);
     });
     connect(m_framesCanvas, &CanvasWidget::gridToggled, this, [this](bool enabled) {
         m_framesCanvas->canvas()->setGridEnabled(enabled);
@@ -3008,6 +3163,11 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(m_framesCanvas, &CanvasWidget::hdToggled, this, [this](bool enabled) {
         setHdMode(enabled);
+    });
+    connect(m_spritesCanvas, &CanvasWidget::hdToggled, this, [this](bool enabled) {
+        m_useHdSprite = enabled;
+        updateSpriteCanvasImage(m_spritesList ? m_spritesList->currentRow() : -1);
+        updateHdControlsForContext();
     });
     connect(m_framesCanvas, &CanvasWidget::rotateToggled, this, [this](bool enabled) {
         setCanvasRotationEnabled(enabled);
@@ -3291,6 +3451,9 @@ MainWindow::MainWindow(QWidget* parent)
     if (!recent.isEmpty()) {
         m_state->setRecentFiles(recent);
     }
+    m_maxUndoDepth = std::clamp(settings.value("maxUndoDepth", kDefaultUndoDepth).toInt(), 1, 1000);
+    m_maxHistoryDepth = std::clamp(settings.value("maxHistoryDepth", kDefaultHistoryDepth).toInt(), 1, 1000);
+    resetNavigationHistory();
 }
 
 void MainWindow::updateWindowTitle()
@@ -3368,6 +3531,7 @@ void MainWindow::openProjectFile(const QString& filename)
             populateBookmarks({}, {});
             if (LoadProjectJson(*m_state, filename, &error)) {
                 resetUndoStacks();
+                resetNavigationHistory();
                 statusBar()->showMessage(QString("Open: %1").arg(filename), 5000);
                 persistRecentFiles();
             } else {
@@ -3540,6 +3704,7 @@ void MainWindow::openProjectFile(const QString& filename)
         refreshImageList();
         refreshCounts();
         refreshFrameSpriteLists();
+        resetNavigationHistory();
         if (!legacy.frames.empty()) {
             m_framesList->setCurrentRow(0);
             QTimer::singleShot(0, this, [this]() {
@@ -4422,6 +4587,139 @@ void MainWindow::resetCanvasRotationState()
     }
 }
 
+void MainWindow::updateFrameUsageHighlights(int frameIndex)
+{
+    if (!m_spritesList && !m_dynamicMaskList && !m_backgroundList && !m_spriteZoneList) {
+        return;
+    }
+    if (frameIndex < 0) {
+        if (m_spritesList) {
+            for (int i = 0; i < m_spritesList->count(); ++i) {
+                if (auto* item = m_spritesList->item(i)) {
+                    item->setData(kPreviewUsageRole, false);
+                }
+            }
+            m_spritesList->viewport()->update();
+        }
+        if (m_dynamicMaskList) {
+            for (int i = 0; i < m_dynamicMaskList->count(); ++i) {
+                if (auto* item = m_dynamicMaskList->item(i)) {
+                    item->setData(kPreviewUsageRole, false);
+                }
+            }
+            m_dynamicMaskList->viewport()->update();
+        }
+        if (m_backgroundList) {
+            for (int i = 0; i < m_backgroundList->count(); ++i) {
+                if (auto* item = m_backgroundList->item(i)) {
+                    item->setData(kPreviewUsageRole, false);
+                }
+            }
+            m_backgroundList->viewport()->update();
+        }
+        if (m_spriteZoneList) {
+            for (int i = 0; i < m_spriteZoneList->count(); ++i) {
+                if (auto* item = m_spriteZoneList->item(i)) {
+                    item->setData(kPreviewUsageRole, false);
+                }
+            }
+            m_spriteZoneList->viewport()->update();
+        }
+        return;
+    }
+
+    if (m_spritesList) {
+        std::unordered_set<int> usedSprites;
+        const std::size_t base = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME;
+        if (base + MAX_SPRITES_PER_FRAME <= m_frameSpriteAssignments.size()) {
+            for (int slot = 0; slot < MAX_SPRITES_PER_FRAME; ++slot) {
+                const uint8_t spriteId = m_frameSpriteAssignments[base + static_cast<std::size_t>(slot)];
+                if (spriteId != 255) {
+                    usedSprites.insert(static_cast<int>(spriteId));
+                }
+            }
+        }
+        for (int i = 0; i < m_spritesList->count(); ++i) {
+            auto* item = m_spritesList->item(i);
+            if (!item) {
+                continue;
+            }
+            const int spriteId = item->data(Qt::UserRole).toInt();
+            item->setData(kPreviewUsageRole, usedSprites.count(spriteId) > 0);
+        }
+        m_spritesList->viewport()->update();
+    }
+
+    if (m_dynamicMaskList) {
+        std::array<bool, MAX_DYNA_SETS_PER_FRAMEN> used{};
+        used.fill(false);
+        const cv::Mat* map = nullptr;
+        if (m_useHdFrame && frameIndex < static_cast<int>(m_frameDynamicMaskMapsX.size())) {
+            const cv::Mat& hdMap = m_frameDynamicMaskMapsX[static_cast<std::size_t>(frameIndex)];
+            if (!hdMap.empty()) {
+                map = &hdMap;
+            }
+        }
+        if (!map && frameIndex < static_cast<int>(m_frameDynamicMaskMaps.size())) {
+            const cv::Mat& sdMap = m_frameDynamicMaskMaps[static_cast<std::size_t>(frameIndex)];
+            if (!sdMap.empty()) {
+                map = &sdMap;
+            }
+        }
+        if (map && !map->empty()) {
+            for (int y = 0; y < map->rows; ++y) {
+                const uint8_t* row = map->ptr<uint8_t>(y);
+                for (int x = 0; x < map->cols; ++x) {
+                    const uint8_t value = row[x];
+                    if (value != 255 && value < MAX_DYNA_SETS_PER_FRAMEN) {
+                        used[value] = true;
+                    }
+                }
+            }
+        }
+        for (int i = 0; i < m_dynamicMaskList->count() && i < MAX_DYNA_SETS_PER_FRAMEN; ++i) {
+            auto* item = m_dynamicMaskList->item(i);
+            if (!item) {
+                continue;
+            }
+            item->setData(kPreviewUsageRole, used[static_cast<std::size_t>(i)]);
+        }
+        m_dynamicMaskList->viewport()->update();
+    }
+
+    if (m_backgroundList) {
+        uint16_t bgId = 0xffff;
+        if (frameIndex >= 0 && frameIndex < static_cast<int>(m_frameBackgroundIds.size())) {
+            bgId = m_frameBackgroundIds[static_cast<std::size_t>(frameIndex)];
+        }
+        for (int i = 0; i < m_backgroundList->count(); ++i) {
+            auto* item = m_backgroundList->item(i);
+            if (!item) {
+                continue;
+            }
+            const int itemId = item->data(Qt::UserRole).toInt();
+            item->setData(kPreviewUsageRole, bgId != 0xffff && itemId == static_cast<int>(bgId));
+        }
+        m_backgroundList->viewport()->update();
+    }
+
+    if (m_spriteZoneList) {
+        const std::size_t zoneCount = m_spriteZones.size();
+        for (int i = 0; i < m_spriteZoneList->count(); ++i) {
+            auto* item = m_spriteZoneList->item(i);
+            if (!item) {
+                continue;
+            }
+            bool used = false;
+            if (i >= 0 && static_cast<std::size_t>(i) < zoneCount) {
+                used = !m_spriteZones[static_cast<std::size_t>(i)].sprites.empty();
+            }
+            item->setData(kPreviewUsageRole, used);
+        }
+        m_spriteZoneList->viewport()->update();
+    }
+}
+
 cv::Mat MainWindow::buildOriginalFrame(const cv::Mat& reference) const
 {
     if (reference.empty()) {
@@ -5203,12 +5501,20 @@ cv::Mat MainWindow::applySpriteDynamicColors(int index, const cv::Mat& sprite) c
         index >= static_cast<int>(m_spriteOriginals.size())) {
         return output;
     }
-    const std::vector<uint16_t>& colors = m_spriteDynamicColors[static_cast<std::size_t>(index)];
+    const std::vector<uint16_t>& colors = (m_useHdSprite &&
+                                           index < static_cast<int>(m_spriteDynamicColorsX.size()) &&
+                                           !m_spriteDynamicColorsX[static_cast<std::size_t>(index)].empty())
+        ? m_spriteDynamicColorsX[static_cast<std::size_t>(index)]
+        : m_spriteDynamicColors[static_cast<std::size_t>(index)];
     const int stride = dynamicColorsPerSet(colors);
     if (stride <= 0) {
         return output;
     }
-    const cv::Mat& map = m_spriteDynamicMasks[static_cast<std::size_t>(index)];
+    const cv::Mat& map = (m_useHdSprite &&
+                          index < static_cast<int>(m_spriteDynamicMasksX.size()) &&
+                          !m_spriteDynamicMasksX[static_cast<std::size_t>(index)].empty())
+        ? m_spriteDynamicMasksX[static_cast<std::size_t>(index)]
+        : m_spriteDynamicMasks[static_cast<std::size_t>(index)];
     const cv::Mat& original = m_spriteOriginals[static_cast<std::size_t>(index)];
     if (map.empty() || original.empty()) {
         return output;
@@ -5254,6 +5560,69 @@ cv::Mat MainWindow::applySpriteDynamicColors(int index, const cv::Mat& sprite) c
         }
     }
     return output;
+}
+
+const cv::Mat* MainWindow::activeSpriteImage(int index) const
+{
+    if (!m_spriteStore || index < 0) {
+        return nullptr;
+    }
+    if (m_useHdSprite &&
+        index < static_cast<int>(m_spriteColoredX.size()) &&
+        !m_spriteColoredX[static_cast<std::size_t>(index)].empty()) {
+        return &m_spriteColoredX[static_cast<std::size_t>(index)];
+    }
+    return m_spriteStore->at(index);
+}
+
+cv::Mat* MainWindow::activeSpriteImageMutable(int index)
+{
+    if (!m_spriteStore || index < 0) {
+        return nullptr;
+    }
+    if (m_useHdSprite &&
+        index < static_cast<int>(m_spriteColoredX.size()) &&
+        !m_spriteColoredX[static_cast<std::size_t>(index)].empty()) {
+        return &m_spriteColoredX[static_cast<std::size_t>(index)];
+    }
+    return m_spriteStore->atMutable(index);
+}
+
+QRect MainWindow::spriteDisplayRect(int index, const cv::Mat& image) const
+{
+    if (image.empty()) {
+        return QRect();
+    }
+    QRect rect = spriteContentRect(index);
+    if (!rect.isValid() || rect.isEmpty()) {
+        return QRect(0, 0, image.cols, image.rows);
+    }
+    int scaleX = 1;
+    int scaleY = 1;
+    if (m_useHdSprite) {
+        int baseW = rect.width();
+        int baseH = rect.height();
+        if (index >= 0 && index < static_cast<int>(m_spriteOriginals.size())) {
+            const cv::Mat& original = m_spriteOriginals[static_cast<std::size_t>(index)];
+            if (!original.empty()) {
+                baseW = original.cols;
+                baseH = original.rows;
+            }
+        }
+        if (baseW > 0 && baseH > 0) {
+            scaleX = std::max(1, image.cols / baseW);
+            scaleY = std::max(1, image.rows / baseH);
+        }
+    }
+    QRect scaled(rect.x() * scaleX,
+                 rect.y() * scaleY,
+                 rect.width() * scaleX,
+                 rect.height() * scaleY);
+    scaled = scaled.intersected(QRect(0, 0, image.cols, image.rows));
+    if (scaled.isEmpty()) {
+        return QRect(0, 0, image.cols, image.rows);
+    }
+    return scaled;
 }
 
 QRect MainWindow::spriteContentRect(int index) const
@@ -5499,15 +5868,16 @@ void MainWindow::updateSpriteCanvasImage(int index)
         m_spritesCanvas->setImage(cv::Mat());
         return;
     }
-    const cv::Mat* image = m_spriteStore->at(index);
+    const cv::Mat* image = activeSpriteImage(index);
     if (!image || image->empty()) {
         m_spritesCanvas->setImage(cv::Mat());
         return;
     }
     const QRect contentRect = spriteContentRect(index);
+    const QRect displayRect = spriteDisplayRect(index, *image);
     cv::Rect roi(0, 0, image->cols, image->rows);
-    if (contentRect.isValid() && !contentRect.isEmpty()) {
-        roi = cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height());
+    if (displayRect.isValid() && !displayRect.isEmpty()) {
+        roi = cv::Rect(displayRect.x(), displayRect.y(), displayRect.width(), displayRect.height());
     }
     cv::Mat baseFull = m_spriteDynamicMaskMode
         ? applySpriteDynamicColors(index, *image)
@@ -5515,9 +5885,15 @@ void MainWindow::updateSpriteCanvasImage(int index)
     cv::Mat base = baseFull(roi).clone();
     cv::Mat display = base;
     if (m_spriteDynamicMaskMode) {
-        const cv::Mat* map = (index >= 0 && index < static_cast<int>(m_spriteDynamicMasks.size()))
-            ? &m_spriteDynamicMasks[static_cast<std::size_t>(index)]
-            : nullptr;
+        const cv::Mat* map = nullptr;
+        if (m_useHdSprite &&
+            index >= 0 &&
+            index < static_cast<int>(m_spriteDynamicMasksX.size()) &&
+            !m_spriteDynamicMasksX[static_cast<std::size_t>(index)].empty()) {
+            map = &m_spriteDynamicMasksX[static_cast<std::size_t>(index)];
+        } else if (index >= 0 && index < static_cast<int>(m_spriteDynamicMasks.size())) {
+            map = &m_spriteDynamicMasks[static_cast<std::size_t>(index)];
+        }
         if (map && !map->empty()) {
             cv::Mat maskFull = buildDynamicMaskFromMap(*map, m_spriteDynamicSetIndex);
             cv::Mat mask = maskFull(roi).clone();
@@ -5528,7 +5904,12 @@ void MainWindow::updateSpriteCanvasImage(int index)
     }
     cv::Mat originalRef;
     if (index >= 0 && index < static_cast<int>(m_spriteOriginals.size())) {
-        originalRef = m_spriteOriginals[static_cast<std::size_t>(index)](roi).clone();
+        if (contentRect.isValid() && !contentRect.isEmpty()) {
+            originalRef = m_spriteOriginals[static_cast<std::size_t>(index)](
+                cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height())).clone();
+        } else {
+            originalRef = m_spriteOriginals[static_cast<std::size_t>(index)].clone();
+        }
     }
     cv::Mat original;
     if (!originalRef.empty()) {
@@ -5596,12 +5977,22 @@ void MainWindow::updateHdControlsForContext()
         return;
     }
     const bool inBackgrounds = m_canvasTabs && m_canvasTabs->currentWidget() == m_backgroundsCanvas;
+    const bool inSprites = m_canvasTabs && m_canvasTabs->currentWidget() == m_spritesCanvas;
     if (inBackgrounds) {
         const int bgIndex = m_backgroundList ? m_backgroundList->currentRow() : -1;
         m_hdSourceCombo->setEnabled(false);
         m_hdScaleCombo->setEnabled(bgIndex >= 0);
         m_hdCreateButton->setEnabled(bgIndex >= 0 && !hasHdBackground(bgIndex));
         m_hdDeleteButton->setEnabled(bgIndex >= 0 && hasHdBackground(bgIndex));
+    } else if (inSprites) {
+        const int spriteIndex = m_spritesList ? m_spritesList->currentRow() : -1;
+        const bool hasHd = spriteIndex >= 0 &&
+            spriteIndex < static_cast<int>(m_spriteColoredX.size()) &&
+            !m_spriteColoredX[static_cast<std::size_t>(spriteIndex)].empty();
+        m_hdSourceCombo->setEnabled(false);
+        m_hdScaleCombo->setEnabled(spriteIndex >= 0);
+        m_hdCreateButton->setEnabled(spriteIndex >= 0 && !hasHd);
+        m_hdDeleteButton->setEnabled(hasHd);
     } else {
         const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
         const bool hasHd = hasHdFrame(frameIndex);
@@ -6225,7 +6616,7 @@ void MainWindow::updateSpriteZoneOverlay(int index)
         if (rect.width <= 0 || rect.height <= 0) {
             continue;
         }
-        cv::rectangle(allMask, rect, cv::Scalar(1), 1);
+        cv::rectangle(allMask, rect, cv::Scalar(1), cv::FILLED);
     }
     bool hasSelected = false;
     if (m_selectedSpriteSlot >= 0 && m_selectedSpriteSlot < MAX_SPRITES_PER_FRAME) {
@@ -6242,7 +6633,7 @@ void MainWindow::updateSpriteZoneOverlay(int index)
                 maxx = std::clamp(maxx, minx, baseSize.width - 1);
                 maxy = std::clamp(maxy, miny, baseSize.height - 1);
                 cv::Rect rect(minx, miny, maxx - minx + 1, maxy - miny + 1);
-                cv::rectangle(selectedMask, rect, cv::Scalar(1), 1);
+                cv::rectangle(selectedMask, rect, cv::Scalar(1), cv::FILLED);
                 hasSelected = true;
             }
         }
@@ -6251,20 +6642,8 @@ void MainWindow::updateSpriteZoneOverlay(int index)
         cv::Rect rect(zone.rect.x(), zone.rect.y(), zone.rect.width(), zone.rect.height());
         rect &= cv::Rect(0, 0, baseSize.width, baseSize.height);
         if (rect.width > 0 && rect.height > 0) {
-            cv::rectangle(selectedMask, rect, cv::Scalar(1), 1);
+            cv::rectangle(selectedMask, rect, cv::Scalar(1), cv::FILLED);
             hasSelected = true;
-        }
-    }
-    cv::Mat otherMask = allMask.clone();
-    if (hasSelected) {
-        for (int y = 0; y < otherMask.rows; ++y) {
-            uint8_t* row = otherMask.ptr<uint8_t>(y);
-            const uint8_t* srow = selectedMask.ptr<uint8_t>(y);
-            for (int x = 0; x < otherMask.cols; ++x) {
-                if (srow[x]) {
-                    row[x] = 0;
-                }
-            }
         }
     }
     QRect region;
@@ -6279,18 +6658,10 @@ void MainWindow::updateSpriteZoneOverlay(int index)
         FrameLayout layout = BuildFrameLayout(*frame, reference);
         region = QRect(layout.topX, 0, layout.topWidth, layout.topHeight);
     }
-    if (hasSelected) {
-        if (MaskHasContent(selectedMask)) {
-            m_framesCanvas->canvas()->setMaskOutline(selectedMask, QColor(255, 200, 0), region);
-        } else {
-            m_framesCanvas->canvas()->clearPrimaryOutline();
-        }
-        if (MaskHasContent(otherMask)) {
-            m_framesCanvas->canvas()->setSecondaryMaskOutline(otherMask, QColor(0, 200, 255), region);
-        } else {
-            m_framesCanvas->canvas()->setSecondaryMaskOutline(cv::Mat(), QColor());
-        }
-    } else if (MaskHasContent(allMask)) {
+    if (hasSelected && MaskHasContent(selectedMask)) {
+        m_framesCanvas->canvas()->setMaskOutline(selectedMask, QColor(255, 200, 0), region);
+        m_framesCanvas->canvas()->setSecondaryMaskOutline(cv::Mat(), QColor());
+    } else if (!hasSelected && MaskHasContent(allMask)) {
         m_framesCanvas->canvas()->setMaskOutline(allMask, QColor(255, 200, 0), region);
         m_framesCanvas->canvas()->setSecondaryMaskOutline(cv::Mat(), QColor());
     } else {
@@ -6520,6 +6891,7 @@ void MainWindow::refreshDynamicMaskCombos()
     updateDynamicMaskPreviewIcons();
     syncDynamicSetSelection();
     refreshDynamicPaletteButtons();
+    updateFrameUsageHighlights(m_framesList ? m_framesList->currentRow() : -1);
 }
 
 cv::Mat MainWindow::buildMaskIconImage(const cv::Mat& mask, const cv::Vec3b& color) const
@@ -6930,6 +7302,11 @@ cv::Mat* MainWindow::activeSpriteDynamicMask(int spriteIndex)
     if (spriteIndex < 0 || spriteIndex >= static_cast<int>(m_spriteDynamicMasks.size())) {
         return nullptr;
     }
+    if (m_useHdSprite &&
+        spriteIndex < static_cast<int>(m_spriteDynamicMasksX.size()) &&
+        !m_spriteDynamicMasksX[static_cast<std::size_t>(spriteIndex)].empty()) {
+        return &m_spriteDynamicMasksX[static_cast<std::size_t>(spriteIndex)];
+    }
     return &m_spriteDynamicMasks[static_cast<std::size_t>(spriteIndex)];
 }
 
@@ -7229,6 +7606,173 @@ void MainWindow::ensureUndoStacksSize()
     updateUndoActions();
 }
 
+void MainWindow::resetNavigationHistory()
+{
+    m_frameHistory = NavigationHistory{};
+    m_spriteHistory = NavigationHistory{};
+    m_imageHistory = NavigationHistory{};
+    m_backgroundHistory = NavigationHistory{};
+    m_frameHistory.current = m_framesList ? m_framesList->currentRow() : -1;
+    m_spriteHistory.current = m_spritesList ? m_spritesList->currentRow() : -1;
+    m_imageHistory.current = m_imagesList ? m_imagesList->currentRow() : -1;
+    m_backgroundHistory.current = m_backgroundList ? m_backgroundList->currentRow() : -1;
+    updateNavigationButtons();
+}
+
+void MainWindow::recordHistory(NavigationHistory& history, int newIndex)
+{
+    if (history.navigating) {
+        history.current = newIndex;
+        history.navigating = false;
+        updateNavigationButtons();
+        return;
+    }
+    if (newIndex < 0) {
+        history.current = newIndex;
+        updateNavigationButtons();
+        return;
+    }
+    if (history.current >= 0 && history.current != newIndex) {
+        history.back.push_back(history.current);
+        while (history.back.size() > m_maxHistoryDepth) {
+            history.back.pop_front();
+        }
+        history.forward.clear();
+    }
+    history.current = newIndex;
+    updateNavigationButtons();
+}
+
+bool MainWindow::navigateHistory(NavigationHistory& history, QListWidget* list, bool forward)
+{
+    if (!list) {
+        return false;
+    }
+    QVector<int>& source = forward ? history.forward : history.back;
+    QVector<int>& target = forward ? history.back : history.forward;
+    if (source.isEmpty()) {
+        updateNavigationButtons();
+        return false;
+    }
+    const int next = source.takeLast();
+    if (history.current >= 0) {
+        target.push_back(history.current);
+        while (target.size() > m_maxHistoryDepth) {
+            target.pop_front();
+        }
+    }
+    history.navigating = true;
+    list->setCurrentRow(next);
+    history.current = next;
+    updateNavigationButtons();
+    return true;
+}
+
+void MainWindow::updateNavigationButtons()
+{
+    if (m_framesCanvas) {
+        m_framesCanvas->setBackEnabled(!m_frameHistory.back.isEmpty());
+        m_framesCanvas->setForwardEnabled(!m_frameHistory.forward.isEmpty());
+    }
+    if (m_spritesCanvas) {
+        m_spritesCanvas->setBackEnabled(!m_spriteHistory.back.isEmpty());
+        m_spritesCanvas->setForwardEnabled(!m_spriteHistory.forward.isEmpty());
+    }
+    if (m_imagesCanvas) {
+        m_imagesCanvas->setBackEnabled(!m_imageHistory.back.isEmpty());
+        m_imagesCanvas->setForwardEnabled(!m_imageHistory.forward.isEmpty());
+    }
+    if (m_backgroundsCanvas) {
+        m_backgroundsCanvas->setBackEnabled(!m_backgroundHistory.back.isEmpty());
+        m_backgroundsCanvas->setForwardEnabled(!m_backgroundHistory.forward.isEmpty());
+    }
+}
+
+void MainWindow::trimUndoStacks()
+{
+    const auto trimStack = [this](UndoStack& stack) {
+        while (stack.undo.size() > static_cast<std::size_t>(m_maxUndoDepth)) {
+            stack.undo.erase(stack.undo.begin());
+        }
+        while (stack.redo.size() > static_cast<std::size_t>(m_maxUndoDepth)) {
+            stack.redo.erase(stack.redo.begin());
+        }
+    };
+    for (auto& stack : m_frameUndoStacks) {
+        trimStack(stack);
+    }
+    for (auto& stack : m_frameHdUndoStacks) {
+        trimStack(stack);
+    }
+    for (auto& stack : m_spriteUndoStacks) {
+        trimStack(stack);
+    }
+    for (auto& stack : m_backgroundUndoStacks) {
+        trimStack(stack);
+    }
+    for (auto& stack : m_backgroundHdUndoStacks) {
+        trimStack(stack);
+    }
+    for (auto& stack : m_compMaskUndoStacks) {
+        trimStack(stack);
+    }
+    for (auto& stack : m_dynMaskUndoStacks) {
+        trimStack(stack);
+    }
+    for (auto& stack : m_backgroundMaskUndoStacks) {
+        trimStack(stack);
+    }
+    while (m_paletteUndo.size() > static_cast<std::size_t>(m_maxUndoDepth)) {
+        m_paletteUndo.erase(m_paletteUndo.begin());
+    }
+    while (m_paletteRedo.size() > static_cast<std::size_t>(m_maxUndoDepth)) {
+        m_paletteRedo.erase(m_paletteRedo.begin());
+    }
+    updateUndoActions();
+}
+
+void MainWindow::showSettingsDialog()
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle("Settings");
+    auto* layout = new QFormLayout(&dialog);
+    auto* historySpin = new QSpinBox(&dialog);
+    historySpin->setRange(1, 1000);
+    historySpin->setValue(m_maxHistoryDepth);
+    auto* undoSpin = new QSpinBox(&dialog);
+    undoSpin->setRange(1, 1000);
+    undoSpin->setValue(m_maxUndoDepth);
+    layout->addRow("History depth", historySpin);
+    layout->addRow("Undo depth", undoSpin);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    m_maxHistoryDepth = std::clamp(historySpin->value(), 1, 1000);
+    m_maxUndoDepth = std::clamp(undoSpin->value(), 1, 1000);
+    const auto trimHistory = [this](NavigationHistory& history) {
+        while (history.back.size() > m_maxHistoryDepth) {
+            history.back.pop_front();
+        }
+        while (history.forward.size() > m_maxHistoryDepth) {
+            history.forward.pop_front();
+        }
+    };
+    trimHistory(m_frameHistory);
+    trimHistory(m_spriteHistory);
+    trimHistory(m_imageHistory);
+    trimHistory(m_backgroundHistory);
+    updateNavigationButtons();
+    trimUndoStacks();
+    QSettings settings("PPUC", "ColorizingDMD");
+    settings.setValue("maxHistoryDepth", m_maxHistoryDepth);
+    settings.setValue("maxUndoDepth", m_maxUndoDepth);
+    settings.sync();
+}
+
 void MainWindow::pushUndoSnapshot(bool isFrame, int index)
 {
     if (index < 0) {
@@ -7250,7 +7794,7 @@ void MainWindow::pushUndoSnapshot(bool isFrame, int index)
     if (index >= static_cast<int>(stacks->size())) {
         return;
     }
-    cv::Mat* image = isFrame ? activeFrameImage(index, true) : m_spriteStore->atMutable(index);
+    cv::Mat* image = isFrame ? activeFrameImage(index, true) : activeSpriteImageMutable(index);
     if (!image || image->empty()) {
         return;
     }
@@ -7258,7 +7802,7 @@ void MainWindow::pushUndoSnapshot(bool isFrame, int index)
     UndoState state;
     state.image = image->clone();
     stack.undo.push_back(std::move(state));
-    if (stack.undo.size() > kMaxUndoDepth) {
+    if (stack.undo.size() > m_maxUndoDepth) {
         stack.undo.erase(stack.undo.begin());
     }
     stack.redo.clear();
@@ -7304,7 +7848,7 @@ void MainWindow::pushMaskUndoSnapshot(MaskMode mode, int index)
         return;
     }
     stack.undo.push_back(std::move(state));
-    if (stack.undo.size() > kMaxUndoDepth) {
+    if (stack.undo.size() > m_maxUndoDepth) {
         stack.undo.erase(stack.undo.begin());
     }
     stack.redo.clear();
@@ -7333,7 +7877,7 @@ void MainWindow::pushBackgroundUndoSnapshot(int index)
     UndoState state;
     state.image = image->clone();
     stack.undo.push_back(std::move(state));
-    if (stack.undo.size() > kMaxUndoDepth) {
+    if (stack.undo.size() > m_maxUndoDepth) {
         stack.undo.erase(stack.undo.begin());
     }
     stack.redo.clear();
@@ -7358,7 +7902,7 @@ void MainWindow::pushSpriteDynamicMaskUndoSnapshot(int index)
     state.mask_kind = MaskKind::Dynamic;
     state.mask_index = index;
     stack.undo.push_back(std::move(state));
-    if (stack.undo.size() > kMaxUndoDepth) {
+    if (stack.undo.size() > m_maxUndoDepth) {
         stack.undo.erase(stack.undo.begin());
     }
     stack.redo.clear();
@@ -7384,7 +7928,7 @@ void MainWindow::pushSpriteDetAreaUndoSnapshot(int index)
     state.mask_kind = MaskKind::SpriteDetAreas;
     state.mask_index = index;
     stack.undo.push_back(std::move(state));
-    if (stack.undo.size() > kMaxUndoDepth) {
+    if (stack.undo.size() > m_maxUndoDepth) {
         stack.undo.erase(stack.undo.begin());
     }
     stack.redo.clear();
@@ -7405,7 +7949,7 @@ void MainWindow::pushBackgroundMaskUndoSnapshot(int index)
     state.mask = mask->clone();
     state.mask_kind = MaskKind::None;
     stack.undo.push_back(std::move(state));
-    if (stack.undo.size() > kMaxUndoDepth) {
+    if (stack.undo.size() > m_maxUndoDepth) {
         stack.undo.erase(stack.undo.begin());
     }
     stack.redo.clear();
@@ -7471,7 +8015,7 @@ bool MainWindow::undoEdit(bool isFrame)
                 updateSpriteCanvasImage(index);
                 return true;
             }
-            cv::Mat* image = m_spriteStore->atMutable(index);
+            cv::Mat* image = activeSpriteImageMutable(index);
             if (!image || image->empty() || previous.image.empty()) {
                 return false;
             }
@@ -7548,7 +8092,7 @@ bool MainWindow::redoEdit(bool isFrame)
                 current.mask_kind = MaskKind::Dynamic;
                 current.mask_index = index;
                 stack.undo.push_back(std::move(current));
-                if (stack.undo.size() > kMaxUndoDepth) {
+                if (stack.undo.size() > m_maxUndoDepth) {
                     stack.undo.erase(stack.undo.begin());
                 }
                 *map = next.mask.clone();
@@ -7569,7 +8113,7 @@ bool MainWindow::redoEdit(bool isFrame)
                 current.mask_kind = MaskKind::SpriteDetAreas;
                 current.mask_index = index;
                 stack.undo.push_back(std::move(current));
-                if (stack.undo.size() > kMaxUndoDepth) {
+                if (stack.undo.size() > m_maxUndoDepth) {
                     stack.undo.erase(stack.undo.begin());
                 }
                 if (next.mask.total() >= static_cast<std::size_t>(MAX_SPRITE_DETECT_AREAS * 4)) {
@@ -7580,14 +8124,14 @@ bool MainWindow::redoEdit(bool isFrame)
                 updateSpriteCanvasImage(index);
                 return true;
             }
-            cv::Mat* image = m_spriteStore->atMutable(index);
+            cv::Mat* image = activeSpriteImageMutable(index);
             if (!image || image->empty() || next.image.empty()) {
                 return false;
             }
             UndoState current;
             current.image = image->clone();
             stack.undo.push_back(std::move(current));
-            if (stack.undo.size() > kMaxUndoDepth) {
+            if (stack.undo.size() > m_maxUndoDepth) {
                 stack.undo.erase(stack.undo.begin());
             }
             *image = next.image.clone();
@@ -7601,7 +8145,7 @@ bool MainWindow::redoEdit(bool isFrame)
         UndoState current;
         current.image = image->clone();
         stack.undo.push_back(std::move(current));
-        if (stack.undo.size() > kMaxUndoDepth) {
+        if (stack.undo.size() > m_maxUndoDepth) {
             stack.undo.erase(stack.undo.begin());
         }
         UndoState next = stack.redo.back();
@@ -7684,7 +8228,7 @@ bool MainWindow::redoBackgroundEdit()
     UndoState current;
     current.image = image->clone();
     stack.undo.push_back(std::move(current));
-    if (stack.undo.size() > kMaxUndoDepth) {
+    if (stack.undo.size() > m_maxUndoDepth) {
         stack.undo.erase(stack.undo.begin());
     }
     UndoState next = stack.redo.back();
@@ -7747,7 +8291,7 @@ bool MainWindow::redoBackgroundMaskEdit()
         UndoState current;
         current.mask = mask->clone();
         stack.undo.push_back(std::move(current));
-        if (stack.undo.size() > kMaxUndoDepth) {
+        if (stack.undo.size() > m_maxUndoDepth) {
             stack.undo.erase(stack.undo.begin());
         }
         UndoState next = stack.redo.back();
@@ -7873,7 +8417,7 @@ bool MainWindow::redoMaskEdit(MaskMode mode)
         if (!current.mask.empty()) {
             stack.undo.push_back(std::move(current));
         }
-        if (stack.undo.size() > kMaxUndoDepth) {
+        if (stack.undo.size() > m_maxUndoDepth) {
             stack.undo.erase(stack.undo.begin());
         }
         UndoState next = stack.redo.back();
@@ -7907,7 +8451,7 @@ bool MainWindow::redoMaskEdit(MaskMode mode)
         if (!current.mask.empty()) {
             stack.undo.push_back(std::move(current));
         }
-        if (stack.undo.size() > kMaxUndoDepth) {
+        if (stack.undo.size() > m_maxUndoDepth) {
             stack.undo.erase(stack.undo.begin());
         }
         UndoState next = stack.redo.back();
@@ -8230,7 +8774,7 @@ void MainWindow::pushPaletteUndoSnapshot()
     state.palette_index = m_paletteSetIndex;
     state.full_colors = m_fullPalettes[m_paletteSetIndex];
     m_paletteUndo.push_back(state);
-    if (m_paletteUndo.size() > kMaxUndoDepth) {
+    if (m_paletteUndo.size() > m_maxUndoDepth) {
         m_paletteUndo.erase(m_paletteUndo.begin());
     }
     m_paletteRedo.clear();
@@ -8252,7 +8796,7 @@ void MainWindow::pushReducedUndoSnapshot(int setIndex)
     const std::size_t offset = static_cast<std::size_t>(setIndex) * 16;
     std::copy_n(m_reducedPaletteIndices.begin() + offset, 16, state.values.begin());
     m_paletteUndo.push_back(state);
-    if (m_paletteUndo.size() > kMaxUndoDepth) {
+    if (m_paletteUndo.size() > m_maxUndoDepth) {
         m_paletteUndo.erase(m_paletteUndo.begin());
     }
     m_paletteRedo.clear();
@@ -8281,7 +8825,7 @@ void MainWindow::pushDynamicUndoSnapshot(int frameIndex, int setIndex)
     state.values.resize(static_cast<std::size_t>(stride));
     std::copy_n(colors.begin() + offset, stride, state.values.begin());
     m_paletteUndo.push_back(state);
-    if (m_paletteUndo.size() > kMaxUndoDepth) {
+    if (m_paletteUndo.size() > m_maxUndoDepth) {
         m_paletteUndo.erase(m_paletteUndo.begin());
     }
     m_paletteRedo.clear();
@@ -8330,7 +8874,7 @@ bool MainWindow::undoPaletteEdit()
         }
     }
     m_paletteRedo.push_back(current);
-    if (m_paletteRedo.size() > kMaxUndoDepth) {
+    if (m_paletteRedo.size() > m_maxUndoDepth) {
         m_paletteRedo.erase(m_paletteRedo.begin());
     }
 
@@ -8416,7 +8960,7 @@ bool MainWindow::redoPaletteEdit()
         }
     }
     m_paletteUndo.push_back(current);
-    if (m_paletteUndo.size() > kMaxUndoDepth) {
+    if (m_paletteUndo.size() > m_maxUndoDepth) {
         m_paletteUndo.erase(m_paletteUndo.begin());
     }
 
@@ -9263,6 +9807,7 @@ void MainWindow::refreshBackgroundList()
             m_frameBackgroundAssign->setCurrentIndex(comboIndex);
         }
     }
+    updateFrameUsageHighlights(m_framesList ? m_framesList->currentRow() : -1);
 }
 
 std::vector<MainWindow::SpriteZoneGroup> MainWindow::buildSpriteZonesForFrame(int frameIndex) const
@@ -9368,21 +9913,32 @@ void MainWindow::refreshSpriteZoneList()
                                         cv::Scalar(55, 55, 55));
     }
     cv::Mat previewBase = EnsureBgr(original);
-    if (previewBase.size() != cv::Size(iconSize.width(), iconSize.height())) {
-        cv::resize(previewBase, previewBase, cv::Size(iconSize.width(), iconSize.height()), 0.0, 0.0, cv::INTER_NEAREST);
-    }
+    const double scale = std::min(static_cast<double>(iconSize.width()) / previewBase.cols,
+                                  static_cast<double>(iconSize.height()) / previewBase.rows);
+    const int targetW = std::max(1, static_cast<int>(previewBase.cols * scale));
+    const int targetH = std::max(1, static_cast<int>(previewBase.rows * scale));
+    cv::Mat resized;
+    cv::resize(previewBase, resized, cv::Size(targetW, targetH), 0.0, 0.0, cv::INTER_NEAREST);
+    const QColor baseColor = m_spriteZoneList
+        ? m_spriteZoneList->palette().color(QPalette::Window)
+        : QApplication::palette().color(QPalette::Window);
+    cv::Mat fitted(iconSize.height(), iconSize.width(), CV_8UC3,
+                   cv::Scalar(baseColor.blue(), baseColor.green(), baseColor.red()));
+    const int offsetX = (iconSize.width() - targetW) / 2;
+    const int offsetY = (iconSize.height() - targetH) / 2;
+    resized.copyTo(fitted(cv::Rect(offsetX, offsetY, targetW, targetH)));
     cv::Mat previewRgb;
-    cv::cvtColor(previewBase, previewRgb, cv::COLOR_BGR2RGB);
+    cv::cvtColor(fitted, previewRgb, cv::COLOR_BGR2RGB);
     QImage baseImage(previewRgb.data, previewRgb.cols, previewRgb.rows, previewRgb.step, QImage::Format_RGB888);
     for (std::size_t i = 0; i < m_spriteZones.size(); ++i) {
         const SpriteZoneGroup& zone = m_spriteZones[i];
         QPixmap pixmap = QPixmap::fromImage(baseImage.copy());
         QPainter painter(&pixmap);
         painter.setRenderHint(QPainter::Antialiasing, false);
-        const double scaleX = previewBase.cols > 0 ? static_cast<double>(pixmap.width()) / previewBase.cols : 1.0;
-        const double scaleY = previewBase.rows > 0 ? static_cast<double>(pixmap.height()) / previewBase.rows : 1.0;
-        const QRectF rect(zone.rect.x() * scaleX,
-                          zone.rect.y() * scaleY,
+        const double scaleX = previewBase.cols > 0 ? static_cast<double>(targetW) / previewBase.cols : 1.0;
+        const double scaleY = previewBase.rows > 0 ? static_cast<double>(targetH) / previewBase.rows : 1.0;
+        const QRectF rect(offsetX + zone.rect.x() * scaleX,
+                          offsetY + zone.rect.y() * scaleY,
                           zone.rect.width() * scaleX,
                           zone.rect.height() * scaleY);
         QPen pen(QColor(255, 200, 0));
@@ -9490,6 +10046,8 @@ void MainWindow::refreshFrameSpriteSlotCombo()
 
 void MainWindow::refreshFrameSpriteLists()
 {
+    const int frameSelection = m_framesList ? m_framesList->currentRow() : -1;
+    const int spriteSelection = m_spritesList ? m_spritesList->currentRow() : -1;
     m_framesList->clear();
     m_spritesList->clear();
 
@@ -9588,7 +10146,9 @@ void MainWindow::refreshFrameSpriteLists()
             item->setData(Qt::UserRole + 1, QStringLiteral("frame"));
             m_framesList->addItem(item);
         }
-        if (m_framesList->currentRow() < 0 && m_framesList->count() > 0) {
+        if (frameSelection >= 0 && frameSelection < m_framesList->count()) {
+            m_framesList->setCurrentRow(frameSelection);
+        } else if (m_framesList->currentRow() < 0 && m_framesList->count() > 0) {
             m_framesList->setCurrentRow(0);
         } else if (m_framesList->currentRow() >= 0) {
             showFrameAtIndex(m_framesList->currentRow());
@@ -9615,7 +10175,9 @@ void MainWindow::refreshFrameSpriteLists()
     }
 
     if (m_state->sprites().isEmpty()) {
-        m_spritesList->addItem("No sprites loaded");
+        auto* item = new QListWidgetItem("No sprites loaded");
+        item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
+        m_spritesList->addItem(item);
         m_spritesCanvas->setTitle("Sprites canvas (placeholder)");
         m_spritesCanvas->setStatusText("No sprites loaded");
         m_spritesCanvas->setImage(cv::Mat());
@@ -9642,17 +10204,54 @@ void MainWindow::refreshFrameSpriteLists()
         while (m_spriteStore->count() > m_state->sprites().size()) {
             m_spriteStore->removeAt(m_spriteStore->count() - 1);
         }
-        m_spritesList->addItems(m_state->sprites());
-        for (int i = 0; i < m_spritesList->count(); ++i) {
-            if (QListWidgetItem* item = m_spritesList->item(i)) {
-                if (item->text().startsWith("No sprites")) {
-                    continue;
-                }
-                item->setData(Qt::UserRole, i);
-                item->setData(Qt::UserRole + 1, QStringLiteral("sprite"));
+        const QColor gap = m_spritesList->palette().color(QPalette::Window);
+        const QStringList spriteNames = m_state->sprites();
+        for (int i = 0; i < spriteNames.size(); ++i) {
+            const cv::Mat* image = m_spriteStore->at(i);
+            if (!image || image->empty()) {
+                continue;
             }
+            cv::Mat hd;
+            if (i >= 0 && i < static_cast<int>(m_spriteColoredX.size())) {
+                hd = m_spriteColoredX[static_cast<std::size_t>(i)];
+            }
+            cv::Mat previewMat = BuildBackgroundPreview(*image,
+                                                        hd,
+                                                        cv::Scalar(gap.blue(), gap.green(), gap.red()));
+            if (previewMat.empty()) {
+                continue;
+            }
+            cv::Mat rgb;
+            cv::cvtColor(previewMat, rgb, cv::COLOR_BGR2RGB);
+            QImage previewImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888);
+            const bool hasHd = !hd.empty();
+            const QSize iconSize = hasHd
+                ? QSize(kPreviewIconWidthHd, kPreviewIconHeightHd)
+                : QSize(kPreviewIconWidth, kPreviewIconHeight);
+            QPixmap pixmap = QPixmap::fromImage(previewImage.copy());
+            pixmap = pixmap.scaled(iconSize, Qt::KeepAspectRatio, Qt::FastTransformation);
+            auto* item = new QListWidgetItem();
+            item->setIcon(QIcon(pixmap));
+            const QString label = spriteNames[i].isEmpty()
+                ? QString("Sprite %1").arg(i + 1)
+                : spriteNames[i];
+            item->setText(label);
+            item->setData(kPreviewIconSizeRole, pixmap.size());
+            {
+                const int padding = 6;
+                const int textHeight = m_spritesList->fontMetrics().height() + 4;
+                const int gap = 2;
+                const int width = pixmap.width() + padding * 2;
+                const int height = pixmap.height() + textHeight + padding * 2 + gap;
+                item->setSizeHint(QSize(width, height));
+            }
+            item->setData(Qt::UserRole, i);
+            item->setData(Qt::UserRole + 1, QStringLiteral("sprite"));
+            m_spritesList->addItem(item);
         }
-        if (m_spritesList->currentRow() < 0 && m_spritesList->count() > 0) {
+        if (spriteSelection >= 0 && spriteSelection < m_spritesList->count()) {
+            m_spritesList->setCurrentRow(spriteSelection);
+        } else if (m_spritesList->currentRow() < 0 && m_spritesList->count() > 0) {
             m_spritesList->setCurrentRow(0);
         } else if (m_spritesList->currentRow() >= 0) {
             showSpriteAtIndex(m_spritesList->currentRow());
@@ -9841,15 +10440,27 @@ void MainWindow::showFrameAtIndex(int index)
         syncDynamicSetSelection();
         refreshDynamicPaletteButtons();
         refreshRotationEditor();
+        updateFrameUsageHighlights(index);
     } else {
         updateFrameCanvasImage(-1);
         refreshFrameSpriteSlotCombo();
         refreshRotationEditor();
+        updateFrameUsageHighlights(-1);
     }
 }
 
 void MainWindow::showSpriteAtIndex(int index)
 {
+    const bool hasHd = index >= 0 &&
+        index < static_cast<int>(m_spriteColoredX.size()) &&
+        !m_spriteColoredX[static_cast<std::size_t>(index)].empty();
+    if (!hasHd && m_useHdSprite) {
+        m_useHdSprite = false;
+    }
+    if (m_spritesCanvas) {
+        m_spritesCanvas->setHdButtonEnabled(hasHd);
+        m_spritesCanvas->setHdButtonChecked(m_useHdSprite);
+    }
     if (index >= 0) {
         m_spritesCanvas->canvas()->clearPreviewImage();
         updateSpriteCanvasImage(index);
@@ -9874,6 +10485,7 @@ void MainWindow::showSpriteAtIndex(int index)
     if (m_spriteDetAreaClearButton) {
         m_spriteDetAreaClearButton->setEnabled(index >= 0);
     }
+    updateHdControlsForContext();
 }
 
 void MainWindow::showBackgroundAtIndex(int index)
@@ -10252,17 +10864,20 @@ void MainWindow::handleToolPress(bool isFrame,
         if (!map || map->empty()) {
             return;
         }
-        const cv::Mat* spriteImage = m_spriteStore ? m_spriteStore->at(index) : nullptr;
+        const cv::Mat* spriteImage = activeSpriteImage(index);
         const QRect contentRect = spriteContentRect(index);
-        const int offsetX = contentRect.isValid() ? contentRect.x() : 0;
-        const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
-        const QSize baseSize = contentRect.isValid()
-            ? QSize(contentRect.width(), contentRect.height())
+        const QRect displayRect = spriteImage ? spriteDisplayRect(index, *spriteImage) : QRect();
+        const int offsetX = displayRect.isValid() ? displayRect.x() : 0;
+        const int offsetY = displayRect.isValid() ? displayRect.y() : 0;
+        const QSize baseSize = displayRect.isValid()
+            ? QSize(displayRect.width(), displayRect.height())
             : QSize(spriteImage && !spriteImage->empty() ? spriteImage->cols : map->cols,
                     spriteImage && !spriteImage->empty() ? spriteImage->rows : map->rows);
         cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-            ? m_spriteOriginals[static_cast<std::size_t>(index)](
-                cv::Rect(offsetX, offsetY, baseSize.width(), baseSize.height()))
+            ? (contentRect.isValid()
+                ? m_spriteOriginals[static_cast<std::size_t>(index)](
+                    cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height()))
+                : m_spriteOriginals[static_cast<std::size_t>(index)])
             : cv::Mat();
         cv::Mat original = originalRef.empty() ? cv::Mat() : buildOriginalFrame(originalRef);
         cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseSize.width(), baseSize.height()));
@@ -10323,7 +10938,7 @@ void MainWindow::handleToolPress(bool isFrame,
         return;
     }
     cv::Mat* image = isFrame ? activeFrameImage(m_framesList->currentRow(), true)
-                             : m_spriteStore->atMutable(m_spritesList->currentRow());
+                             : activeSpriteImageMutable(m_spritesList ? m_spritesList->currentRow() : -1);
     if (!image || image->empty()) {
         return;
     }
@@ -10341,13 +10956,16 @@ void MainWindow::handleToolPress(bool isFrame,
     } else {
         const int index = m_spritesList ? m_spritesList->currentRow() : -1;
         const QRect contentRect = spriteContentRect(index);
-        const int offsetX = contentRect.isValid() ? contentRect.x() : 0;
-        const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
-        const int baseWidth = contentRect.isValid() ? contentRect.width() : image->cols;
-        const int baseHeight = contentRect.isValid() ? contentRect.height() : image->rows;
+        const QRect displayRect = spriteDisplayRect(index, *image);
+        const int offsetX = displayRect.isValid() ? displayRect.x() : 0;
+        const int offsetY = displayRect.isValid() ? displayRect.y() : 0;
+        const int baseWidth = displayRect.isValid() ? displayRect.width() : image->cols;
+        const int baseHeight = displayRect.isValid() ? displayRect.height() : image->rows;
         cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-            ? m_spriteOriginals[static_cast<std::size_t>(index)](
-                cv::Rect(offsetX, offsetY, baseWidth, baseHeight))
+            ? (contentRect.isValid()
+                ? m_spriteOriginals[static_cast<std::size_t>(index)](
+                    cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height()))
+                : m_spriteOriginals[static_cast<std::size_t>(index)])
             : cv::Mat();
         cv::Mat original = originalRef.empty() ? cv::Mat() : buildOriginalFrame(originalRef);
         cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseWidth, baseHeight));
@@ -10832,17 +11450,20 @@ void MainWindow::handleToolDrag(bool isFrame,
         if (!map || map->empty()) {
             return;
         }
-        const cv::Mat* spriteImage = m_spriteStore ? m_spriteStore->at(index) : nullptr;
+        const cv::Mat* spriteImage = activeSpriteImage(index);
         const QRect contentRect = spriteContentRect(index);
-        const int offsetX = contentRect.isValid() ? contentRect.x() : 0;
-        const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
-        const QSize baseSize = contentRect.isValid()
-            ? QSize(contentRect.width(), contentRect.height())
+        const QRect displayRect = spriteImage ? spriteDisplayRect(index, *spriteImage) : QRect();
+        const int offsetX = displayRect.isValid() ? displayRect.x() : 0;
+        const int offsetY = displayRect.isValid() ? displayRect.y() : 0;
+        const QSize baseSize = displayRect.isValid()
+            ? QSize(displayRect.width(), displayRect.height())
             : QSize(spriteImage && !spriteImage->empty() ? spriteImage->cols : map->cols,
                     spriteImage && !spriteImage->empty() ? spriteImage->rows : map->rows);
         cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-            ? m_spriteOriginals[static_cast<std::size_t>(index)](
-                cv::Rect(offsetX, offsetY, baseSize.width(), baseSize.height()))
+            ? (contentRect.isValid()
+                ? m_spriteOriginals[static_cast<std::size_t>(index)](
+                    cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height()))
+                : m_spriteOriginals[static_cast<std::size_t>(index)])
             : cv::Mat();
         cv::Mat original = originalRef.empty() ? cv::Mat() : buildOriginalFrame(originalRef);
         cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseSize.width(), baseSize.height()));
@@ -10899,7 +11520,10 @@ void MainWindow::handleToolDrag(bool isFrame,
             cv::Mat previewMask = previewMaskFull(roi).clone();
             cv::Mat preview = buildMaskPreview(base, previewMask, cv::Vec3b(0, 200, 255));
             cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-                ? m_spriteOriginals[static_cast<std::size_t>(index)](roi).clone()
+                ? (contentRect.isValid()
+                    ? m_spriteOriginals[static_cast<std::size_t>(index)](
+                        cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height())).clone()
+                    : m_spriteOriginals[static_cast<std::size_t>(index)].clone())
                 : cv::Mat();
             cv::Mat original;
             if (!originalRef.empty()) {
@@ -10928,7 +11552,7 @@ void MainWindow::handleToolDrag(bool isFrame,
         return;
     }
     cv::Mat* image = isFrame ? activeFrameImage(m_framesList->currentRow(), true)
-                             : m_spriteStore->atMutable(m_spritesList->currentRow());
+                             : activeSpriteImageMutable(m_spritesList ? m_spritesList->currentRow() : -1);
     if (!image || image->empty()) {
         return;
     }
@@ -10944,13 +11568,16 @@ void MainWindow::handleToolDrag(bool isFrame,
     } else {
         const int index = m_spritesList ? m_spritesList->currentRow() : -1;
         const QRect contentRect = spriteContentRect(index);
-        const int offsetX = contentRect.isValid() ? contentRect.x() : 0;
-        const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
-        const int baseWidth = contentRect.isValid() ? contentRect.width() : image->cols;
-        const int baseHeight = contentRect.isValid() ? contentRect.height() : image->rows;
+        const QRect displayRect = spriteDisplayRect(index, *image);
+        const int offsetX = displayRect.isValid() ? displayRect.x() : 0;
+        const int offsetY = displayRect.isValid() ? displayRect.y() : 0;
+        const int baseWidth = displayRect.isValid() ? displayRect.width() : image->cols;
+        const int baseHeight = displayRect.isValid() ? displayRect.height() : image->rows;
         cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-            ? m_spriteOriginals[static_cast<std::size_t>(index)](
-                cv::Rect(offsetX, offsetY, baseWidth, baseHeight))
+            ? (contentRect.isValid()
+                ? m_spriteOriginals[static_cast<std::size_t>(index)](
+                    cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height()))
+                : m_spriteOriginals[static_cast<std::size_t>(index)])
             : cv::Mat();
         cv::Mat original = originalRef.empty() ? cv::Mat() : buildOriginalFrame(originalRef);
         cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseWidth, baseHeight));
@@ -11025,17 +11652,20 @@ void MainWindow::handleToolDrag(bool isFrame,
     } else {
         const int spriteIndex = m_spritesList ? m_spritesList->currentRow() : -1;
         const QRect contentRect = spriteContentRect(spriteIndex);
-        const int offsetX = contentRect.isValid() ? contentRect.x() : 0;
-        const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
-        const int baseWidth = contentRect.isValid() ? contentRect.width() : preview.cols;
-        const int baseHeight = contentRect.isValid() ? contentRect.height() : preview.rows;
+        const QRect displayRect = spriteDisplayRect(spriteIndex, preview);
+        const int offsetX = displayRect.isValid() ? displayRect.x() : 0;
+        const int offsetY = displayRect.isValid() ? displayRect.y() : 0;
+        const int baseWidth = displayRect.isValid() ? displayRect.width() : preview.cols;
+        const int baseHeight = displayRect.isValid() ? displayRect.height() : preview.rows;
         cv::Mat previewDisplay = applySpriteDynamicColors(spriteIndex, preview);
-        if (contentRect.isValid()) {
+        if (displayRect.isValid()) {
             previewDisplay = previewDisplay(cv::Rect(offsetX, offsetY, baseWidth, baseHeight)).clone();
         }
         cv::Mat originalRef = (spriteIndex >= 0 && spriteIndex < static_cast<int>(m_spriteOriginals.size()))
-            ? m_spriteOriginals[static_cast<std::size_t>(spriteIndex)](
-                cv::Rect(offsetX, offsetY, baseWidth, baseHeight))
+            ? (contentRect.isValid()
+                ? m_spriteOriginals[static_cast<std::size_t>(spriteIndex)](
+                    cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height()))
+                : m_spriteOriginals[static_cast<std::size_t>(spriteIndex)])
             : cv::Mat();
         cv::Mat original;
         if (!originalRef.empty()) {
@@ -11437,17 +12067,20 @@ void MainWindow::handleToolRelease(bool isFrame,
             m_spriteHasStart = false;
             return;
         }
-        const cv::Mat* spriteImage = m_spriteStore ? m_spriteStore->at(index) : nullptr;
+        const cv::Mat* spriteImage = activeSpriteImage(index);
         const QRect contentRect = spriteContentRect(index);
-        const int offsetX = contentRect.isValid() ? contentRect.x() : 0;
-        const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
-        const QSize baseSize = contentRect.isValid()
-            ? QSize(contentRect.width(), contentRect.height())
+        const QRect displayRect = spriteImage ? spriteDisplayRect(index, *spriteImage) : QRect();
+        const int offsetX = displayRect.isValid() ? displayRect.x() : 0;
+        const int offsetY = displayRect.isValid() ? displayRect.y() : 0;
+        const QSize baseSize = displayRect.isValid()
+            ? QSize(displayRect.width(), displayRect.height())
             : QSize(spriteImage && !spriteImage->empty() ? spriteImage->cols : map->cols,
                     spriteImage && !spriteImage->empty() ? spriteImage->rows : map->rows);
         cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-            ? m_spriteOriginals[static_cast<std::size_t>(index)](
-                cv::Rect(offsetX, offsetY, baseSize.width(), baseSize.height()))
+            ? (contentRect.isValid()
+                ? m_spriteOriginals[static_cast<std::size_t>(index)](
+                    cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height()))
+                : m_spriteOriginals[static_cast<std::size_t>(index)])
             : cv::Mat();
         cv::Mat original = originalRef.empty() ? cv::Mat() : buildOriginalFrame(originalRef);
         cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseSize.width(), baseSize.height()));
@@ -11511,7 +12144,7 @@ void MainWindow::handleToolRelease(bool isFrame,
         m_spriteHasStart = false;
     }
     cv::Mat* image = isFrame ? activeFrameImage(m_framesList->currentRow(), true)
-                             : m_spriteStore->atMutable(m_spritesList->currentRow());
+                             : activeSpriteImageMutable(m_spritesList ? m_spritesList->currentRow() : -1);
     if (!image || image->empty()) {
         return;
     }
@@ -11530,13 +12163,16 @@ void MainWindow::handleToolRelease(bool isFrame,
     } else {
         const int index = m_spritesList ? m_spritesList->currentRow() : -1;
         const QRect contentRect = spriteContentRect(index);
-        const int offsetX = contentRect.isValid() ? contentRect.x() : 0;
-        const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
-        const int baseWidth = contentRect.isValid() ? contentRect.width() : image->cols;
-        const int baseHeight = contentRect.isValid() ? contentRect.height() : image->rows;
+        const QRect displayRect = spriteDisplayRect(index, *image);
+        const int offsetX = displayRect.isValid() ? displayRect.x() : 0;
+        const int offsetY = displayRect.isValid() ? displayRect.y() : 0;
+        const int baseWidth = displayRect.isValid() ? displayRect.width() : image->cols;
+        const int baseHeight = displayRect.isValid() ? displayRect.height() : image->rows;
         cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-            ? m_spriteOriginals[static_cast<std::size_t>(index)](
-                cv::Rect(offsetX, offsetY, baseWidth, baseHeight))
+            ? (contentRect.isValid()
+                ? m_spriteOriginals[static_cast<std::size_t>(index)](
+                    cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height()))
+                : m_spriteOriginals[static_cast<std::size_t>(index)])
             : cv::Mat();
         cv::Mat original = originalRef.empty() ? cv::Mat() : buildOriginalFrame(originalRef);
         cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseWidth, baseHeight));

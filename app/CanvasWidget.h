@@ -39,9 +39,13 @@ public:
     void setZoneButtonVisible(bool visible);
     void setRotateChecked(bool enabled);
     void setRotateEnabled(bool enabled);
+    void setBackEnabled(bool enabled);
+    void setForwardEnabled(bool enabled);
 
 signals:
     void fitRequested();
+    void backRequested();
+    void forwardRequested();
     void gridToggled(bool enabled);
     void originalToggled(bool enabled);
     void backgroundToggled(bool enabled);
@@ -59,6 +63,8 @@ private:
     GLCanvasWidget* m_canvas;
     QLabel* m_label;
     QToolButton* m_fitButton;
+    QToolButton* m_backButton;
+    QToolButton* m_forwardButton;
     QToolButton* m_gridButton;
     QToolButton* m_originalButton;
     QToolButton* m_backgroundButton;
