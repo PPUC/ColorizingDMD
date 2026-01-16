@@ -16,6 +16,7 @@ if [ "${STATIC_LINKING}" = "1" ]; then
    BUILD_DIR="${BUILD_DIR}-static"
    ARTIFACT_DIR="${ARTIFACT_DIR}-static"
    CMAKE_ARGS+=("-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded")
+   CMAKE_ARGS+=("-DVCPKG_TARGET_TRIPLET=x86-windows-static")
 fi
 if [ -n "${VCPKG_ROOT}" ]; then
    CMAKE_ARGS+=("-DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")

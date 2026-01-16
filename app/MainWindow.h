@@ -94,6 +94,7 @@ private:
     void refreshFrameSpriteLists();
     void refreshBackgroundList();
     void refreshSpriteZoneList();
+    void refreshSpriteZoneSpritesList();
     void refreshFrameSpriteSlotCombo();
     void setInspectorSelection(const QString& label);
     void updateSelectionFromLists();
@@ -297,6 +298,12 @@ private:
     class QListWidget* m_imagesList;
     class QListWidget* m_backgroundList;
     class QListWidget* m_spriteZoneList;
+    class QListWidget* m_spriteZoneSpritesList;
+    class QToolButton* m_spriteZoneAddButton;
+    class QToolButton* m_spriteZoneRemoveButton;
+    class QToolButton* m_spriteZoneSpriteUp;
+    class QToolButton* m_spriteZoneSpriteDown;
+    class QToolButton* m_spriteZoneSpriteRemove;
     class QLineEdit* m_frameFilter;
     class QLineEdit* m_spriteFilter;
     class QListWidget* m_framePreviewList;
@@ -320,7 +327,6 @@ private:
     class QComboBox* m_frameDynamicMaskAssign;
     class QPushButton* m_frameDynamicCopyButton;
     class QComboBox* m_frameBackgroundAssign;
-    class QComboBox* m_frameSpriteSlotCombo;
     class QCheckBox* m_shapeCompToggle;
     class QComboBox* m_spriteDynamicSetCombo;
     class QComboBox* m_spriteDetAreaCombo;
@@ -394,6 +400,8 @@ private:
     std::vector<uint16_t> m_spriteRects;
     std::vector<uint32_t> m_spriteRectMirror;
     std::vector<SpriteZoneGroup> m_spriteZones;
+    std::vector<uint8_t> m_frameSpriteZoneFlags;
+    int m_spriteZonePreferredSlot = -1;
     std::vector<uint32_t> m_sectionStarts;
     std::vector<std::string> m_sectionNames;
     std::vector<UndoStack> m_frameUndoStacks;

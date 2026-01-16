@@ -28,19 +28,9 @@ jobs:
           - os: windows-2025
             platform: win
             arch: x64
-            static: false
           - os: windows-2025
             platform: win
             arch: x86
-            static: false
-          - os: windows-2025
-            platform: win
-            arch: x64
-            static: true
-          - os: windows-2025
-            platform: win
-            arch: x86
-            static: true
     steps:
       - uses: actions/checkout@v4
       - name: Fetch libserum
@@ -78,9 +68,9 @@ jobs:
             vcpkg/packages
             vcpkg/downloads
             vcpkg/registry
-          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-${{ matrix.static }}-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
           restore-keys: |
-            vcpkg-${{ runner.os }}-${{ matrix.arch }}-${{ matrix.static }}-
+            vcpkg-${{ runner.os }}-${{ matrix.arch }}-
 
       - if: matrix.platform == 'win'
         name: Setup vcpkg (Windows)
@@ -92,10 +82,9 @@ jobs:
           }
           & "$root/bootstrap-vcpkg.bat"
           $triplet = if ("${{ matrix.arch }}" -eq "x86") { "x86-windows" } else { "x64-windows" }
-          if ("${{ matrix.static }}" -eq "true") {
-            $triplet = if ("${{ matrix.arch }}" -eq "x86") { "x86-windows-static" } else { "x64-windows-static" }
-          }
+          $staticTriplet = if ("${{ matrix.arch }}" -eq "x86") { "x86-windows-static" } else { "x64-windows-static" }
           & "$root/vcpkg.exe" install opencv qtbase --triplet $triplet
+          & "$root/vcpkg.exe" install opencv qtbase --triplet $staticTriplet
           "VCPKG_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VCPKG_DEFAULT_TRIPLET=$triplet" | Out-File -FilePath $env:GITHUB_ENV -Append
 
@@ -106,13 +95,30 @@ jobs:
       - name: Build
         env:
           BUILD_TYPE: Release
-          STATIC_LINKING: ${{ matrix.static && '1' || '' }}
         run: |
           find platforms \( -name "build.sh" -o -name "external.sh" \) -exec chmod +x {} \;
           ./platforms/${{ matrix.platform }}/${{ matrix.arch }}/build.sh
+          if [ "${{ matrix.platform }}" = "win" ]; then
+            STATIC_LINKING=1 ./platforms/${{ matrix.platform }}/${{ matrix.arch }}/build.sh
+          fi
 
-      - name: Upload artifacts
+      - if: matrix.platform != 'win'
+        name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: PPUC-Serum-Colorizer-${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.static && '-static' || '' }}
-          path: artifacts/${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.static && '-static' || '' }}
+          name: PPUC-Serum-Colorizer-${{ matrix.platform }}-${{ matrix.arch }}
+          path: artifacts/${{ matrix.platform }}-${{ matrix.arch }}
+
+      - if: matrix.platform == 'win'
+        name: Upload artifacts (Windows dynamic)
+        uses: actions/upload-artifact@v4
+        with:
+          name: PPUC-Serum-Colorizer-${{ matrix.platform }}-${{ matrix.arch }}
+          path: artifacts/${{ matrix.platform }}-${{ matrix.arch }}
+
+      - if: matrix.platform == 'win'
+        name: Upload artifacts (Windows static)
+        uses: actions/upload-artifact@v4
+        with:
+          name: PPUC-Serum-Colorizer-${{ matrix.platform }}-${{ matrix.arch }}-static
+          path: artifacts/${{ matrix.platform }}-${{ matrix.arch }}-static

@@ -26,6 +26,9 @@
 #include <QKeyEvent>
 #include <QMenu>
 #include <QMenuBar>
+#include <QDialog>
+#include <QTextBrowser>
+#include <QVBoxLayout>
 #include <QMessageBox>
 #include <QInputDialog>
 #include <QSettings>
@@ -109,6 +112,8 @@ constexpr int kPaletteDisabledRole = Qt::UserRole + 4;
 constexpr int kPreviewSecondarySelectedRole = Qt::UserRole + 5;
 constexpr int kSpriteZoneIndexRole = Qt::UserRole + 6;
 constexpr int kPreviewUsageRole = Qt::UserRole + 7;
+constexpr int kSpriteZoneSlotRole = Qt::UserRole + 8;
+constexpr int kSpriteZoneSpriteIndexRole = Qt::UserRole + 9;
 
 cv::Mat EnsureBgr(const cv::Mat& source);
 uint16_t BgrToRgb565(const cv::Vec3b& color);
@@ -1158,7 +1163,7 @@ MainWindow::MainWindow(QWidget* parent)
     auto* masksTab = new QWidget(toolsTabs);
     auto* dynamicMasksTab = new QWidget(toolsTabs);
     auto* backgroundsTab = new QWidget(toolsTabs);
-    auto* spriteZonesTab = new QWidget(toolsTabs);
+    auto* spriteZonesTab = new QWidget();
     m_masksTab = masksTab;
     m_dynamicMasksTab = dynamicMasksTab;
     m_backgroundsTab = backgroundsTab;
@@ -1259,8 +1264,53 @@ MainWindow::MainWindow(QWidget* parent)
     m_spriteZoneList->setGridSize(QSize());
     m_spriteZoneList->setSpacing(4);
     m_spriteZoneList->setItemDelegate(new ToolPreviewDelegate(m_spriteZoneList));
-    auto* spriteZonesLayout = new QVBoxLayout(spriteZonesTab);
-    spriteZonesLayout->addWidget(m_spriteZoneList, 1);
+    m_spriteZoneAddButton = new QToolButton(spriteZonesTab);
+    m_spriteZoneAddButton->setText("Add Zone");
+    m_spriteZoneRemoveButton = new QToolButton(spriteZonesTab);
+    m_spriteZoneRemoveButton->setText("Remove Zone");
+    auto* spriteZoneButtons = new QHBoxLayout();
+    spriteZoneButtons->addWidget(m_spriteZoneAddButton);
+    spriteZoneButtons->addWidget(m_spriteZoneRemoveButton);
+    spriteZoneButtons->addStretch(1);
+    auto* spriteZoneListLayout = new QVBoxLayout();
+    spriteZoneListLayout->addWidget(m_spriteZoneList, 1);
+    spriteZoneListLayout->addLayout(spriteZoneButtons);
+
+    m_spriteZoneSpritesList = new QListWidget(spriteZonesTab);
+    m_spriteZoneSpritesList->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_spriteZoneSpritesList->setViewMode(QListView::IconMode);
+    m_spriteZoneSpritesList->setFlow(QListView::TopToBottom);
+    m_spriteZoneSpritesList->setWrapping(false);
+    m_spriteZoneSpritesList->setMovement(QListView::Snap);
+    m_spriteZoneSpritesList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_spriteZoneSpritesList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+    m_spriteZoneSpritesList->setResizeMode(QListView::Adjust);
+    m_spriteZoneSpritesList->setUniformItemSizes(false);
+    m_spriteZoneSpritesList->setAcceptDrops(true);
+    m_spriteZoneSpritesList->setDropIndicatorShown(true);
+    m_spriteZoneSpritesList->setDragDropMode(QAbstractItemView::DropOnly);
+    m_spriteZoneSpritesList->setIconSize(QSize(kPreviewIconWidth, kPreviewIconHeight));
+    m_spriteZoneSpritesList->setGridSize(QSize());
+    m_spriteZoneSpritesList->setSpacing(4);
+    m_spriteZoneSpritesList->setItemDelegate(new ToolPreviewDelegate(m_spriteZoneSpritesList));
+    m_spriteZoneSpriteUp = new QToolButton(spriteZonesTab);
+    m_spriteZoneSpriteUp->setText("Up");
+    m_spriteZoneSpriteDown = new QToolButton(spriteZonesTab);
+    m_spriteZoneSpriteDown->setText("Down");
+    m_spriteZoneSpriteRemove = new QToolButton(spriteZonesTab);
+    m_spriteZoneSpriteRemove->setText("Remove");
+    auto* spriteZoneSpriteButtons = new QHBoxLayout();
+    spriteZoneSpriteButtons->addWidget(m_spriteZoneSpriteUp);
+    spriteZoneSpriteButtons->addWidget(m_spriteZoneSpriteDown);
+    spriteZoneSpriteButtons->addWidget(m_spriteZoneSpriteRemove);
+    spriteZoneSpriteButtons->addStretch(1);
+    auto* spriteZoneSpritesLayout = new QVBoxLayout();
+    spriteZoneSpritesLayout->addWidget(m_spriteZoneSpritesList, 1);
+    spriteZoneSpritesLayout->addLayout(spriteZoneSpriteButtons);
+
+    auto* spriteZonesLayout = new QHBoxLayout(spriteZonesTab);
+    spriteZonesLayout->addLayout(spriteZoneListLayout, 1);
+    spriteZonesLayout->addLayout(spriteZoneSpritesLayout, 1);
     spriteZonesTab->setLayout(spriteZonesLayout);
 
     auto* masksLayout = new QVBoxLayout(masksTab);
@@ -1810,7 +1860,6 @@ MainWindow::MainWindow(QWidget* parent)
     toolsTabs->addTab(masksTab, "Masks");
     toolsTabs->addTab(dynamicMasksTab, "Dynamic Masks");
     toolsTabs->addTab(backgroundsTab, "Backgrounds");
-    toolsTabs->addTab(spriteZonesTab, "Sprite Zones");
     toolsTabs->addTab(colorsTab, "Colors");
     toolDock->setWidget(toolsTabs);
     addDockWidget(Qt::LeftDockWidgetArea, toolDock);
@@ -1847,11 +1896,6 @@ MainWindow::MainWindow(QWidget* parent)
     m_frameDynamicMaskAssign = new QComboBox(inspectorWidget);
     m_frameDynamicCopyButton = new QPushButton("Copy to frame...", inspectorWidget);
     m_frameBackgroundAssign = new QComboBox(inspectorWidget);
-    m_frameSpriteSlotCombo = new QComboBox(inspectorWidget);
-    m_frameSpriteSlotCombo->setEnabled(false);
-    for (int i = 0; i < MAX_SPRITES_PER_FRAME; ++i) {
-        m_frameSpriteSlotCombo->addItem(QString("Slot %1").arg(i + 1), i);
-    }
     m_backgroundAssignLabel = new QLabel("Background", inspectorWidget);
     m_shapeCompToggle = new QCheckBox("Shape comparison", inspectorWidget);
     m_hdSourceCombo = new QComboBox(inspectorWidget);
@@ -1877,7 +1921,6 @@ MainWindow::MainWindow(QWidget* parent)
     inspectorLayout->addRow("Mask", m_frameMaskAssign);
     inspectorLayout->addRow("Dynamic mask", m_frameDynamicMaskAssign);
     inspectorLayout->addRow("Dynamic copy", m_frameDynamicCopyButton);
-    inspectorLayout->addRow("Sprite slot", m_frameSpriteSlotCombo);
     inspectorLayout->addRow(m_backgroundAssignLabel, m_frameBackgroundAssign);
     inspectorLayout->addRow("Shape compare", m_shapeCompToggle);
     inspectorWidget->setLayout(inspectorLayout);
@@ -1889,6 +1932,8 @@ MainWindow::MainWindow(QWidget* parent)
     hdLayout->addRow("HD delete", m_hdDeleteButton);
     hdWidget->setLayout(hdLayout);
     inspectorTabs->addTab(inspectorWidget, "Inspector");
+    spriteZonesTab->setParent(inspectorTabs);
+    inspectorTabs->addTab(spriteZonesTab, "Sprite Zones");
     inspectorTabs->addTab(hdWidget, "HD");
     inspectorDock->setWidget(inspectorTabs);
     addDockWidget(Qt::RightDockWidgetArea, inspectorDock);
@@ -1970,12 +2015,37 @@ MainWindow::MainWindow(QWidget* parent)
     m_coordLabel->setMinimumWidth(140);
     statusBar()->addPermanentWidget(m_coordLabel);
 
+    if (m_spriteZoneSpritesList) {
+        m_spriteZoneSpritesList->viewport()->installEventFilter(this);
+        m_spriteZoneSpritesList->installEventFilter(this);
+    }
+
     viewMenu->addAction(toolDock->toggleViewAction());
     viewMenu->addAction(inspectorDock->toggleViewAction());
     viewMenu->addAction(previewDock->toggleViewAction());
 
+    auto* handbookAction = new QAction("&Handbook", this);
     auto* aboutAction = new QAction("&About", this);
+    helpMenu->addAction(handbookAction);
     helpMenu->addAction(aboutAction);
+    connect(handbookAction, &QAction::triggered, this, [this]() {
+        QFile file(":/docs/handbook.md");
+        if (!file.open(QIODevice::ReadOnly)) {
+            QMessageBox::warning(this, "Handbook not found", "Embedded handbook is missing.");
+            return;
+        }
+        auto* dialog = new QDialog(this);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setWindowTitle("Handbook");
+        dialog->resize(900, 700);
+        auto* layout = new QVBoxLayout(dialog);
+        auto* viewer = new QTextBrowser(dialog);
+        viewer->setOpenExternalLinks(true);
+        viewer->setMarkdown(QString::fromUtf8(file.readAll()));
+        layout->addWidget(viewer);
+        dialog->setLayout(layout);
+        dialog->show();
+    });
     connect(aboutAction, &QAction::triggered, this, [this]() {
         const QString appName = QCoreApplication::applicationName().isEmpty()
             ? QString("PPUC-Serum-Colorizer")
@@ -2043,14 +2113,6 @@ MainWindow::MainWindow(QWidget* parent)
         m_spriteDetAreas[base + 2] = 0xffff;
         m_spriteDetAreas[base + 3] = 0xffff;
         updateSpriteCanvasImage(spriteIndex);
-    });
-    connect(m_frameSpriteSlotCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
-        if (index < 0 || index >= MAX_SPRITES_PER_FRAME) {
-            return;
-        }
-        m_selectedSpriteSlot = index;
-        refreshSpriteZoneList();
-        updateMaskPreviewForFrame(m_framesList ? m_framesList->currentRow() : -1);
     });
     connect(m_hdCreateButton, &QPushButton::clicked, this, [this]() {
         if (m_canvasTabs && m_canvasTabs->currentWidget() == m_backgroundsCanvas) {
@@ -2429,6 +2491,7 @@ MainWindow::MainWindow(QWidget* parent)
             updateFramePreviewAt(row);
         }
         updateFrameCanvasImage(m_framesList ? m_framesList->currentRow() : -1);
+        updateFrameUsageHighlights(m_framesList ? m_framesList->currentRow() : -1);
         if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::Background) {
             updatePreviewFilterState();
         }
@@ -2544,6 +2607,89 @@ MainWindow::MainWindow(QWidget* parent)
         updateDynamicMaskPreviewIcons();
         updateMaskPreviewForFrame(m_framesList->currentRow());
     });
+    connect(m_spriteZoneAddButton, &QToolButton::clicked, this, [this]() {
+        const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
+        if (frameIndex < 0) {
+            return;
+        }
+        ensureMaskDataSize();
+        const cv::Mat* frame = m_frameStore ? m_frameStore->at(frameIndex) : nullptr;
+        const int width = frame ? frame->cols : kDefaultFrameWidth;
+        const int height = frame ? frame->rows : kDefaultFrameHeight;
+        int slotToUse = -1;
+        for (int slot = 0; slot < MAX_SPRITES_PER_FRAME; ++slot) {
+            const std::size_t slotIndex = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME +
+                static_cast<std::size_t>(slot);
+            const std::size_t bboxIndex = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME * 4 +
+                static_cast<std::size_t>(slot) * 4;
+            if (slotIndex >= m_frameSpriteAssignments.size() ||
+                bboxIndex + 3 >= m_frameSpriteBBoxes.size()) {
+                break;
+            }
+            if (m_frameSpriteAssignments[slotIndex] != 255) {
+                continue;
+            }
+            const bool emptyBox = m_frameSpriteBBoxes[bboxIndex] == 0 &&
+                m_frameSpriteBBoxes[bboxIndex + 1] == 0 &&
+                m_frameSpriteBBoxes[bboxIndex + 2] == 0 &&
+                m_frameSpriteBBoxes[bboxIndex + 3] == 0;
+            if (!emptyBox) {
+                continue;
+            }
+            slotToUse = slot;
+            break;
+        }
+        if (slotToUse < 0) {
+            statusBar()->showMessage("No empty sprite zone slots available.", 2000);
+            return;
+        }
+        const std::size_t bboxIndex = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME * 4 +
+            static_cast<std::size_t>(slotToUse) * 4;
+        m_frameSpriteBBoxes[bboxIndex] = 0;
+        m_frameSpriteBBoxes[bboxIndex + 1] = 0;
+        m_frameSpriteBBoxes[bboxIndex + 2] = static_cast<uint16_t>(std::max(0, width - 1));
+        m_frameSpriteBBoxes[bboxIndex + 3] = static_cast<uint16_t>(std::max(0, height - 1));
+        const std::size_t slotIndex = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME +
+            static_cast<std::size_t>(slotToUse);
+        if (slotIndex < m_frameSpriteZoneFlags.size()) {
+            m_frameSpriteZoneFlags[slotIndex] = 1;
+        }
+        m_selectedSpriteSlot = slotToUse;
+        refreshSpriteZoneList();
+        refreshSpriteZoneSpritesList();
+        updateMaskPreviewForFrame(frameIndex);
+    });
+    connect(m_spriteZoneRemoveButton, &QToolButton::clicked, this, [this]() {
+        const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
+        if (frameIndex < 0 || m_selectedSpriteZoneIndex < 0 ||
+            m_selectedSpriteZoneIndex >= static_cast<int>(m_spriteZones.size())) {
+            return;
+        }
+            const SpriteZoneGroup& zone = m_spriteZones[static_cast<std::size_t>(m_selectedSpriteZoneIndex)];
+            for (int slot : zone.slotIndices) {
+                const std::size_t slotIndex = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME +
+                    static_cast<std::size_t>(slot);
+                const std::size_t bboxIndex = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME * 4 +
+                    static_cast<std::size_t>(slot) * 4;
+                if (slotIndex >= m_frameSpriteAssignments.size() ||
+                    bboxIndex + 3 >= m_frameSpriteBBoxes.size()) {
+                    continue;
+                }
+                m_frameSpriteAssignments[slotIndex] = 255;
+                m_frameSpriteBBoxes[bboxIndex] = 0;
+                m_frameSpriteBBoxes[bboxIndex + 1] = 0;
+                m_frameSpriteBBoxes[bboxIndex + 2] = 0;
+                m_frameSpriteBBoxes[bboxIndex + 3] = 0;
+                if (slotIndex < m_frameSpriteZoneFlags.size()) {
+                    m_frameSpriteZoneFlags[slotIndex] = 0;
+                }
+            }
+        refreshSpriteZoneList();
+        refreshSpriteZoneSpritesList();
+        updateFramePreviewAt(frameIndex);
+        updateMaskPreviewForFrame(frameIndex);
+        updateFrameUsageHighlights(frameIndex);
+    });
     connect(m_spriteZoneList, &QListWidget::currentRowChanged, this, [this](int row) {
         if (row < 0) {
             m_selectedSpriteZoneIndex = -1;
@@ -2555,15 +2701,137 @@ MainWindow::MainWindow(QWidget* parent)
                 if (!zone.slotIndices.empty()) {
                     if (std::find(zone.slotIndices.begin(), zone.slotIndices.end(), m_selectedSpriteSlot) == zone.slotIndices.end()) {
                         m_selectedSpriteSlot = zone.slotIndices.front();
-                        if (m_frameSpriteSlotCombo) {
-                            QSignalBlocker blocker(m_frameSpriteSlotCombo);
-                            m_frameSpriteSlotCombo->setCurrentIndex(m_selectedSpriteSlot);
-                        }
                     }
                 }
             }
         }
+        refreshSpriteZoneSpritesList();
         updateMaskPreviewForFrame(m_framesList ? m_framesList->currentRow() : -1);
+    });
+    connect(m_spriteZoneSpritesList, &QListWidget::currentRowChanged, this, [this](int row) {
+        const bool hasSelection = row >= 0;
+        if (m_spriteZoneSpriteUp) {
+            m_spriteZoneSpriteUp->setEnabled(hasSelection);
+        }
+        if (m_spriteZoneSpriteDown) {
+            m_spriteZoneSpriteDown->setEnabled(hasSelection);
+        }
+        if (m_spriteZoneSpriteRemove) {
+            m_spriteZoneSpriteRemove->setEnabled(hasSelection);
+        }
+    });
+    connect(m_spriteZoneSpriteUp, &QToolButton::clicked, this, [this]() {
+        if (!m_spriteZoneSpritesList || m_selectedSpriteZoneIndex < 0 ||
+            m_selectedSpriteZoneIndex >= static_cast<int>(m_spriteZones.size())) {
+            return;
+        }
+        const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
+        if (frameIndex < 0) {
+            return;
+        }
+        QListWidgetItem* item = m_spriteZoneSpritesList->currentItem();
+        if (!item) {
+            return;
+        }
+        const int slot = item->data(kSpriteZoneSlotRole).toInt();
+        const int spriteIndex = item->data(kSpriteZoneSpriteIndexRole).toInt();
+        const SpriteZoneGroup& zone = m_spriteZones[static_cast<std::size_t>(m_selectedSpriteZoneIndex)];
+        auto it = std::find(zone.slotIndices.begin(), zone.slotIndices.end(), slot);
+        if (it == zone.slotIndices.end() || it == zone.slotIndices.begin()) {
+            return;
+        }
+        const int prevSlot = *(it - 1);
+        const std::size_t base = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME;
+        std::swap(m_frameSpriteAssignments[base + static_cast<std::size_t>(prevSlot)],
+                  m_frameSpriteAssignments[base + static_cast<std::size_t>(slot)]);
+        m_spriteZonePreferredSlot = prevSlot;
+        refreshSpriteZoneList();
+        refreshSpriteZoneSpritesList();
+        updateFramePreviewAt(frameIndex);
+        updateMaskPreviewForFrame(frameIndex);
+        updateFrameUsageHighlights(frameIndex);
+        if (m_framesList && frameIndex >= 0) {
+            const int previewRow = previewRowForFrame(frameIndex);
+            QSignalBlocker frameBlocker(m_framesList);
+            m_framesList->setCurrentRow(frameIndex);
+            if (previewRow >= 0 && m_framePreviewList) {
+                QSignalBlocker previewBlocker(m_framePreviewList);
+                m_framePreviewList->setCurrentRow(previewRow);
+            }
+            showFrameAtIndex(frameIndex);
+        }
+    });
+    connect(m_spriteZoneSpriteDown, &QToolButton::clicked, this, [this]() {
+        if (!m_spriteZoneSpritesList || m_selectedSpriteZoneIndex < 0 ||
+            m_selectedSpriteZoneIndex >= static_cast<int>(m_spriteZones.size())) {
+            return;
+        }
+        const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
+        if (frameIndex < 0) {
+            return;
+        }
+        QListWidgetItem* item = m_spriteZoneSpritesList->currentItem();
+        if (!item) {
+            return;
+        }
+        const int slot = item->data(kSpriteZoneSlotRole).toInt();
+        const int spriteIndex = item->data(kSpriteZoneSpriteIndexRole).toInt();
+        const SpriteZoneGroup& zone = m_spriteZones[static_cast<std::size_t>(m_selectedSpriteZoneIndex)];
+        auto it = std::find(zone.slotIndices.begin(), zone.slotIndices.end(), slot);
+        if (it == zone.slotIndices.end() || (it + 1) == zone.slotIndices.end()) {
+            return;
+        }
+        const int nextSlot = *(it + 1);
+        const std::size_t base = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME;
+        std::swap(m_frameSpriteAssignments[base + static_cast<std::size_t>(nextSlot)],
+                  m_frameSpriteAssignments[base + static_cast<std::size_t>(slot)]);
+        m_spriteZonePreferredSlot = nextSlot;
+        refreshSpriteZoneList();
+        refreshSpriteZoneSpritesList();
+        updateFramePreviewAt(frameIndex);
+        updateMaskPreviewForFrame(frameIndex);
+        updateFrameUsageHighlights(frameIndex);
+        if (m_framesList && frameIndex >= 0) {
+            const int previewRow = previewRowForFrame(frameIndex);
+            QSignalBlocker frameBlocker(m_framesList);
+            m_framesList->setCurrentRow(frameIndex);
+            if (previewRow >= 0 && m_framePreviewList) {
+                QSignalBlocker previewBlocker(m_framePreviewList);
+                m_framePreviewList->setCurrentRow(previewRow);
+            }
+            showFrameAtIndex(frameIndex);
+        }
+    });
+    connect(m_spriteZoneSpriteRemove, &QToolButton::clicked, this, [this]() {
+        if (!m_spriteZoneSpritesList) {
+            return;
+        }
+        const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
+        if (frameIndex < 0) {
+            return;
+        }
+        QListWidgetItem* item = m_spriteZoneSpritesList->currentItem();
+        if (!item) {
+            return;
+        }
+        const int slot = item->data(kSpriteZoneSlotRole).toInt();
+        if (slot < 0 || slot >= MAX_SPRITES_PER_FRAME) {
+            return;
+        }
+        const std::size_t slotIndex = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME +
+            static_cast<std::size_t>(slot);
+        if (slotIndex >= m_frameSpriteAssignments.size()) {
+            return;
+        }
+        m_frameSpriteAssignments[slotIndex] = 255;
+        refreshSpriteZoneList();
+        refreshSpriteZoneSpritesList();
+        updateFramePreviewAt(frameIndex);
+        updateMaskPreviewForFrame(frameIndex);
+        updateFrameUsageHighlights(frameIndex);
+        if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::Sprite) {
+            updatePreviewFilterState();
+        }
     });
 
     connect(m_bookmarksCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
@@ -2992,6 +3260,7 @@ MainWindow::MainWindow(QWidget* parent)
             }
             statusBar()->showMessage(QString("Assigned background %1").arg(index), 2000);
             updateFrameCanvasImage(m_framesList->currentRow());
+            updateFrameUsageHighlights(m_framesList ? m_framesList->currentRow() : -1);
         }
         if (kind == "sprite") {
             if (index < 0 || index >= m_spritesList->count()) {
@@ -3010,19 +3279,14 @@ MainWindow::MainWindow(QWidget* parent)
                 return;
             }
             SpriteZoneGroup zone = m_spriteZones[static_cast<std::size_t>(m_selectedSpriteZoneIndex)];
-            int slotToUse = m_selectedSpriteSlot;
-            if (slotToUse < 0 || slotToUse >= MAX_SPRITES_PER_FRAME) {
-                slotToUse = -1;
-            }
-            if (slotToUse < 0) {
-                for (int slot : zone.slotIndices) {
-                    const std::size_t slotIndex = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME +
-                        static_cast<std::size_t>(slot);
-                    if (slotIndex < m_frameSpriteAssignments.size() &&
-                        m_frameSpriteAssignments[slotIndex] == 255) {
-                        slotToUse = slot;
-                        break;
-                    }
+            int slotToUse = -1;
+            for (int slot : zone.slotIndices) {
+                const std::size_t slotIndex = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME +
+                    static_cast<std::size_t>(slot);
+                if (slotIndex < m_frameSpriteAssignments.size() &&
+                    m_frameSpriteAssignments[slotIndex] == 255) {
+                    slotToUse = slot;
+                    break;
                 }
             }
             if (slotToUse < 0) {
@@ -3048,6 +3312,9 @@ MainWindow::MainWindow(QWidget* parent)
                     continue;
                 }
                 m_frameSpriteAssignments[slotIndex] = static_cast<uint8_t>(index);
+                if (slotIndex < m_frameSpriteZoneFlags.size()) {
+                    m_frameSpriteZoneFlags[slotIndex] = 1;
+                }
                 const std::size_t bboxIndex = static_cast<std::size_t>(row) * MAX_SPRITES_PER_FRAME * 4 +
                     static_cast<std::size_t>(slotToUse) * 4;
                 if (bboxIndex + 3 < m_frameSpriteBBoxes.size()) {
@@ -3059,12 +3326,16 @@ MainWindow::MainWindow(QWidget* parent)
                 updateFramePreviewAt(row);
             }
             m_selectedSpriteSlot = slotToUse;
+            m_spriteZonePreferredSlot = slotToUse;
             statusBar()->showMessage(QString("Assigned sprite %1 to zone %2")
                                          .arg(index)
                                          .arg(m_selectedSpriteZoneIndex + 1),
                                      2000);
             refreshSpriteZoneList();
-            refreshFrameSpriteSlotCombo();
+            refreshSpriteZoneSpritesList();
+            if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::Sprite) {
+                updatePreviewFilterState();
+            }
         }
         updateMaskPreviewForFrame(m_framesList->currentRow());
     });
@@ -4410,6 +4681,8 @@ void MainWindow::updateFramePreviewAt(int index)
     if (!image || image->empty()) {
         return;
     }
+    QSignalBlocker blocker(m_framePreviewList);
+    QSignalBlocker selectionBlocker(m_framePreviewList->selectionModel());
     QListWidgetItem* item = m_framePreviewList->item(row);
     if (!item) {
         return;
@@ -4762,28 +5035,27 @@ void MainWindow::updateFrameUsageHighlights(int frameIndex)
     if (m_dynamicMaskList) {
         std::array<bool, MAX_DYNA_SETS_PER_FRAMEN> used{};
         used.fill(false);
-        const cv::Mat* map = nullptr;
-        if (m_useHdFrame && frameIndex < static_cast<int>(m_frameDynamicMaskMapsX.size())) {
-            const cv::Mat& hdMap = m_frameDynamicMaskMapsX[static_cast<std::size_t>(frameIndex)];
-            if (!hdMap.empty()) {
-                map = &hdMap;
-            }
-        }
-        if (!map && frameIndex < static_cast<int>(m_frameDynamicMaskMaps.size())) {
-            const cv::Mat& sdMap = m_frameDynamicMaskMaps[static_cast<std::size_t>(frameIndex)];
-            if (!sdMap.empty()) {
-                map = &sdMap;
-            }
-        }
-        if (map && !map->empty()) {
-            for (int y = 0; y < map->rows; ++y) {
-                const uint8_t* row = map->ptr<uint8_t>(y);
-                for (int x = 0; x < map->cols; ++x) {
+        auto markUsed = [&used](const cv::Mat& map) {
+            for (int y = 0; y < map.rows; ++y) {
+                const uint8_t* row = map.ptr<uint8_t>(y);
+                for (int x = 0; x < map.cols; ++x) {
                     const uint8_t value = row[x];
                     if (value != 255 && value < MAX_DYNA_SETS_PER_FRAMEN) {
                         used[value] = true;
                     }
                 }
+            }
+        };
+        if (frameIndex < static_cast<int>(m_frameDynamicMaskMaps.size())) {
+            const cv::Mat& sdMap = m_frameDynamicMaskMaps[static_cast<std::size_t>(frameIndex)];
+            if (!sdMap.empty()) {
+                markUsed(sdMap);
+            }
+        }
+        if (frameIndex < static_cast<int>(m_frameDynamicMaskMapsX.size())) {
+            const cv::Mat& hdMap = m_frameDynamicMaskMapsX[static_cast<std::size_t>(frameIndex)];
+            if (!hdMap.empty()) {
+                markUsed(hdMap);
             }
         }
         for (int i = 0; i < m_dynamicMaskList->count() && i < MAX_DYNA_SETS_PER_FRAMEN; ++i) {
@@ -5702,6 +5974,9 @@ QRect MainWindow::spriteDisplayRect(int index, const cv::Mat& image) const
     if (image.empty()) {
         return QRect();
     }
+    if (m_useHdSprite) {
+        return QRect(0, 0, image.cols, image.rows);
+    }
     QRect rect = spriteContentRect(index);
     if (!rect.isValid() || rect.isEmpty()) {
         return QRect(0, 0, image.cols, image.rows);
@@ -6237,6 +6512,9 @@ void MainWindow::ensureMaskDataSize()
     if (m_frameSpriteAssignments.size() != static_cast<std::size_t>(frameCount) * MAX_SPRITES_PER_FRAME) {
         m_frameSpriteAssignments.resize(static_cast<std::size_t>(frameCount) * MAX_SPRITES_PER_FRAME, 255);
     }
+    if (m_frameSpriteZoneFlags.size() != static_cast<std::size_t>(frameCount) * MAX_SPRITES_PER_FRAME) {
+        m_frameSpriteZoneFlags.resize(static_cast<std::size_t>(frameCount) * MAX_SPRITES_PER_FRAME, 0);
+    }
     if (m_frameSpriteBBoxes.size() != static_cast<std::size_t>(frameCount) * MAX_SPRITES_PER_FRAME * 4) {
         m_frameSpriteBBoxes.resize(static_cast<std::size_t>(frameCount) * MAX_SPRITES_PER_FRAME * 4, 0);
     }
@@ -6260,10 +6538,19 @@ void MainWindow::ensureMaskDataSize()
             for (int slot = 0; slot < MAX_SPRITES_PER_FRAME; ++slot) {
                 const std::size_t bboxIndex = static_cast<std::size_t>(i) * MAX_SPRITES_PER_FRAME * 4 +
                     static_cast<std::size_t>(slot) * 4;
+                const std::size_t slotIndex = static_cast<std::size_t>(i) * MAX_SPRITES_PER_FRAME +
+                    static_cast<std::size_t>(slot);
                 if (bboxIndex + 3 >= m_frameSpriteBBoxes.size()) {
                     break;
                 }
-                if (m_frameSpriteBBoxes[bboxIndex + 2] == 0 &&
+                if (slotIndex >= m_frameSpriteAssignments.size()) {
+                    continue;
+                }
+                if (m_frameSpriteAssignments[slotIndex] != 255) {
+                    m_frameSpriteZoneFlags[slotIndex] = 1;
+                }
+                if (m_frameSpriteAssignments[slotIndex] != 255 &&
+                    m_frameSpriteBBoxes[bboxIndex + 2] == 0 &&
                     m_frameSpriteBBoxes[bboxIndex + 3] == 0) {
                     m_frameSpriteBBoxes[bboxIndex] = 0;
                     m_frameSpriteBBoxes[bboxIndex + 1] = 0;
@@ -6728,7 +7015,15 @@ void MainWindow::updateSpriteZoneOverlay(int index)
         cv::rectangle(allMask, rect, cv::Scalar(1), cv::FILLED);
     }
     bool hasSelected = false;
-    if (m_selectedSpriteSlot >= 0 && m_selectedSpriteSlot < MAX_SPRITES_PER_FRAME) {
+    if (m_selectedSpriteZoneIndex >= 0 && m_selectedSpriteZoneIndex < static_cast<int>(zones.size())) {
+        const SpriteZoneGroup& zone = zones[static_cast<std::size_t>(m_selectedSpriteZoneIndex)];
+        cv::Rect rect(zone.rect.x(), zone.rect.y(), zone.rect.width(), zone.rect.height());
+        rect &= cv::Rect(0, 0, baseSize.width, baseSize.height);
+        if (rect.width > 0 && rect.height > 0) {
+            cv::rectangle(selectedMask, rect, cv::Scalar(1), cv::FILLED);
+            hasSelected = true;
+        }
+    } else if (m_selectedSpriteSlot >= 0 && m_selectedSpriteSlot < MAX_SPRITES_PER_FRAME) {
         const std::size_t bboxIndex = static_cast<std::size_t>(index) * MAX_SPRITES_PER_FRAME * 4 +
             static_cast<std::size_t>(m_selectedSpriteSlot) * 4;
         if (bboxIndex + 3 < m_frameSpriteBBoxes.size()) {
@@ -6745,14 +7040,6 @@ void MainWindow::updateSpriteZoneOverlay(int index)
                 cv::rectangle(selectedMask, rect, cv::Scalar(1), cv::FILLED);
                 hasSelected = true;
             }
-        }
-    } else if (m_selectedSpriteZoneIndex >= 0 && m_selectedSpriteZoneIndex < static_cast<int>(zones.size())) {
-        const SpriteZoneGroup& zone = zones[static_cast<std::size_t>(m_selectedSpriteZoneIndex)];
-        cv::Rect rect(zone.rect.x(), zone.rect.y(), zone.rect.width(), zone.rect.height());
-        rect &= cv::Rect(0, 0, baseSize.width, baseSize.height);
-        if (rect.width > 0 && rect.height > 0) {
-            cv::rectangle(selectedMask, rect, cv::Scalar(1), cv::FILLED);
-            hasSelected = true;
         }
     }
     QRect region;
@@ -9937,9 +10224,6 @@ std::vector<MainWindow::SpriteZoneGroup> MainWindow::buildSpriteZonesForFrame(in
             break;
         }
         const uint8_t spriteIndex = m_frameSpriteAssignments[slotIndex];
-        if (spriteIndex == 255) {
-            continue;
-        }
         int minx = 0;
         int miny = 0;
         int maxx = frameWidth > 0 ? frameWidth - 1 : 0;
@@ -9950,6 +10234,13 @@ std::vector<MainWindow::SpriteZoneGroup> MainWindow::buildSpriteZonesForFrame(in
             miny = static_cast<int>(m_frameSpriteBBoxes[bboxIndex + 1]);
             maxx = static_cast<int>(m_frameSpriteBBoxes[bboxIndex + 2]);
             maxy = static_cast<int>(m_frameSpriteBBoxes[bboxIndex + 3]);
+        }
+        const bool hasBBox = !(minx == 0 && miny == 0 && maxx == 0 && maxy == 0);
+        const bool hasSprite = (spriteIndex != 255);
+        const bool zoneFlagged = slotIndex < m_frameSpriteZoneFlags.size() &&
+            m_frameSpriteZoneFlags[slotIndex] != 0;
+        if (!hasSprite && (!hasBBox || !zoneFlagged)) {
+            continue;
         }
         if (maxx < minx || maxy < miny) {
             continue;
@@ -9965,13 +10256,17 @@ std::vector<MainWindow::SpriteZoneGroup> MainWindow::buildSpriteZonesForFrame(in
             SpriteZoneGroup zone;
             zone.rect = rect;
             zone.slotIndices.push_back(slot);
-            zone.sprites.push_back(static_cast<int>(spriteIndex));
+            if (hasSprite) {
+                zone.sprites.push_back(static_cast<int>(spriteIndex));
+            }
             zones.push_back(std::move(zone));
             zoneMap[key] = zones.size() - 1;
         } else {
             SpriteZoneGroup& zone = zones[it->second];
             zone.slotIndices.push_back(slot);
-            zone.sprites.push_back(static_cast<int>(spriteIndex));
+            if (hasSprite) {
+                zone.sprites.push_back(static_cast<int>(spriteIndex));
+            }
         }
     }
     return zones;
@@ -9991,6 +10286,13 @@ void MainWindow::refreshSpriteZoneList()
         m_spriteZoneList->addItem(item);
         m_spriteZoneList->setEnabled(false);
         m_selectedSpriteZoneIndex = -1;
+        if (m_spriteZoneAddButton) {
+            m_spriteZoneAddButton->setEnabled(false);
+        }
+        if (m_spriteZoneRemoveButton) {
+            m_spriteZoneRemoveButton->setEnabled(false);
+        }
+        refreshSpriteZoneSpritesList();
         return;
     }
     m_spriteZones = buildSpriteZonesForFrame(frameIndex);
@@ -10000,6 +10302,13 @@ void MainWindow::refreshSpriteZoneList()
         m_spriteZoneList->addItem(item);
         m_spriteZoneList->setEnabled(false);
         m_selectedSpriteZoneIndex = -1;
+        if (m_spriteZoneAddButton) {
+            m_spriteZoneAddButton->setEnabled(true);
+        }
+        if (m_spriteZoneRemoveButton) {
+            m_spriteZoneRemoveButton->setEnabled(false);
+        }
+        refreshSpriteZoneSpritesList();
         return;
     }
     m_spriteZoneList->setEnabled(true);
@@ -10055,7 +10364,7 @@ void MainWindow::refreshSpriteZoneList()
         painter.setPen(pen);
         painter.drawRect(rect);
         if (m_spriteStore && !zone.sprites.empty()) {
-            const int thumbSize = 14;
+            const int thumbSize = 28;
             const int padding = 2;
             int thumbX = pixmap.width() - padding - thumbSize;
             int thumbY = pixmap.height() - padding - thumbSize;
@@ -10088,18 +10397,12 @@ void MainWindow::refreshSpriteZoneList()
         }
         painter.end();
 
-        QStringList spriteLabels;
-        for (int spriteIndex : zone.sprites) {
-            spriteLabels << QString::number(spriteIndex);
-        }
         QString label = QString("Zone %1").arg(static_cast<int>(i) + 1);
-        if (!spriteLabels.isEmpty()) {
-            label += QString(" - Sprites: %1").arg(spriteLabels.join(", "));
-        }
         auto* item = new QListWidgetItem();
         item->setIcon(QIcon(pixmap));
         item->setText(label);
         item->setData(kSpriteZoneIndexRole, static_cast<int>(i));
+        item->setData(kPreviewIconSizeRole, pixmap.size());
         const int padding = 6;
         const int textHeight = m_spriteZoneList->fontMetrics().height() + 4;
         const int gap = 2;
@@ -10117,40 +10420,152 @@ void MainWindow::refreshSpriteZoneList()
         m_spriteZoneList->setCurrentRow(0);
         m_selectedSpriteZoneIndex = 0;
     }
+    if (m_spriteZoneAddButton) {
+        m_spriteZoneAddButton->setEnabled(frameIndex >= 0);
+    }
+    if (m_spriteZoneRemoveButton) {
+        m_spriteZoneRemoveButton->setEnabled(m_selectedSpriteZoneIndex >= 0);
+    }
+    refreshSpriteZoneSpritesList();
+}
+
+void MainWindow::refreshSpriteZoneSpritesList()
+{
+    if (!m_spriteZoneSpritesList) {
+        return;
+    }
+    const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
+    int restoreSlot = m_spriteZoneSpritesList->currentItem()
+        ? m_spriteZoneSpritesList->currentItem()->data(kSpriteZoneSlotRole).toInt()
+        : -1;
+    if (m_spriteZonePreferredSlot >= 0) {
+        restoreSlot = m_spriteZonePreferredSlot;
+        m_spriteZonePreferredSlot = -1;
+    }
+    QSignalBlocker blocker(m_spriteZoneSpritesList);
+    m_spriteZoneSpritesList->clear();
+        m_spriteZoneSpritesList->setEnabled(false);
+    if (m_spriteZoneSpriteUp) {
+        m_spriteZoneSpriteUp->setEnabled(false);
+    }
+    if (m_spriteZoneSpriteDown) {
+        m_spriteZoneSpriteDown->setEnabled(false);
+    }
+    if (m_spriteZoneSpriteRemove) {
+        m_spriteZoneSpriteRemove->setEnabled(false);
+    }
+    if (frameIndex < 0 ||
+        m_selectedSpriteZoneIndex < 0 ||
+        m_selectedSpriteZoneIndex >= static_cast<int>(m_spriteZones.size())) {
+        auto* item = new QListWidgetItem("No sprite zone selected");
+        item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
+        m_spriteZoneSpritesList->addItem(item);
+        return;
+    }
+    const SpriteZoneGroup& zone = m_spriteZones[static_cast<std::size_t>(m_selectedSpriteZoneIndex)];
+    if (zone.slotIndices.empty()) {
+        auto* item = new QListWidgetItem("No sprites assigned");
+        item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
+        m_spriteZoneSpritesList->addItem(item);
+        return;
+    }
+    m_spriteZoneSpritesList->setEnabled(true);
+    const QColor gap = m_spriteZoneSpritesList->palette().color(QPalette::Window);
+    const QStringList spriteNames = m_state->sprites();
+    bool added = false;
+    for (int slot : zone.slotIndices) {
+        const std::size_t slotIndex = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME +
+            static_cast<std::size_t>(slot);
+        if (slotIndex >= m_frameSpriteAssignments.size()) {
+            continue;
+        }
+        const int spriteIndex = static_cast<int>(m_frameSpriteAssignments[slotIndex]);
+        if (spriteIndex < 0 || spriteIndex == 255) {
+            continue;
+        }
+        const cv::Mat* sprite = (spriteIndex >= 0 && m_spriteStore &&
+                                 spriteIndex < m_spriteStore->count())
+            ? m_spriteStore->at(spriteIndex)
+            : nullptr;
+        if (!sprite || sprite->empty()) {
+            continue;
+        }
+        cv::Mat hd;
+        if (spriteIndex >= 0 && spriteIndex < static_cast<int>(m_spriteColoredX.size())) {
+            hd = m_spriteColoredX[static_cast<std::size_t>(spriteIndex)];
+        }
+        cv::Mat previewMat = BuildBackgroundPreview(*sprite,
+                                                    hd,
+                                                    cv::Scalar(gap.blue(), gap.green(), gap.red()));
+        if (previewMat.empty()) {
+            continue;
+        }
+        cv::Mat rgb;
+        cv::cvtColor(previewMat, rgb, cv::COLOR_BGR2RGB);
+        QImage previewImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888);
+        const bool hasHd = !hd.empty();
+        const QSize iconSize = hasHd
+            ? QSize(kPreviewIconWidthHd, kPreviewIconHeightHd)
+            : QSize(kPreviewIconWidth, kPreviewIconHeight);
+        QPixmap pixmap = QPixmap::fromImage(previewImage.copy());
+        pixmap = pixmap.scaled(iconSize, Qt::KeepAspectRatio, Qt::FastTransformation);
+
+        auto* item = new QListWidgetItem();
+        item->setIcon(QIcon(pixmap));
+        const QString spriteLabel = (spriteIndex >= 0 && spriteIndex < spriteNames.size() &&
+                                     !spriteNames[spriteIndex].isEmpty())
+            ? spriteNames[spriteIndex]
+            : QString("Sprite %1").arg(spriteIndex + 1);
+        item->setText(QString("Slot %1 - %2").arg(slot + 1).arg(spriteLabel));
+        item->setData(kPreviewIconSizeRole, pixmap.size());
+        item->setData(kSpriteZoneSlotRole, slot);
+        item->setData(kSpriteZoneSpriteIndexRole, spriteIndex);
+        {
+            const int padding = 6;
+            const int textHeight = m_spriteZoneSpritesList->fontMetrics().height() + 4;
+            const int gap = 2;
+            const int width = pixmap.width() + padding * 2;
+            const int height = pixmap.height() + textHeight + padding * 2 + gap;
+            item->setSizeHint(QSize(width, height));
+        }
+        m_spriteZoneSpritesList->addItem(item);
+        added = true;
+    }
+    if (!added) {
+        auto* item = new QListWidgetItem("No sprites assigned");
+        item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
+        m_spriteZoneSpritesList->addItem(item);
+        m_spriteZoneSpritesList->setEnabled(false);
+        return;
+    }
+    if (restoreSlot >= 0) {
+        for (int i = 0; i < m_spriteZoneSpritesList->count(); ++i) {
+            QListWidgetItem* item = m_spriteZoneSpritesList->item(i);
+            if (item && item->data(kSpriteZoneSlotRole).toInt() == restoreSlot) {
+                m_spriteZoneSpritesList->setCurrentRow(i);
+                break;
+            }
+        }
+    }
+    if (m_spriteZoneSpritesList->currentRow() < 0 && m_spriteZoneSpritesList->count() > 0) {
+        m_spriteZoneSpritesList->setCurrentRow(0);
+    }
+    if (m_spriteZoneSpriteUp) {
+        m_spriteZoneSpriteUp->setEnabled(m_spriteZoneSpritesList->count() > 0);
+    }
+    if (m_spriteZoneSpriteDown) {
+        m_spriteZoneSpriteDown->setEnabled(m_spriteZoneSpritesList->count() > 0);
+    }
+    if (m_spriteZoneSpriteRemove) {
+        m_spriteZoneSpriteRemove->setEnabled(m_spriteZoneSpritesList->count() > 0);
+    }
 }
 
 void MainWindow::refreshFrameSpriteSlotCombo()
 {
-    if (!m_frameSpriteSlotCombo) {
-        return;
+    if (m_selectedSpriteSlot < 0) {
+        m_selectedSpriteSlot = 0;
     }
-    ensureMaskDataSize();
-    const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
-    QSignalBlocker blocker(m_frameSpriteSlotCombo);
-    m_frameSpriteSlotCombo->clear();
-    if (frameIndex < 0 || m_frameSpriteAssignments.empty()) {
-        m_frameSpriteSlotCombo->setEnabled(false);
-        return;
-    }
-    for (int slot = 0; slot < MAX_SPRITES_PER_FRAME; ++slot) {
-        const std::size_t slotIndex = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME +
-            static_cast<std::size_t>(slot);
-        uint8_t spriteIndex = 255;
-        if (slotIndex < m_frameSpriteAssignments.size()) {
-            spriteIndex = m_frameSpriteAssignments[slotIndex];
-        }
-        QString label = QString("Slot %1").arg(slot + 1);
-        if (spriteIndex != 255) {
-            label += QString(" (Sprite %1)").arg(spriteIndex);
-        } else {
-            label += " (Empty)";
-        }
-        m_frameSpriteSlotCombo->addItem(label, slot);
-    }
-    const int clamped = std::clamp(m_selectedSpriteSlot, 0, MAX_SPRITES_PER_FRAME - 1);
-    m_frameSpriteSlotCombo->setCurrentIndex(clamped);
-    m_selectedSpriteSlot = clamped;
-    m_frameSpriteSlotCombo->setEnabled(true);
 }
 
 void MainWindow::refreshFrameSpriteLists()
@@ -10478,6 +10893,119 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
             return true;
         }
     }
+    if (m_spriteZoneSpritesList &&
+        (obj == m_spriteZoneSpritesList || obj == m_spriteZoneSpritesList->viewport())) {
+        if (event->type() == QEvent::DragEnter) {
+            auto* dragEvent = static_cast<QDragEnterEvent*>(event);
+            QString kind;
+            int index = -1;
+            if (ExtractListDrop(dragEvent->mimeData(), kind, index) && kind == "sprite") {
+                dragEvent->setDropAction(Qt::CopyAction);
+                dragEvent->acceptProposedAction();
+                return true;
+            }
+            dragEvent->ignore();
+            return true;
+        }
+        if (event->type() == QEvent::DragMove) {
+            auto* dragEvent = static_cast<QDragMoveEvent*>(event);
+            QString kind;
+            int index = -1;
+            if (ExtractListDrop(dragEvent->mimeData(), kind, index) && kind == "sprite") {
+                dragEvent->setDropAction(Qt::CopyAction);
+                dragEvent->acceptProposedAction();
+                return true;
+            }
+            dragEvent->ignore();
+            return true;
+        }
+        if (event->type() == QEvent::Drop) {
+            auto* dropEvent = static_cast<QDropEvent*>(event);
+            QString kind;
+            int index = -1;
+            if (!ExtractListDrop(dropEvent->mimeData(), kind, index) || kind != "sprite") {
+                dropEvent->ignore();
+                return true;
+            }
+            const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
+            if (frameIndex < 0) {
+                dropEvent->ignore();
+                return true;
+            }
+            if (m_selectedSpriteZoneIndex < 0 ||
+                m_selectedSpriteZoneIndex >= static_cast<int>(m_spriteZones.size())) {
+                statusBar()->showMessage("Select a sprite zone to assign a sprite.", 2000);
+                dropEvent->ignore();
+                return true;
+            }
+            if (index < 0 || !m_spritesList || index >= m_spritesList->count()) {
+                dropEvent->ignore();
+                return true;
+            }
+            SpriteZoneGroup zone = m_spriteZones[static_cast<std::size_t>(m_selectedSpriteZoneIndex)];
+            int slotToUse = -1;
+            for (int slot : zone.slotIndices) {
+                const std::size_t slotIndex = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME +
+                    static_cast<std::size_t>(slot);
+                if (slotIndex < m_frameSpriteAssignments.size() &&
+                    m_frameSpriteAssignments[slotIndex] == 255) {
+                    slotToUse = slot;
+                    break;
+                }
+            }
+            if (slotToUse < 0) {
+                for (int slot = 0; slot < MAX_SPRITES_PER_FRAME; ++slot) {
+                    const std::size_t slotIndex = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME +
+                        static_cast<std::size_t>(slot);
+                    if (slotIndex < m_frameSpriteAssignments.size() &&
+                        m_frameSpriteAssignments[slotIndex] == 255) {
+                        slotToUse = slot;
+                        break;
+                    }
+                }
+            }
+            if (slotToUse < 0) {
+                statusBar()->showMessage("No empty sprite slots available for this frame.", 2000);
+                dropEvent->ignore();
+                return true;
+            }
+            const std::vector<int> targets = targetFrameIndices();
+            for (int row : targets) {
+                const std::size_t slotIndex = static_cast<std::size_t>(row) * MAX_SPRITES_PER_FRAME +
+                    static_cast<std::size_t>(slotToUse);
+                if (slotIndex >= m_frameSpriteAssignments.size()) {
+                    continue;
+                }
+                m_frameSpriteAssignments[slotIndex] = static_cast<uint8_t>(index);
+                if (slotIndex < m_frameSpriteZoneFlags.size()) {
+                    m_frameSpriteZoneFlags[slotIndex] = 1;
+                }
+                const std::size_t bboxIndex = static_cast<std::size_t>(row) * MAX_SPRITES_PER_FRAME * 4 +
+                    static_cast<std::size_t>(slotToUse) * 4;
+                if (bboxIndex + 3 < m_frameSpriteBBoxes.size()) {
+                    m_frameSpriteBBoxes[bboxIndex] = static_cast<uint16_t>(zone.rect.x());
+                    m_frameSpriteBBoxes[bboxIndex + 1] = static_cast<uint16_t>(zone.rect.y());
+                    m_frameSpriteBBoxes[bboxIndex + 2] =
+                        static_cast<uint16_t>(zone.rect.x() + zone.rect.width() - 1);
+                    m_frameSpriteBBoxes[bboxIndex + 3] =
+                        static_cast<uint16_t>(zone.rect.y() + zone.rect.height() - 1);
+                }
+                updateFramePreviewAt(row);
+            }
+            m_selectedSpriteSlot = slotToUse;
+            m_spriteZonePreferredSlot = slotToUse;
+            refreshSpriteZoneList();
+            refreshSpriteZoneSpritesList();
+            if (m_previewFilterEnabled && currentPreviewFilterKind() == PreviewFilterKind::Sprite) {
+                updatePreviewFilterState();
+            }
+            updateMaskPreviewForFrame(m_framesList ? m_framesList->currentRow() : -1);
+            updateFrameUsageHighlights(m_framesList ? m_framesList->currentRow() : -1);
+            dropEvent->setDropAction(Qt::CopyAction);
+            dropEvent->acceptProposedAction();
+            return true;
+        }
+    }
     return QMainWindow::eventFilter(obj, event);
 }
 
@@ -10667,9 +11195,18 @@ void MainWindow::handleToolPress(bool isFrame,
         m_frameDrawOnMask = false;
         m_frameDrawOnZone = false;
         if (m_spriteZoneMode) {
-            if (m_selectedSpriteSlot < 0 || m_selectedSpriteSlot >= MAX_SPRITES_PER_FRAME) {
-                statusBar()->showMessage("Select a sprite slot before editing zones.", 2000);
+            if (m_selectedSpriteZoneIndex < 0 ||
+                m_selectedSpriteZoneIndex >= static_cast<int>(m_spriteZones.size())) {
+                statusBar()->showMessage("Select a sprite zone before editing.", 2000);
                 return;
+            }
+            const SpriteZoneGroup& zone = m_spriteZones[static_cast<std::size_t>(m_selectedSpriteZoneIndex)];
+            if (zone.slotIndices.empty()) {
+                statusBar()->showMessage("Select a sprite zone before editing.", 2000);
+                return;
+            }
+            if (std::find(zone.slotIndices.begin(), zone.slotIndices.end(), m_selectedSpriteSlot) == zone.slotIndices.end()) {
+                m_selectedSpriteSlot = zone.slotIndices.front();
             }
             const bool useBottom = m_showOriginalFrame && !reference.empty();
             if (useBottom) {
@@ -11234,19 +11771,20 @@ void MainWindow::handleToolDrag(bool isFrame,
         const int right = std::max(x0, x1);
         const int bottom = std::max(y0, y1);
         cv::Mat previewMask(cv::Size(baseWidth, baseHeight), CV_8UC1, cv::Scalar(0));
-        cv::rectangle(previewMask, cv::Rect(left, top, right - left + 1, bottom - top + 1), cv::Scalar(1), 1);
+        cv::rectangle(previewMask, cv::Rect(left, top, right - left + 1, bottom - top + 1), cv::Scalar(1), cv::FILLED);
         cv::Mat otherMask(cv::Size(baseWidth, baseHeight), CV_8UC1, cv::Scalar(0));
         const std::vector<SpriteZoneGroup> zones = buildSpriteZonesForFrame(index);
-        for (const SpriteZoneGroup& zone : zones) {
-            if (std::find(zone.slotIndices.begin(), zone.slotIndices.end(), m_selectedSpriteSlot) != zone.slotIndices.end()) {
+        for (std::size_t i = 0; i < zones.size(); ++i) {
+            if (m_selectedSpriteZoneIndex >= 0 && static_cast<int>(i) == m_selectedSpriteZoneIndex) {
                 continue;
             }
+            const SpriteZoneGroup& zone = zones[i];
             cv::Rect rect(zone.rect.x(), zone.rect.y(), zone.rect.width(), zone.rect.height());
             rect &= cv::Rect(0, 0, baseWidth, baseHeight);
             if (rect.width <= 0 || rect.height <= 0) {
                 continue;
             }
-            cv::rectangle(otherMask, rect, cv::Scalar(1), 1);
+            cv::rectangle(otherMask, rect, cv::Scalar(1), cv::FILLED);
         }
         QRect region;
         if (useBottom) {
@@ -11867,8 +12405,15 @@ void MainWindow::handleToolRelease(bool isFrame,
         const QPoint baseStart = m_frameStart;
         const QPoint baseEnd(mappedX, mappedY);
         const QSize baseSize(baseWidth, baseHeight);
-        if (m_selectedSpriteSlot < 0 || m_selectedSpriteSlot >= MAX_SPRITES_PER_FRAME) {
-            statusBar()->showMessage("Select a sprite slot before editing zones.", 2000);
+        if (m_selectedSpriteZoneIndex < 0 ||
+            m_selectedSpriteZoneIndex >= static_cast<int>(m_spriteZones.size())) {
+            statusBar()->showMessage("Select a sprite zone before editing.", 2000);
+            m_frameHasStart = false;
+            m_frameDrawOnZone = false;
+            return;
+        }
+        const SpriteZoneGroup zone = m_spriteZones[static_cast<std::size_t>(m_selectedSpriteZoneIndex)];
+        if (zone.slotIndices.empty()) {
             m_frameHasStart = false;
             m_frameDrawOnZone = false;
             return;
@@ -11888,15 +12433,17 @@ void MainWindow::handleToolRelease(bool isFrame,
             const int top = std::min(mappedStart.y(), mappedEnd.y());
             const int right = std::max(mappedStart.x(), mappedEnd.x());
             const int bottom = std::max(mappedStart.y(), mappedEnd.y());
-            const std::size_t bboxIndex = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME * 4 +
-                static_cast<std::size_t>(m_selectedSpriteSlot) * 4;
-            if (bboxIndex + 3 >= m_frameSpriteBBoxes.size()) {
-                continue;
+            for (int slot : zone.slotIndices) {
+                const std::size_t bboxIndex = static_cast<std::size_t>(frameIndex) * MAX_SPRITES_PER_FRAME * 4 +
+                    static_cast<std::size_t>(slot) * 4;
+                if (bboxIndex + 3 >= m_frameSpriteBBoxes.size()) {
+                    continue;
+                }
+                m_frameSpriteBBoxes[bboxIndex] = static_cast<uint16_t>(std::clamp(left, 0, targetSize.width() - 1));
+                m_frameSpriteBBoxes[bboxIndex + 1] = static_cast<uint16_t>(std::clamp(top, 0, targetSize.height() - 1));
+                m_frameSpriteBBoxes[bboxIndex + 2] = static_cast<uint16_t>(std::clamp(right, 0, targetSize.width() - 1));
+                m_frameSpriteBBoxes[bboxIndex + 3] = static_cast<uint16_t>(std::clamp(bottom, 0, targetSize.height() - 1));
             }
-            m_frameSpriteBBoxes[bboxIndex] = static_cast<uint16_t>(std::clamp(left, 0, targetSize.width() - 1));
-            m_frameSpriteBBoxes[bboxIndex + 1] = static_cast<uint16_t>(std::clamp(top, 0, targetSize.height() - 1));
-            m_frameSpriteBBoxes[bboxIndex + 2] = static_cast<uint16_t>(std::clamp(right, 0, targetSize.width() - 1));
-            m_frameSpriteBBoxes[bboxIndex + 3] = static_cast<uint16_t>(std::clamp(bottom, 0, targetSize.height() - 1));
             updateFramePreviewAt(frameIndex);
         }
         m_frameHasStart = false;
