@@ -72,7 +72,7 @@ jobs:
         env:
           BUILD_TYPE: Release
         run: |
-          find platforms -name "build.sh" -o -name "external.sh" -exec chmod +x {} \;
+          find platforms \( -name "build.sh" -o -name "external.sh" \) -exec chmod +x {} \;
           ./platforms/${{ matrix.platform }}/${{ matrix.arch }}/build.sh
 
       - name: Upload artifacts
