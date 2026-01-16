@@ -5,6 +5,7 @@
 - It must not change cROM/cROMc data formats.
 - The editor must remain a drop-in replacement for the legacy app.
 - The new editor targets Serum V2 only; libserum still supports V1 for other clients.
+- The editor UX/workflow documentation lives in `handbook.md`.
 
 ## Data format constraints (legacy compatibility)
 - Do not alter the binary layout of cROM/cROMc files.

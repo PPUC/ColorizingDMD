@@ -78,6 +78,9 @@ jobs:
         run: |
           $root = Join-Path $env:GITHUB_WORKSPACE "vcpkg"
           if (-not (Test-Path "$root\\.git")) {
+            if (Test-Path $root) {
+              Remove-Item -Recurse -Force $root
+            }
             git clone https://github.com/microsoft/vcpkg.git $root
           }
           & "$root/bootstrap-vcpkg.bat"
