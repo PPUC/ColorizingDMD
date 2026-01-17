@@ -46,11 +46,53 @@ jobs:
           sudo apt-get install -y cmake ninja-build pkg-config qt6-base-dev qt6-base-dev-tools libqt6opengl6-dev libopencv-dev
 
       - if: matrix.platform == 'macos'
+        name: Prepare Homebrew cache paths
+        run: |
+          echo "HOMEBREW_CACHE=$(brew --cache)" >> "$GITHUB_ENV"
+          echo "HOMEBREW_PREFIX=$(brew --prefix)" >> "$GITHUB_ENV"
+
+      - if: matrix.platform == 'macos'
+        name: Restore Homebrew cache (downloads)
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.HOMEBREW_CACHE }}
+          key: brew-${{ runner.os }}-${{ matrix.arch }}-downloads-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            brew-${{ runner.os }}-${{ matrix.arch }}-downloads-
+
+      - if: matrix.platform == 'macos'
+        name: Restore Homebrew cache (cellar)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            /opt/homebrew/Cellar
+            /usr/local/Cellar
+          key: brew-${{ runner.os }}-${{ matrix.arch }}-cellar-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            brew-${{ runner.os }}-${{ matrix.arch }}-cellar-
+
+      - if: matrix.platform == 'macos'
         name: Install dependencies (macOS)
         run: |
           brew install qt opencv
           echo "CMAKE_PREFIX_PATH=$(brew --prefix qt)" >> "$GITHUB_ENV"
           echo "OpenCV_DIR=$(brew --prefix opencv)/lib/cmake/opencv4" >> "$GITHUB_ENV"
+
+      - if: matrix.platform == 'macos'
+        name: Save Homebrew cache (downloads)
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.HOMEBREW_CACHE }}
+          key: brew-${{ runner.os }}-${{ matrix.arch }}-downloads-${{ hashFiles('.github/workflows/ci.yml') }}
+
+      - if: matrix.platform == 'macos'
+        name: Save Homebrew cache (cellar)
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            /opt/homebrew/Cellar
+            /usr/local/Cellar
+          key: brew-${{ runner.os }}-${{ matrix.arch }}-cellar-${{ hashFiles('.github/workflows/ci.yml') }}
 
       - if: matrix.platform == 'win'
         name: Prepare vcpkg cache dir
@@ -59,24 +101,57 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\\vcpkg" | Out-Null
 
       - if: matrix.platform == 'win'
-        name: Cache vcpkg (Windows)
-        uses: actions/cache@v4
+        name: Restore vcpkg cache (Windows installed)
+        uses: actions/cache/restore@v4
         with:
-          path: |
-            vcpkg/installed
-            vcpkg/buildtrees
-            vcpkg/packages
-            vcpkg/downloads
-            vcpkg/registry
-          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+          path: vcpkg/installed
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-installed-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
           restore-keys: |
-            vcpkg-${{ runner.os }}-${{ matrix.arch }}-
+            vcpkg-${{ runner.os }}-${{ matrix.arch }}-installed-dynamic-
+
+      - if: matrix.platform == 'win'
+        name: Restore vcpkg cache (Windows downloads)
+        uses: actions/cache/restore@v4
+        with:
+          path: vcpkg/downloads
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-downloads-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ matrix.arch }}-downloads-dynamic-
+
+      - if: matrix.platform == 'win'
+        name: Restore vcpkg cache (Windows buildtrees)
+        uses: actions/cache/restore@v4
+        with:
+          path: vcpkg/buildtrees
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-buildtrees-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ matrix.arch }}-buildtrees-dynamic-
+
+      - if: matrix.platform == 'win'
+        name: Restore vcpkg cache (Windows packages)
+        uses: actions/cache/restore@v4
+        with:
+          path: vcpkg/packages
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-packages-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ matrix.arch }}-packages-dynamic-
+
+      - if: matrix.platform == 'win'
+        name: Restore vcpkg cache (Windows registry)
+        uses: actions/cache/restore@v4
+        with:
+          path: vcpkg/registry
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-registry-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ matrix.arch }}-registry-dynamic-
 
       - if: matrix.platform == 'win'
         name: Setup vcpkg (Windows)
         shell: pwsh
         run: |
           $root = Join-Path $env:GITHUB_WORKSPACE "vcpkg"
+          $binaryCache = Join-Path $env:GITHUB_WORKSPACE "vcpkg-binary-cache"
+          New-Item -ItemType Directory -Force -Path $binaryCache | Out-Null
           if (-not (Test-Path "$root\\.git")) {
             if (Test-Path $root) {
               Remove-Item -Recurse -Force $root
@@ -86,10 +161,120 @@ jobs:
           & "$root/bootstrap-vcpkg.bat"
           $triplet = if ("${{ matrix.arch }}" -eq "x86") { "x86-windows" } else { "x64-windows" }
           $staticTriplet = if ("${{ matrix.arch }}" -eq "x86") { "x86-windows-static" } else { "x64-windows-static" }
-          & "$root/vcpkg.exe" install opencv qtbase --triplet $triplet
-          & "$root/vcpkg.exe" install opencv qtbase --triplet $staticTriplet
           "VCPKG_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VCPKG_DEFAULT_TRIPLET=$triplet" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "VCPKG_DEFAULT_BINARY_CACHE=$binaryCache" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - if: matrix.platform == 'win'
+        name: Restore vcpkg binary cache (Windows)
+        uses: actions/cache/restore@v4
+        with:
+          path: vcpkg-binary-cache
+          key: vcpkg-bin-${{ runner.os }}-${{ matrix.arch }}-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+          restore-keys: |
+            vcpkg-bin-${{ runner.os }}-${{ matrix.arch }}-dynamic-
+
+      - if: matrix.platform == 'win'
+        name: vcpkg install (Windows dynamic)
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:GITHUB_WORKSPACE "vcpkg"
+          $env:VCPKG_DEFAULT_BINARY_CACHE = Join-Path $env:GITHUB_WORKSPACE "vcpkg-binary-cache"
+          $triplet = if ("${{ matrix.arch }}" -eq "x86") { "x86-windows" } else { "x64-windows" }
+          & "$root/vcpkg.exe" install opencv qtbase --triplet $triplet
+
+      - if: matrix.platform == 'win'
+        name: Save vcpkg cache (Windows installed)
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg/installed
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-installed-dynamic-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+
+      - if: matrix.platform == 'win'
+        name: Save vcpkg cache (Windows downloads)
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg/downloads
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-downloads-dynamic-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+
+      - if: matrix.platform == 'win'
+        name: Save vcpkg cache (Windows buildtrees)
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg/buildtrees
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-buildtrees-dynamic-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+
+      - if: matrix.platform == 'win'
+        name: Save vcpkg cache (Windows packages)
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg/packages
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-packages-dynamic-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+
+      - if: matrix.platform == 'win'
+        name: Save vcpkg cache (Windows registry)
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg/registry
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-registry-dynamic-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+
+      - if: matrix.platform == 'win'
+        name: Save vcpkg binary cache (Windows)
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg-binary-cache
+          key: vcpkg-bin-${{ runner.os }}-${{ matrix.arch }}-dynamic-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+
+      - if: matrix.platform == 'win'
+        name: vcpkg install (Windows static)
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:GITHUB_WORKSPACE "vcpkg"
+          $env:VCPKG_DEFAULT_BINARY_CACHE = Join-Path $env:GITHUB_WORKSPACE "vcpkg-binary-cache"
+          $staticTriplet = if ("${{ matrix.arch }}" -eq "x86") { "x86-windows-static" } else { "x64-windows-static" }
+          & "$root/vcpkg.exe" install opencv qtbase --triplet $staticTriplet
+
+      - if: matrix.platform == 'win'
+        name: Save vcpkg cache (Windows installed, static)
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg/installed
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-installed-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+
+      - if: matrix.platform == 'win'
+        name: Save vcpkg cache (Windows downloads, static)
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg/downloads
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-downloads-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+
+      - if: matrix.platform == 'win'
+        name: Save vcpkg cache (Windows buildtrees, static)
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg/buildtrees
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-buildtrees-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+
+      - if: matrix.platform == 'win'
+        name: Save vcpkg cache (Windows packages, static)
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg/packages
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-packages-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+
+      - if: matrix.platform == 'win'
+        name: Save vcpkg cache (Windows registry, static)
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg/registry
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-registry-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+
+      - if: matrix.platform == 'win'
+        name: Save vcpkg binary cache (Windows static)
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg-binary-cache
+          key: vcpkg-bin-${{ runner.os }}-${{ matrix.arch }}-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
 
       - if: matrix.platform == 'win'
         name: Add msbuild (Windows)
