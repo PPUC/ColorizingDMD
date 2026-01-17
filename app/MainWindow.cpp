@@ -3440,12 +3440,12 @@ MainWindow::MainWindow(QWidget* parent)
         const int baseWidth = displayRect.isValid() ? displayRect.width() : sprite->cols;
         const int baseHeight = displayRect.isValid() ? displayRect.height() : sprite->rows;
         cv::Mat originalRef;
-        if (index >= 0 && index < static_cast<int>(m_spriteOriginals.size())) {
+        if (const cv::Mat* originalSource = spriteOriginalForDisplay(index)) {
             if (contentRect.isValid() && !contentRect.isEmpty()) {
-                originalRef = m_spriteOriginals[static_cast<std::size_t>(index)](
+                originalRef = (*originalSource)(
                     cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height()));
             } else {
-                originalRef = m_spriteOriginals[static_cast<std::size_t>(index)];
+                originalRef = *originalSource;
             }
         }
         cv::Mat original = originalRef.empty() ? cv::Mat() : buildOriginalFrame(originalRef);
@@ -3737,6 +3737,10 @@ MainWindow::MainWindow(QWidget* parent)
         m_showOriginalFrame = enabled;
         updateFrameCanvasImage(m_framesList->currentRow());
         updateMaskPreviewForFrame(m_framesList->currentRow());
+    });
+    connect(m_spritesCanvas, &CanvasWidget::originalToggled, this, [this](bool enabled) {
+        m_showSpriteOriginal = enabled;
+        updateSpriteCanvasImage(m_spritesList ? m_spritesList->currentRow() : -1);
     });
     connect(m_framesCanvas, &CanvasWidget::hdToggled, this, [this](bool enabled) {
         setHdMode(enabled);
@@ -6282,44 +6286,39 @@ cv::Mat* MainWindow::activeSpriteImageMutable(int index)
     return m_spriteStore->atMutable(index);
 }
 
+const cv::Mat* MainWindow::spriteOriginalForDisplay(int index) const
+{
+    if (index < 0) {
+        return nullptr;
+    }
+    if (index < static_cast<int>(m_spriteOriginals.size()) &&
+        !m_spriteOriginals[static_cast<std::size_t>(index)].empty()) {
+        return &m_spriteOriginals[static_cast<std::size_t>(index)];
+    }
+    return nullptr;
+}
+
 QRect MainWindow::spriteDisplayRect(int index, const cv::Mat& image) const
 {
     if (image.empty()) {
         return QRect();
     }
-    if (m_useHdSprite) {
-        return QRect(0, 0, image.cols, image.rows);
-    }
     QRect rect = spriteContentRect(index);
     if (!rect.isValid() || rect.isEmpty()) {
         return QRect(0, 0, image.cols, image.rows);
     }
-    int scaleX = 1;
-    int scaleY = 1;
     if (m_useHdSprite) {
-        int baseW = rect.width();
-        int baseH = rect.height();
-        if (index >= 0 && index < static_cast<int>(m_spriteOriginals.size())) {
-            const cv::Mat& original = m_spriteOriginals[static_cast<std::size_t>(index)];
-            if (!original.empty()) {
-                baseW = original.cols;
-                baseH = original.rows;
-            }
-        }
-        if (baseW > 0 && baseH > 0) {
-            scaleX = std::max(1, image.cols / baseW);
-            scaleY = std::max(1, image.rows / baseH);
+        const cv::Mat* original = spriteOriginalForDisplay(index);
+        if (original && original->cols > 0 && original->rows > 0) {
+            const double scaleX = static_cast<double>(image.cols) / original->cols;
+            const double scaleY = static_cast<double>(image.rows) / original->rows;
+            rect = QRect(static_cast<int>(std::lround(rect.x() * scaleX)),
+                         static_cast<int>(std::lround(rect.y() * scaleY)),
+                         static_cast<int>(std::lround(rect.width() * scaleX)),
+                         static_cast<int>(std::lround(rect.height() * scaleY)));
         }
     }
-    QRect scaled(rect.x() * scaleX,
-                 rect.y() * scaleY,
-                 rect.width() * scaleX,
-                 rect.height() * scaleY);
-    scaled = scaled.intersected(QRect(0, 0, image.cols, image.rows));
-    if (scaled.isEmpty()) {
-        return QRect(0, 0, image.cols, image.rows);
-    }
-    return scaled;
+    return rect.intersected(QRect(0, 0, image.cols, image.rows));
 }
 
 QRect MainWindow::spriteContentRect(int index) const
@@ -6330,29 +6329,27 @@ QRect MainWindow::spriteContentRect(int index) const
     const cv::Mat* sprite = (m_spriteStore && index >= 0) ? m_spriteStore->at(index) : nullptr;
     int width = sprite ? sprite->cols : MAX_SPRITE_WIDTH;
     int height = sprite ? sprite->rows : MAX_SPRITE_HEIGHT;
-    if (index >= 0 && index < static_cast<int>(m_spriteOriginals.size())) {
-        const cv::Mat& original = m_spriteOriginals[static_cast<std::size_t>(index)];
-        if (!original.empty()) {
-            width = original.cols;
-            height = original.rows;
-            int minx = width;
-            int miny = height;
-            int maxx = -1;
-            int maxy = -1;
-            for (int y = 0; y < original.rows; ++y) {
-                const uint8_t* row = original.ptr<uint8_t>(y);
-                for (int x = 0; x < original.cols; ++x) {
-                    if (row[x] != 255) {
-                        minx = std::min(minx, x);
-                        miny = std::min(miny, y);
-                        maxx = std::max(maxx, x);
-                        maxy = std::max(maxy, y);
-                    }
+    const cv::Mat* original = spriteOriginalForDisplay(index);
+    if (original && !original->empty()) {
+        width = original->cols;
+        height = original->rows;
+        int minx = width;
+        int miny = height;
+        int maxx = -1;
+        int maxy = -1;
+        for (int y = 0; y < original->rows; ++y) {
+            const uint8_t* row = original->ptr<uint8_t>(y);
+            for (int x = 0; x < original->cols; ++x) {
+                if (row[x] != 255) {
+                    minx = std::min(minx, x);
+                    miny = std::min(miny, y);
+                    maxx = std::max(maxx, x);
+                    maxy = std::max(maxy, y);
                 }
             }
-            if (maxx >= minx && maxy >= miny) {
-                return QRect(minx, miny, maxx - minx + 1, maxy - miny + 1);
-            }
+        }
+        if (maxx >= minx && maxy >= miny) {
+            return QRect(minx, miny, maxx - minx + 1, maxy - miny + 1);
         }
     }
     if (width <= 0 || height <= 0) {
@@ -6527,6 +6524,7 @@ void MainWindow::setFrameCanvasFromComposed(int index, const cv::Mat& composed)
         m_framesCanvas->setImage(composed);
         m_framesCanvas->canvas()->setGridSegments(0, 0, 0);
         m_framesCanvas->canvas()->setGridScales(1, 1);
+        m_framesCanvas->canvas()->setGridRegions(QRect(), QRect());
         const cv::Mat spriteOutline = buildSpriteCoverageMask(index, m_useHdFrame);
         if (!spriteOutline.empty()) {
             m_framesCanvas->canvas()->setTertiaryMaskOutline(spriteOutline, QColor(255, 220, 0));
@@ -6549,6 +6547,11 @@ void MainWindow::setFrameCanvasFromComposed(int index, const cv::Mat& composed)
     m_framesCanvas->canvas()->setGridScales(1, bottomScale);
     FrameLayout layout = BuildFrameLayout(composed, displayOriginal);
     const QRect topRegion(layout.topX, 0, layout.topWidth, layout.topHeight);
+    const QRect bottomRegion(layout.bottomX,
+                             layout.topHeight + gapPixels,
+                             layout.bottomWidth,
+                             layout.bottomHeight);
+    m_framesCanvas->canvas()->setGridRegions(topRegion, bottomRegion);
     const cv::Mat spriteOutline = buildSpriteCoverageMask(index, m_useHdFrame);
     if (!spriteOutline.empty()) {
         m_framesCanvas->canvas()->setTertiaryMaskOutline(spriteOutline, QColor(255, 220, 0), topRegion);
@@ -6601,12 +6604,12 @@ void MainWindow::updateSpriteCanvasImage(int index)
         }
     }
     cv::Mat originalRef;
-    if (index >= 0 && index < static_cast<int>(m_spriteOriginals.size())) {
+    if (const cv::Mat* originalSource = spriteOriginalForDisplay(index)) {
         if (contentRect.isValid() && !contentRect.isEmpty()) {
-            originalRef = m_spriteOriginals[static_cast<std::size_t>(index)](
+            originalRef = (*originalSource)(
                 cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height())).clone();
         } else {
-            originalRef = m_spriteOriginals[static_cast<std::size_t>(index)].clone();
+            originalRef = originalSource->clone();
         }
     }
     cv::Mat original;
@@ -6622,8 +6625,9 @@ void MainWindow::updateSpriteCanvasImage(int index)
         }
         original = buildOriginalFrame(cleaned);
     }
-    if (!original.empty()) {
-        cv::Mat displayOriginal = BuildDisplayOriginal(original, display.size());
+    if (!original.empty() && m_showSpriteOriginal) {
+        const cv::Size originalTargetSize = m_useHdSprite ? original.size() : display.size();
+        cv::Mat displayOriginal = BuildDisplayOriginal(original, originalTargetSize);
         const QColor gap = m_spritesCanvas->palette().color(QPalette::Window);
         cv::Mat combined = buildCombinedFrame(display,
                                               displayOriginal,
@@ -6637,10 +6641,18 @@ void MainWindow::updateSpriteCanvasImage(int index)
         const int gapPixels = FrameGapForWidth(display.cols);
         m_spritesCanvas->canvas()->setGridSegments(display.rows, gapPixels, displayOriginal.rows);
         m_spritesCanvas->canvas()->setGridScales(1, bottomScale);
+        FrameLayout layout = BuildFrameLayout(display, displayOriginal);
+        const QRect topRegion(layout.topX, 0, layout.topWidth, layout.topHeight);
+        const QRect bottomRegion(layout.bottomX,
+                                 layout.topHeight + gapPixels,
+                                 layout.bottomWidth,
+                                 layout.bottomHeight);
+        m_spritesCanvas->canvas()->setGridRegions(topRegion, bottomRegion);
     } else {
         m_spritesCanvas->setImage(display);
         m_spritesCanvas->canvas()->setGridSegments(0, 0, 0);
         m_spritesCanvas->canvas()->setGridScales(1, 1);
+        m_spritesCanvas->canvas()->setGridRegions(QRect(), QRect());
     }
     if (m_spriteDetAreaMode) {
         updateSpriteDetAreaOverlay(index);
@@ -7391,20 +7403,27 @@ void MainWindow::updateSpriteDetAreaOverlay(int index)
         m_spritesCanvas->canvas()->clearMaskOutline();
         return;
     }
-    const cv::Mat* sprite = (m_spriteStore && index >= 0) ? m_spriteStore->at(index) : nullptr;
-    if (!sprite || sprite->empty()) {
+    const cv::Mat* displaySprite = activeSpriteImage(index);
+    if (!displaySprite || displaySprite->empty()) {
         m_spritesCanvas->canvas()->clearMaskOutline();
         return;
     }
     const QRect contentRect = spriteContentRect(index);
     const int offsetX = contentRect.isValid() ? contentRect.x() : 0;
     const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
-    const int baseWidth = contentRect.isValid() ? contentRect.width() : sprite->cols;
-    const int baseHeight = contentRect.isValid() ? contentRect.height() : sprite->rows;
+    QRect displayRect = spriteDisplayRect(index, *displaySprite);
+    if (!displayRect.isValid() || displayRect.isEmpty()) {
+        displayRect = QRect(0, 0, displaySprite->cols, displaySprite->rows);
+    }
+    const int cropWidth = contentRect.isValid() ? contentRect.width() : displaySprite->cols;
+    const int cropHeight = contentRect.isValid() ? contentRect.height() : displaySprite->rows;
     cv::Mat originalRef;
-    if (index >= 0 && index < static_cast<int>(m_spriteOriginals.size())) {
-        originalRef = m_spriteOriginals[static_cast<std::size_t>(index)](
-            cv::Rect(offsetX, offsetY, baseWidth, baseHeight));
+    if (const cv::Mat* originalSource = spriteOriginalForDisplay(index)) {
+        cv::Rect crop(offsetX, offsetY, cropWidth, cropHeight);
+        crop &= cv::Rect(0, 0, originalSource->cols, originalSource->rows);
+        if (crop.width > 0 && crop.height > 0) {
+            originalRef = (*originalSource)(crop).clone();
+        }
     }
     if (originalRef.empty()) {
         m_spritesCanvas->canvas()->clearMaskOutline();
@@ -7424,14 +7443,21 @@ void MainWindow::updateSpriteDetAreaOverlay(int index)
         m_spritesCanvas->canvas()->clearMaskOutline();
         return;
     }
-    cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseWidth, baseHeight));
-    FrameLayout layout = BuildFrameLayout(baseWidth, baseHeight,
+    const cv::Size originalTargetSize = m_useHdSprite ? original.size()
+                                                      : cv::Size(displayRect.width(), displayRect.height());
+    cv::Mat displayOriginal = BuildDisplayOriginal(original, originalTargetSize);
+    FrameLayout layout = BuildFrameLayout(displayRect.width(), displayRect.height(),
                                           displayOriginal.cols, displayOriginal.rows);
     const int gap = FrameGapForWidth(layout.topWidth);
-    QRect region(layout.bottomX,
-                 layout.topHeight + gap,
-                 layout.bottomWidth,
-                 layout.bottomHeight);
+    QRect region;
+    if (m_showSpriteOriginal && !displayOriginal.empty()) {
+        region = QRect(layout.bottomX,
+                       layout.topHeight + gap,
+                       layout.bottomWidth,
+                       layout.bottomHeight);
+    } else {
+        region = QRect(layout.topX, 0, layout.topWidth, layout.topHeight);
+    }
     const cv::Size size = original.size();
     cv::Mat allMask(size, CV_8UC1, cv::Scalar(0));
     cv::Mat selectedMask(size, CV_8UC1, cv::Scalar(0));
@@ -7492,9 +7518,9 @@ void MainWindow::updateSpriteDetAreaOverlay(int index)
         if (!hasDifferentValid && area != firstValidIndex && rect == firstValidRect) {
             continue;
         }
-        cv::rectangle(allMask, rect, cv::Scalar(1), 1);
+        cv::rectangle(allMask, rect, cv::Scalar(1), cv::FILLED);
         if (area == m_spriteDetAreaIndex) {
-            cv::rectangle(selectedMask, rect, cv::Scalar(1), 1);
+            cv::rectangle(selectedMask, rect, cv::Scalar(1), cv::FILLED);
             selectedValid = true;
         }
     }
@@ -12014,6 +12040,7 @@ void MainWindow::showSpriteAtIndex(int index)
     if (m_spritesCanvas) {
         m_spritesCanvas->setHdButtonEnabled(hasHd);
         m_spritesCanvas->setHdButtonChecked(m_useHdSprite);
+        m_spritesCanvas->setOriginalVisible(m_showSpriteOriginal);
     }
     if (index >= 0) {
         m_spritesCanvas->canvas()->clearPreviewImage();
@@ -12389,10 +12416,10 @@ void MainWindow::handleToolPress(bool isFrame,
         const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
         const int baseWidth = contentRect.isValid() ? contentRect.width() : spriteImage->cols;
         const int baseHeight = contentRect.isValid() ? contentRect.height() : spriteImage->rows;
-        cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-            ? m_spriteOriginals[static_cast<std::size_t>(index)](
-                cv::Rect(offsetX, offsetY, baseWidth, baseHeight))
-            : cv::Mat();
+        cv::Mat originalRef;
+        if (const cv::Mat* originalSource = spriteOriginalForDisplay(index)) {
+            originalRef = (*originalSource)(cv::Rect(offsetX, offsetY, baseWidth, baseHeight));
+        }
         if (originalRef.empty()) {
             return;
         }
@@ -12454,12 +12481,12 @@ void MainWindow::handleToolPress(bool isFrame,
             ? QSize(displayRect.width(), displayRect.height())
             : QSize(spriteImage && !spriteImage->empty() ? spriteImage->cols : map->cols,
                     spriteImage && !spriteImage->empty() ? spriteImage->rows : map->rows);
-        cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-            ? (contentRect.isValid()
-                ? m_spriteOriginals[static_cast<std::size_t>(index)](
-                    cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height()))
-                : m_spriteOriginals[static_cast<std::size_t>(index)])
-            : cv::Mat();
+        cv::Mat originalRef;
+        if (const cv::Mat* originalSource = spriteOriginalForDisplay(index)) {
+            originalRef = contentRect.isValid()
+                ? (*originalSource)(cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height()))
+                : *originalSource;
+        }
         cv::Mat original = originalRef.empty() ? cv::Mat() : buildOriginalFrame(originalRef);
         cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseSize.width(), baseSize.height()));
         FrameLayout layout = BuildFrameLayout(baseSize.width(), baseSize.height(),
@@ -12475,9 +12502,7 @@ void MainWindow::handleToolPress(bool isFrame,
         if (mapped.x() < 0 || mapped.y() < 0 || mapped.x() >= map->cols || mapped.y() >= map->rows) {
             return;
         }
-        const cv::Mat* spriteMask = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-            ? &m_spriteOriginals[static_cast<std::size_t>(index)]
-            : nullptr;
+        const cv::Mat* spriteMask = spriteOriginalForDisplay(index);
         cv::Mat maskScaled;
         if (spriteMask && !spriteMask->empty()) {
             if (spriteMask->size() != map->size()) {
@@ -12941,10 +12966,10 @@ void MainWindow::handleToolDrag(bool isFrame,
         const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
         const int baseWidth = contentRect.isValid() ? contentRect.width() : spriteImage->cols;
         const int baseHeight = contentRect.isValid() ? contentRect.height() : spriteImage->rows;
-        cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-            ? m_spriteOriginals[static_cast<std::size_t>(index)](
-                cv::Rect(offsetX, offsetY, baseWidth, baseHeight))
-            : cv::Mat();
+        cv::Mat originalRef;
+        if (const cv::Mat* originalSource = spriteOriginalForDisplay(index)) {
+            originalRef = (*originalSource)(cv::Rect(offsetX, offsetY, baseWidth, baseHeight));
+        }
         if (originalRef.empty()) {
             return;
         }
@@ -12984,7 +13009,7 @@ void MainWindow::handleToolDrag(bool isFrame,
         const int bottom = std::max(y0, y1);
         const cv::Rect rect(left, top, right - left + 1, bottom - top + 1);
         cv::Mat previewMask(original.size(), CV_8UC1, cv::Scalar(0));
-        cv::rectangle(previewMask, rect, cv::Scalar(1), 1);
+        cv::rectangle(previewMask, rect, cv::Scalar(1), cv::FILLED);
         cv::Mat otherMask(original.size(), CV_8UC1, cv::Scalar(0));
         const std::size_t base = static_cast<std::size_t>(index) * MAX_SPRITE_DETECT_AREAS * 4;
         for (int area = 0; area < MAX_SPRITE_DETECT_AREAS; ++area) {
@@ -13008,7 +13033,7 @@ void MainWindow::handleToolDrag(bool isFrame,
             if (rect.width <= 0 || rect.height <= 0) {
                 continue;
             }
-            cv::rectangle(otherMask, rect, cv::Scalar(1), 1);
+            cv::rectangle(otherMask, rect, cv::Scalar(1), cv::FILLED);
         }
         QRect region(layout.bottomX,
                      layout.topHeight + gap,
@@ -13041,12 +13066,12 @@ void MainWindow::handleToolDrag(bool isFrame,
             ? QSize(displayRect.width(), displayRect.height())
             : QSize(spriteImage && !spriteImage->empty() ? spriteImage->cols : map->cols,
                     spriteImage && !spriteImage->empty() ? spriteImage->rows : map->rows);
-        cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-            ? (contentRect.isValid()
-                ? m_spriteOriginals[static_cast<std::size_t>(index)](
-                    cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height()))
-                : m_spriteOriginals[static_cast<std::size_t>(index)])
-            : cv::Mat();
+        cv::Mat originalRef;
+        if (const cv::Mat* originalSource = spriteOriginalForDisplay(index)) {
+            originalRef = contentRect.isValid()
+                ? (*originalSource)(cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height()))
+                : *originalSource;
+        }
         cv::Mat original = originalRef.empty() ? cv::Mat() : buildOriginalFrame(originalRef);
         cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseSize.width(), baseSize.height()));
         FrameLayout layout = BuildFrameLayout(baseSize.width(), baseSize.height(),
@@ -13062,9 +13087,7 @@ void MainWindow::handleToolDrag(bool isFrame,
         if (mapped.x() < 0 || mapped.y() < 0 || mapped.x() >= map->cols || mapped.y() >= map->rows) {
             return;
         }
-        const cv::Mat* spriteMask = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-            ? &m_spriteOriginals[static_cast<std::size_t>(index)]
-            : nullptr;
+        const cv::Mat* spriteMask = spriteOriginalForDisplay(index);
         cv::Mat maskScaled;
         if (spriteMask && !spriteMask->empty()) {
             if (spriteMask->size() != map->size()) {
@@ -13101,12 +13124,12 @@ void MainWindow::handleToolDrag(bool isFrame,
             cv::Mat base = baseFull(roi).clone();
             cv::Mat previewMask = previewMaskFull(roi).clone();
             cv::Mat preview = buildMaskPreview(base, previewMask, cv::Vec3b(0, 200, 255));
-            cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-                ? (contentRect.isValid()
-                    ? m_spriteOriginals[static_cast<std::size_t>(index)](
-                        cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height())).clone()
-                    : m_spriteOriginals[static_cast<std::size_t>(index)].clone())
-                : cv::Mat();
+            cv::Mat originalRef;
+            if (const cv::Mat* originalSource = spriteOriginalForDisplay(index)) {
+                originalRef = contentRect.isValid()
+                    ? (*originalSource)(cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height())).clone()
+                    : originalSource->clone();
+            }
             cv::Mat original;
             if (!originalRef.empty()) {
                 cv::Mat cleaned = originalRef.clone();
@@ -13567,10 +13590,10 @@ void MainWindow::handleToolRelease(bool isFrame,
         const int offsetY = contentRect.isValid() ? contentRect.y() : 0;
         const int baseWidth = contentRect.isValid() ? contentRect.width() : spriteImage->cols;
         const int baseHeight = contentRect.isValid() ? contentRect.height() : spriteImage->rows;
-        cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-            ? m_spriteOriginals[static_cast<std::size_t>(index)](
-                cv::Rect(offsetX, offsetY, baseWidth, baseHeight))
-            : cv::Mat();
+        cv::Mat originalRef;
+        if (const cv::Mat* originalSource = spriteOriginalForDisplay(index)) {
+            originalRef = (*originalSource)(cv::Rect(offsetX, offsetY, baseWidth, baseHeight));
+        }
         if (originalRef.empty()) {
             m_spriteHasStart = false;
             return;
@@ -13614,12 +13637,9 @@ void MainWindow::handleToolRelease(bool isFrame,
         const int height = bottom - top + 1;
         const int fullLeft = left + offsetX;
         const int fullTop = top + offsetY;
-        const int fullMaxX = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-            ? m_spriteOriginals[static_cast<std::size_t>(index)].cols - 1
-            : fullLeft + width - 1;
-        const int fullMaxY = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-            ? m_spriteOriginals[static_cast<std::size_t>(index)].rows - 1
-            : fullTop + height - 1;
+        const cv::Mat* originalSource = spriteOriginalForDisplay(index);
+        const int fullMaxX = originalSource ? originalSource->cols - 1 : fullLeft + width - 1;
+        const int fullMaxY = originalSource ? originalSource->rows - 1 : fullTop + height - 1;
         const int clippedLeft = std::clamp(fullLeft, 0, fullMaxX);
         const int clippedTop = std::clamp(fullTop, 0, fullMaxY);
         const int clippedWidth = std::clamp(width, 1, fullMaxX - clippedLeft + 1);
@@ -13667,12 +13687,12 @@ void MainWindow::handleToolRelease(bool isFrame,
             ? QSize(displayRect.width(), displayRect.height())
             : QSize(spriteImage && !spriteImage->empty() ? spriteImage->cols : map->cols,
                     spriteImage && !spriteImage->empty() ? spriteImage->rows : map->rows);
-        cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-            ? (contentRect.isValid()
-                ? m_spriteOriginals[static_cast<std::size_t>(index)](
-                    cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height()))
-                : m_spriteOriginals[static_cast<std::size_t>(index)])
-            : cv::Mat();
+        cv::Mat originalRef;
+        if (const cv::Mat* originalSource = spriteOriginalForDisplay(index)) {
+            originalRef = contentRect.isValid()
+                ? (*originalSource)(cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height()))
+                : *originalSource;
+        }
         cv::Mat original = originalRef.empty() ? cv::Mat() : buildOriginalFrame(originalRef);
         cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseSize.width(), baseSize.height()));
         FrameLayout layout = BuildFrameLayout(baseSize.width(), baseSize.height(),
@@ -13690,9 +13710,7 @@ void MainWindow::handleToolRelease(bool isFrame,
             m_spriteHasStart = false;
             return;
         }
-        const cv::Mat* spriteMask = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-            ? &m_spriteOriginals[static_cast<std::size_t>(index)]
-            : nullptr;
+        const cv::Mat* spriteMask = spriteOriginalForDisplay(index);
         cv::Mat maskScaled;
         if (spriteMask && !spriteMask->empty()) {
             if (spriteMask->size() != map->size()) {

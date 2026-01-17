@@ -143,6 +143,7 @@ private:
     void updateFrameUsageHighlights(int frameIndex);
     const cv::Mat* activeSpriteImage(int index) const;
     cv::Mat* activeSpriteImageMutable(int index);
+    const cv::Mat* spriteOriginalForDisplay(int index) const;
     QRect spriteDisplayRect(int index, const cv::Mat& image) const;
     void refreshRotationEditor();
     void refreshRotationList();
@@ -450,6 +451,7 @@ private:
     bool m_maskReorderActive = false;
     bool m_dynamicMaskReorderActive = false;
     bool m_showOriginalFrame = true;
+    bool m_showSpriteOriginal = true;
     bool m_frameDrawOnMask = false;
     bool m_frameDrawOnZone = false;
     bool m_backgroundMaskMode = false;

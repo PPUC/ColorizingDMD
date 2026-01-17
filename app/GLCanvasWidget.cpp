@@ -122,6 +122,15 @@ void GLCanvasWidget::setGridScales(int topScale, int bottomScale)
     update();
 }
 
+void GLCanvasWidget::setGridRegions(const QRect& topRegion, const QRect& bottomRegion)
+{
+    m_gridTopRegion = topRegion;
+    m_gridBottomRegion = bottomRegion;
+    m_gridHasTopRegion = topRegion.isValid() && !topRegion.isEmpty();
+    m_gridHasBottomRegion = bottomRegion.isValid() && !bottomRegion.isEmpty();
+    update();
+}
+
 void GLCanvasWidget::setMaskOutline(const cv::Mat& mask, const QColor& color, const QRect& region)
 {
     if (mask.empty()) {
@@ -283,14 +292,23 @@ void GLCanvasWidget::paintGL()
         painter.scale(m_zoom, m_zoom);
         const int w = m_image.cols;
         const int h = m_image.rows;
-        auto drawRegion = [&](int yStart, int yEnd, int scale) {
+        auto drawRegion = [&](int yStart, int yEnd, int scale, const QRect* regionOverride) {
             if (yEnd <= yStart) {
                 return;
             }
+            int xStart = 0;
+            int xEnd = w;
+            if (regionOverride && regionOverride->isValid() && !regionOverride->isEmpty()) {
+                xStart = std::clamp(regionOverride->x(), 0, w);
+                xEnd = std::clamp(regionOverride->x() + regionOverride->width(), 0, w);
+            }
+            if (xEnd <= xStart) {
+                return;
+            }
             painter.save();
-            painter.setClipRect(QRectF(-w / 2.0,
+            painter.setClipRect(QRectF(xStart - w / 2.0,
                                        yStart - h / 2.0,
-                                       w,
+                                       xEnd - xStart,
                                        yEnd - yStart));
             const double gapRatio = 0.5;
             const double cell = std::max(1, scale);
@@ -305,24 +323,26 @@ void GLCanvasWidget::paintGL()
             gridPen.setWidthF(lineWidth);
             gridPen.setCapStyle(Qt::SquareCap);
             painter.setPen(gridPen);
-            for (int x = 0; x <= w; x += step) {
+            for (int x = xStart; x <= xEnd; x += step) {
                 painter.drawLine(QPointF(x - w / 2.0, yStart - h / 2.0),
                                  QPointF(x - w / 2.0, yEnd - h / 2.0));
             }
             for (int y = yStart; y <= yEnd; y += step) {
-                painter.drawLine(QPointF(-w / 2.0, y - h / 2.0),
-                                 QPointF(w / 2.0, y - h / 2.0));
+                painter.drawLine(QPointF(xStart - w / 2.0, y - h / 2.0),
+                                 QPointF(xEnd - w / 2.0, y - h / 2.0));
             }
             painter.restore();
         };
         if (m_gridTopHeight > 0 && m_gridBottomHeight > 0 &&
             m_gridTopHeight + m_gridGap + m_gridBottomHeight <= h) {
-            drawRegion(0, m_gridTopHeight, m_gridTopScale);
+            drawRegion(0, m_gridTopHeight, m_gridTopScale,
+                       m_gridHasTopRegion ? &m_gridTopRegion : nullptr);
             drawRegion(m_gridTopHeight + m_gridGap,
                        m_gridTopHeight + m_gridGap + m_gridBottomHeight,
-                       m_gridBottomScale);
+                       m_gridBottomScale,
+                       m_gridHasBottomRegion ? &m_gridBottomRegion : nullptr);
         } else {
-            drawRegion(0, h, 1);
+            drawRegion(0, h, 1, nullptr);
         }
         painter.restore();
     }

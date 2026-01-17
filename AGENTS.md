@@ -45,6 +45,7 @@
 - Frame uses exactly one comparison mask and one dynamic mask assignment.
 - Mask editing happens on the original (orange) frame.
 - Background mask is independent from mask/dynamic mask toggles.
+- Sprite detection area outlines must be drawn from filled masks (not line masks) to avoid double rectangles.
 
 ## HD/SD rules
 - HD is 256x64 (SD is 128x32).

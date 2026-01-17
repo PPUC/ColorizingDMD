@@ -21,6 +21,7 @@ public:
     void setGridEnabled(bool enabled);
     void setGridSegments(int topHeight, int gapHeight, int bottomHeight);
     void setGridScales(int topScale, int bottomScale);
+    void setGridRegions(const QRect& topRegion, const QRect& bottomRegion);
     void setMaskOutline(const cv::Mat& mask, const QColor& color, const QRect& region = QRect());
     void setSecondaryMaskOutline(const cv::Mat& mask, const QColor& color, const QRect& region = QRect());
     void setTertiaryMaskOutline(const cv::Mat& mask, const QColor& color, const QRect& region = QRect());
@@ -65,6 +66,10 @@ private:
     int m_gridGap = 0;
     int m_gridTopScale = 1;
     int m_gridBottomScale = 1;
+    QRect m_gridTopRegion;
+    QRect m_gridBottomRegion;
+    bool m_gridHasTopRegion = false;
+    bool m_gridHasBottomRegion = false;
     cv::Mat m_outlineMask;
     QColor m_outlineColor = QColor(200, 0, 200);
     bool m_outlineEnabled = false;

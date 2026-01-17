@@ -15,6 +15,19 @@ CMAKE_ARGS=()
 if [ -n "${VCPKG_ROOT}" ]; then
    CMAKE_ARGS+=("-DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
 fi
+if [ -z "${CMAKE_PREFIX_PATH}" ] && command -v brew >/dev/null 2>&1; then
+   QT_PREFIX=$(brew --prefix qt 2>/dev/null || true)
+   if [ -n "${QT_PREFIX}" ]; then
+      CMAKE_ARGS+=("-DCMAKE_PREFIX_PATH=${QT_PREFIX}")
+      CMAKE_ARGS+=("-DQt6_DIR=${QT_PREFIX}/lib/cmake/Qt6")
+   fi
+fi
+if [ -z "${OpenCV_DIR}" ] && command -v brew >/dev/null 2>&1; then
+   OPENCV_PREFIX=$(brew --prefix opencv 2>/dev/null || true)
+   if [ -n "${OPENCV_PREFIX}" ]; then
+      CMAKE_ARGS+=("-DOpenCV_DIR=${OPENCV_PREFIX}/lib/cmake/opencv4")
+   fi
+fi
 
 cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" "${CMAKE_ARGS[@]}"
 cmake --build "${BUILD_DIR}" --config "${BUILD_TYPE}"
