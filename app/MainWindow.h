@@ -13,6 +13,7 @@
 #include "serum-editor.h"
 
 class QListWidget;
+class QStackedWidget;
 
 class MainWindow : public QMainWindow
 {
@@ -110,6 +111,7 @@ private:
     void updateFrameJumpRange();
     void updateMetadataForFrame(int index);
     void updateMetadataForSprite(int index);
+    void updateProjectLabelHeight();
     void openProjectFile(const QString& filename);
     bool saveProjectToPath(const QString& filename);
     bool saveLegacyProject(const QString& filename);
@@ -166,6 +168,7 @@ private:
     void pushPaletteUndoSnapshot();
     void pushReducedUndoSnapshot(int setIndex);
     void pushDynamicUndoSnapshot(int frameIndex, int setIndex);
+    void pushRotationUndoSnapshot(int frameIndex, int setIndex, bool useHd);
     bool undoPaletteEdit();
     bool redoPaletteEdit();
     void pushUndoSnapshot(bool isFrame, int index);
@@ -340,7 +343,7 @@ private:
     class QPushButton* m_hdCreateButton;
     class QPushButton* m_hdDeleteButton;
     class QTabWidget* m_canvasTabs;
-    class QTabWidget* m_toolsTabs;
+    class QStackedWidget* m_toolsTabs;
     class QWidget* m_masksTab;
     class QWidget* m_dynamicMasksTab;
     class QWidget* m_backgroundsTab;
@@ -514,12 +517,14 @@ private:
         enum class Kind {
             Full,
             Reduced,
-            Dynamic
+            Dynamic,
+            Rotation
         };
         Kind kind = Kind::Full;
         int palette_index = -1;
         int set_index = -1;
         int frame_index = -1;
+        bool use_hd = false;
         QVector<QColor> full_colors;
         std::vector<uint16_t> values;
     };

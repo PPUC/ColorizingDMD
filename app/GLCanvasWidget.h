@@ -36,6 +36,7 @@ signals:
     void imageReleased(int x, int y, Qt::MouseButton button, Qt::KeyboardModifiers modifiers);
     void maskDropped(const QString& kind, int index);
     void imageHovered(int x, int y, bool onImage);
+    void zoomPanChanged(double zoom, const QPointF& pan);
 
 protected:
     void initializeGL() override;

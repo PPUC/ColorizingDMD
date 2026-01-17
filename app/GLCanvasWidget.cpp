@@ -89,6 +89,7 @@ void GLCanvasWidget::fitToImage()
     const double scaleY = height() > 0 ? static_cast<double>(height()) / m_image.rows : 1.0;
     m_zoom = std::max(0.1, std::min(scaleX, scaleY));
     m_pan = QPointF(0.0, 0.0);
+    emit zoomPanChanged(m_zoom, m_pan);
     update();
 }
 
@@ -212,6 +213,7 @@ void GLCanvasWidget::scaleZoom(double factor)
     }
     m_zoom = std::max(0.1, m_zoom * factor);
     m_fitOnResize = false;
+    emit zoomPanChanged(m_zoom, m_pan);
     update();
 }
 
@@ -467,12 +469,6 @@ void GLCanvasWidget::paintGL()
     }
 
     painter.setPen(QColor(150, 150, 150));
-    painter.drawText(QRect(10, 10, width() - 20, 20),
-                     Qt::AlignLeft,
-                     QString("Zoom %1x  Pan %2,%3")
-                         .arg(QString::number(m_zoom, 'f', 2))
-                         .arg(QString::number(m_pan.x(), 'f', 1))
-                         .arg(QString::number(m_pan.y(), 'f', 1)));
 }
 
 namespace {
@@ -528,6 +524,7 @@ void GLCanvasWidget::wheelEvent(QWheelEvent* event)
     const double delta = event->angleDelta().y() / 120.0;
     m_zoom = std::max(0.1, m_zoom + delta * 0.1);
     m_fitOnResize = false;
+    emit zoomPanChanged(m_zoom, m_pan);
     update();
 }
 
@@ -566,6 +563,7 @@ void GLCanvasWidget::mouseMoveEvent(QMouseEvent* event)
         m_pan += QPointF(delta.x(), delta.y());
         m_lastPos = event->pos();
         m_fitOnResize = false;
+        emit zoomPanChanged(m_zoom, m_pan);
         update();
     }
     if (!m_panning && (event->buttons() & (Qt::LeftButton | Qt::RightButton))) {

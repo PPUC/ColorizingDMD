@@ -1,10 +1,10 @@
 #include "CanvasWidget.h"
 
 #include <QLabel>
-#include <QResizeEvent>
 #include <QSignalBlocker>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 
 #include "GLCanvasWidget.h"
 
@@ -12,22 +12,43 @@ CanvasWidget::CanvasWidget(const QString& title, QWidget* parent)
     : QWidget(parent)
     , m_canvas(new GLCanvasWidget(this))
     , m_label(new QLabel(title, this))
-    , m_fitButton(new QToolButton(m_canvas))
-    , m_backButton(new QToolButton(m_canvas))
-    , m_forwardButton(new QToolButton(m_canvas))
-    , m_gridButton(new QToolButton(m_canvas))
-    , m_originalButton(new QToolButton(m_canvas))
-    , m_backgroundButton(new QToolButton(m_canvas))
-    , m_maskButton(new QToolButton(m_canvas))
-    , m_dynamicButton(new QToolButton(m_canvas))
-    , m_backgroundMaskButton(new QToolButton(m_canvas))
-    , m_zoneButton(new QToolButton(m_canvas))
-    , m_hdButton(new QToolButton(m_canvas))
-    , m_rotateButton(new QToolButton(m_canvas))
+    , m_viewLabel(new QLabel(this))
+    , m_fitButton(new QToolButton(this))
+    , m_backButton(new QToolButton(this))
+    , m_forwardButton(new QToolButton(this))
+    , m_gridButton(new QToolButton(this))
+    , m_originalButton(new QToolButton(this))
+    , m_backgroundButton(new QToolButton(this))
+    , m_maskButton(new QToolButton(this))
+    , m_dynamicButton(new QToolButton(this))
+    , m_backgroundMaskButton(new QToolButton(this))
+    , m_zoneButton(new QToolButton(this))
+    , m_hdButton(new QToolButton(this))
+    , m_rotateButton(new QToolButton(this))
 {
     auto* layout = new QVBoxLayout(this);
+    auto* toolbar = new QHBoxLayout();
+    toolbar->setContentsMargins(0, 0, 0, 0);
+    toolbar->setSpacing(6);
     m_canvas->setOverlayText(title);
     m_label->setAlignment(Qt::AlignCenter);
+    m_viewLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_viewLabel->setText("Zoom 1.00x  Pan 0,0");
+    toolbar->addWidget(m_backButton);
+    toolbar->addWidget(m_forwardButton);
+    toolbar->addWidget(m_fitButton);
+    toolbar->addWidget(m_gridButton);
+    toolbar->addWidget(m_originalButton);
+    toolbar->addWidget(m_backgroundButton);
+    toolbar->addWidget(m_maskButton);
+    toolbar->addWidget(m_dynamicButton);
+    toolbar->addWidget(m_backgroundMaskButton);
+    toolbar->addWidget(m_zoneButton);
+    toolbar->addWidget(m_hdButton);
+    toolbar->addWidget(m_rotateButton);
+    toolbar->addStretch(1);
+    toolbar->addWidget(m_viewLabel);
+    layout->addLayout(toolbar);
     layout->addWidget(m_canvas, 1);
     layout->addWidget(m_label, 0);
     setLayout(layout);
@@ -117,6 +138,13 @@ CanvasWidget::CanvasWidget(const QString& title, QWidget* parent)
     m_rotateButton->setToolTip("Preview color rotations");
     m_rotateButton->setCursor(Qt::PointingHandCursor);
     connect(m_rotateButton, &QToolButton::toggled, this, &CanvasWidget::rotateToggled);
+
+    connect(m_canvas, &GLCanvasWidget::zoomPanChanged, this, [this](double zoom, const QPointF& pan) {
+        m_viewLabel->setText(QString("Zoom %1x  Pan %2,%3")
+                                 .arg(QString::number(zoom, 'f', 2))
+                                 .arg(QString::number(pan.x(), 'f', 1))
+                                 .arg(QString::number(pan.y(), 'f', 1)));
+    });
 }
 
 void CanvasWidget::setTitle(const QString& title)
@@ -333,75 +361,4 @@ void CanvasWidget::setHdButtonEnabled(bool enabled)
         return;
     }
     m_hdButton->setEnabled(enabled);
-}
-
-void CanvasWidget::resizeEvent(QResizeEvent* event)
-{
-    QWidget::resizeEvent(event);
-    if (!m_fitButton || !m_backButton || !m_forwardButton || !m_gridButton || !m_originalButton || !m_backgroundButton ||
-        !m_maskButton || !m_dynamicButton || !m_backgroundMaskButton || !m_zoneButton || !m_hdButton ||
-        !m_rotateButton) {
-        return;
-    }
-    const int margin = 8;
-    const QSize forwardSize = m_forwardButton->sizeHint();
-    const int x = m_canvas->width() - forwardSize.width() - margin;
-    const int y = margin;
-    m_forwardButton->move(x, y);
-    m_forwardButton->raise();
-
-    const QSize backSize = m_backButton->sizeHint();
-    const int backX = x - backSize.width() - 6;
-    m_backButton->move(backX, y);
-    m_backButton->raise();
-
-    const QSize fitSize = m_fitButton->sizeHint();
-    const int fitX = backX - fitSize.width() - 6;
-    m_fitButton->move(fitX, y);
-    m_fitButton->raise();
-
-    const QSize gridSize = m_gridButton->sizeHint();
-    const int gridX = fitX - gridSize.width() - 6;
-    m_gridButton->move(gridX, y);
-    m_gridButton->raise();
-
-    const QSize originalSize = m_originalButton->sizeHint();
-    const int originalX = gridX - originalSize.width() - 6;
-    m_originalButton->move(originalX, y);
-    m_originalButton->raise();
-
-    const QSize backgroundSize = m_backgroundButton->sizeHint();
-    const int backgroundX = originalX - backgroundSize.width() - 6;
-    m_backgroundButton->move(backgroundX, y);
-    m_backgroundButton->raise();
-
-    const QSize dynamicSize = m_dynamicButton->sizeHint();
-    const int dynamicX = backgroundX - dynamicSize.width() - 6;
-    m_dynamicButton->move(dynamicX, y);
-    m_dynamicButton->raise();
-
-    const QSize maskSize = m_maskButton->sizeHint();
-    const int maskX = dynamicX - maskSize.width() - 6;
-    m_maskButton->move(maskX, y);
-    m_maskButton->raise();
-
-    const QSize zoneSize = m_zoneButton->sizeHint();
-    const int zoneX = maskX - zoneSize.width() - 6;
-    m_zoneButton->move(zoneX, y);
-    m_zoneButton->raise();
-
-    const QSize bgSize = m_backgroundMaskButton->sizeHint();
-    const int bgX = zoneX - bgSize.width() - 6;
-    m_backgroundMaskButton->move(bgX, y);
-    m_backgroundMaskButton->raise();
-
-    const QSize hdSize = m_hdButton->sizeHint();
-    const int hdX = bgX - hdSize.width() - 6;
-    m_hdButton->move(hdX, y);
-    m_hdButton->raise();
-
-    const QSize rotateSize = m_rotateButton->sizeHint();
-    const int rotateX = hdX - rotateSize.width() - 6;
-    m_rotateButton->move(rotateX, y);
-    m_rotateButton->raise();
 }

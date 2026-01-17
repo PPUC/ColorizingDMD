@@ -103,7 +103,7 @@ This handbook captures editor behaviors and workflows that differ from the legac
 - Full palettes: 256 sets × 64 RGB565 colors.
 - Reduced palettes: 64 sets of 4 or 16 colors (2-bit/4-bit ROMs).
 - Dynamic color sets: 32 per frame, used by dynamic masks.
-- Rotation sets: editable in the Colors tab; use `Set Slot` to assign, and the gradient tool for ranges.
+- Rotation sets: editable in the Tools → Color Sets tab; use `Set Slot` to assign, and the gradient tool for ranges.
 - Selecting a color sets the active draw color; the color picker updates the active draw color.
 - Gradient tool fills a range between two selected palette slots.
 - Set Slot applies the current draw color to a chosen slot.
@@ -114,7 +114,7 @@ This handbook captures editor behaviors and workflows that differ from the legac
 
 ## Undo/Redo and Settings
 
-- Undo/redo stacks are separated for frames, masks, backgrounds, sprites, and palettes.
+- Undo/redo stacks are separated for frames, masks, backgrounds, sprites, and palettes (including rotation edits).
 - Undo/redo applies to all selected frames where relevant.
 - Settings dialog allows adjusting undo and navigation history sizes.
 

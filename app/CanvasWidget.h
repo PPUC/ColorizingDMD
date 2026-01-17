@@ -5,6 +5,7 @@
 class GLCanvasWidget;
 class QLabel;
 class QToolButton;
+class QHBoxLayout;
 namespace cv {
 class Mat;
 }
@@ -57,11 +58,10 @@ signals:
     void rotateToggled(bool enabled);
 
 protected:
-    void resizeEvent(QResizeEvent* event) override;
-
 private:
     GLCanvasWidget* m_canvas;
     QLabel* m_label;
+    QLabel* m_viewLabel;
     QToolButton* m_fitButton;
     QToolButton* m_backButton;
     QToolButton* m_forwardButton;

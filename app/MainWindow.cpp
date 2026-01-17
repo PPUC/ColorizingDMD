@@ -32,6 +32,9 @@
 #include <QMessageBox>
 #include <QInputDialog>
 #include <QSettings>
+#include <QStackedWidget>
+#include <QButtonGroup>
+#include <QLayout>
 #include <QDrag>
 #include <QMouseEvent>
 #include <QSpinBox>
@@ -105,7 +108,7 @@ constexpr int kPaletteItemSize = 32;
 constexpr int kReducedPaletteCount = 64;
 constexpr int kDefaultUndoDepth = 50;
 constexpr int kDefaultHistoryDepth = 100;
-constexpr int kFrameGapPixels = 8;
+constexpr int kFrameGapPixels = 4;
 
 constexpr int kFrameIndexRole = Qt::UserRole + 1;
 constexpr int kFrameDurationRole = Qt::UserRole + 2;
@@ -153,7 +156,15 @@ FrameLayout BuildFrameLayout(const cv::Mat& top, const cv::Mat& bottom)
     return BuildFrameLayout(top.cols, top.rows, bottom.cols, bottom.rows);
 }
 
-cv::Mat BuildStackedFrames(const std::vector<cv::Mat>& frames, const cv::Scalar& gapColor)
+int FrameGapForWidth(int width)
+{
+    (void)width;
+    return kFrameGapPixels;
+}
+
+cv::Mat BuildStackedFrames(const std::vector<cv::Mat>& frames,
+                           const cv::Scalar& gapColor,
+                           int gapPixels)
 {
     std::vector<cv::Mat> valid;
     valid.reserve(frames.size());
@@ -174,13 +185,13 @@ cv::Mat BuildStackedFrames(const std::vector<cv::Mat>& frames, const cv::Scalar&
         width = std::max(width, frame.cols);
         height += frame.rows;
     }
-    height += static_cast<int>(valid.size() - 1) * kFrameGapPixels;
+    height += static_cast<int>(valid.size() - 1) * gapPixels;
     cv::Mat combined(height, width, CV_8UC3, gapColor);
     int y = 0;
     for (const auto& frame : valid) {
         const int x = (width - frame.cols) / 2;
         frame.copyTo(combined(cv::Rect(x, y, frame.cols, frame.rows)));
-        y += frame.rows + kFrameGapPixels;
+        y += frame.rows + gapPixels;
     }
     return combined;
 }
@@ -609,8 +620,147 @@ cv::Mat BuildBackgroundPreview(const cv::Mat& sdFrame, const cv::Mat& hdFrame, c
     if (sd.empty() && hd.empty()) {
         return cv::Mat();
     }
-    return BuildStackedFrames({sd, hd}, gapColor);
+    const int gap = FrameGapForWidth(std::max(sd.cols, hd.cols));
+    return BuildStackedFrames({sd, hd}, gapColor, gap);
 }
+
+class FlowLayout : public QLayout
+{
+public:
+    explicit FlowLayout(QWidget* parent = nullptr, int margin = -1, int hSpacing = -1, int vSpacing = -1)
+        : QLayout(parent),
+          m_hSpace(hSpacing),
+          m_vSpace(vSpacing)
+    {
+        setContentsMargins(margin, margin, margin, margin);
+    }
+
+    ~FlowLayout() override
+    {
+        QLayoutItem* item = nullptr;
+        while ((item = takeAt(0)) != nullptr) {
+            delete item;
+        }
+    }
+
+    void addItem(QLayoutItem* item) override
+    {
+        m_itemList.append(item);
+    }
+
+    int count() const override
+    {
+        return m_itemList.size();
+    }
+
+    QLayoutItem* itemAt(int index) const override
+    {
+        return m_itemList.value(index);
+    }
+
+    QLayoutItem* takeAt(int index) override
+    {
+        if (index < 0 || index >= m_itemList.size()) {
+            return nullptr;
+        }
+        return m_itemList.takeAt(index);
+    }
+
+    Qt::Orientations expandingDirections() const override
+    {
+        return {};
+    }
+
+    bool hasHeightForWidth() const override
+    {
+        return true;
+    }
+
+    int heightForWidth(int width) const override
+    {
+        return doLayout(QRect(0, 0, width, 0), true);
+    }
+
+    QSize minimumSize() const override
+    {
+        QSize size;
+        for (const QLayoutItem* item : m_itemList) {
+            size = size.expandedTo(item->minimumSize());
+        }
+        const QMargins margins = contentsMargins();
+        size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom());
+        return size;
+    }
+
+    QSize sizeHint() const override
+    {
+        return minimumSize();
+    }
+
+    void setGeometry(const QRect& rect) override
+    {
+        QLayout::setGeometry(rect);
+        doLayout(rect, false);
+    }
+
+private:
+    int horizontalSpacing() const
+    {
+        if (m_hSpace >= 0) {
+            return m_hSpace;
+        }
+        return smartSpacing(QStyle::PM_LayoutHorizontalSpacing);
+    }
+
+    int verticalSpacing() const
+    {
+        if (m_vSpace >= 0) {
+            return m_vSpace;
+        }
+        return smartSpacing(QStyle::PM_LayoutVerticalSpacing);
+    }
+
+    int doLayout(const QRect& rect, bool testOnly) const
+    {
+        int x = rect.x();
+        int y = rect.y();
+        int lineHeight = 0;
+        const int spaceX = horizontalSpacing();
+        const int spaceY = verticalSpacing();
+        for (QLayoutItem* item : m_itemList) {
+            const QWidget* widget = item->widget();
+            const int nextX = x + item->sizeHint().width() + spaceX;
+            if (nextX - spaceX > rect.right() && lineHeight > 0) {
+                x = rect.x();
+                y += lineHeight + spaceY;
+                lineHeight = 0;
+            }
+            if (!testOnly) {
+                item->setGeometry(QRect(QPoint(x, y), item->sizeHint()));
+            }
+            x += item->sizeHint().width() + spaceX;
+            lineHeight = std::max(lineHeight, item->sizeHint().height());
+        }
+        return y + lineHeight - rect.y();
+    }
+
+    int smartSpacing(QStyle::PixelMetric pm) const
+    {
+        const QObject* parentObject = parent();
+        if (!parentObject) {
+            return -1;
+        }
+        if (parentObject->isWidgetType()) {
+            const QWidget* parentWidget = static_cast<const QWidget*>(parentObject);
+            return parentWidget->style()->pixelMetric(pm, nullptr, parentWidget);
+        }
+        return static_cast<const QLayout*>(parentObject)->spacing();
+    }
+
+    QList<QLayoutItem*> m_itemList;
+    int m_hSpace;
+    int m_vSpace;
+};
 
 QSize PreviewItemSizeForIcon(const QSize& iconSize, const QFont& font)
 {
@@ -701,7 +851,7 @@ MainWindow::MainWindow(QWidget* parent)
         : QCoreApplication::applicationName();
     const QString appVersion = QCoreApplication::applicationVersion();
     setWindowTitle(appVersion.isEmpty() ? appName : QString("%1 v%2").arg(appName, appVersion));
-    setWindowIcon(QIcon(":/app/app.ico"));
+    setWindowIcon(QIcon(":/app/app.png"));
     setMinimumSize(1200, 800);
 
     auto* fileMenu = menuBar()->addMenu("&File");
@@ -726,24 +876,34 @@ MainWindow::MainWindow(QWidget* parent)
     enableDrawAction->setCheckable(true);
     auto* toolPointAction = new QAction("&Point", this);
     toolPointAction->setCheckable(true);
+    toolPointAction->setIcon(QIcon(":/icons/crayon.png"));
     auto* toolLineAction = new QAction("&Line", this);
     toolLineAction->setCheckable(true);
+    toolLineAction->setIcon(QIcon(":/icons/trait.png"));
     auto* toolRectAction = new QAction("&Rectangle", this);
     toolRectAction->setCheckable(true);
+    toolRectAction->setIcon(QIcon(":/icons/select.png"));
     auto* toolRectFillAction = new QAction("Rectangle &Fill", this);
     toolRectFillAction->setCheckable(true);
+    toolRectFillAction->setIcon(QIcon(":/icons/drawall.png"));
     auto* toolCircleAction = new QAction("&Circle", this);
     toolCircleAction->setCheckable(true);
+    toolCircleAction->setIcon(QIcon(":/icons/cercle.png"));
     auto* toolCircleFillAction = new QAction("Circle F&ill", this);
     toolCircleFillAction->setCheckable(true);
+    toolCircleFillAction->setIcon(QIcon(":/icons/drawall.png"));
     auto* toolEllipseAction = new QAction("&Ellipse", this);
     toolEllipseAction->setCheckable(true);
+    toolEllipseAction->setIcon(QIcon(":/icons/ellipse.png"));
     auto* toolEllipseFillAction = new QAction("Ellipse Fi&ll", this);
     toolEllipseFillAction->setCheckable(true);
+    toolEllipseFillAction->setIcon(QIcon(":/icons/drawall.png"));
     auto* toolColorPickerAction = new QAction("Color &Picker", this);
     toolColorPickerAction->setCheckable(true);
+    toolColorPickerAction->setIcon(QIcon(":/icons/colpick.png"));
     auto* toolMagicFillAction = new QAction("&Magic Fill", this);
     toolMagicFillAction->setCheckable(true);
+    toolMagicFillAction->setIcon(QIcon(":/icons/drawall.png"));
     auto* cancelDrawAction = new QAction("&Cancel Draw", this);
     cancelDrawAction->setShortcut(QKeySequence(Qt::Key_Escape));
     m_settingsAction = new QAction("&Settings...", this);
@@ -1184,14 +1344,50 @@ MainWindow::MainWindow(QWidget* parent)
 
     auto* toolDock = new QDockWidget("Components", this);
     toolDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
-    auto* toolsTabs = new QTabWidget(toolDock);
-    m_toolsTabs = toolsTabs;
-    auto* framesTab = new QWidget(toolsTabs);
-    auto* spritesTab = new QWidget(toolsTabs);
-    auto* imagesTab = new QWidget(toolsTabs);
-    auto* masksTab = new QWidget(toolsTabs);
-    auto* dynamicMasksTab = new QWidget(toolsTabs);
-    auto* backgroundsTab = new QWidget(toolsTabs);
+    auto* toolsContainer = new QWidget(toolDock);
+    auto* toolsLayout = new QVBoxLayout(toolsContainer);
+    toolsLayout->setContentsMargins(4, 4, 4, 4);
+    toolsLayout->setSpacing(4);
+    auto* toolsTabBar = new QWidget(toolsContainer);
+    auto* toolsTabLayout = new FlowLayout(toolsTabBar, 0, 6, 6);
+    toolsTabBar->setLayout(toolsTabLayout);
+    m_toolsTabs = new QStackedWidget(toolsContainer);
+    auto* toolsButtonGroup = new QButtonGroup(toolsContainer);
+    toolsButtonGroup->setExclusive(true);
+    auto addToolsTab = [this, toolsTabLayout, toolsButtonGroup](QWidget* page, const QString& label) {
+        if (!page) {
+            return -1;
+        }
+        const int index = m_toolsTabs->addWidget(page);
+        auto* button = new QToolButton();
+        button->setText(label);
+        button->setCheckable(true);
+        button->setAutoRaise(true);
+        button->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
+        toolsTabLayout->addWidget(button);
+        toolsButtonGroup->addButton(button, index);
+        connect(button, &QToolButton::clicked, this, [this, index]() {
+            m_toolsTabs->setCurrentIndex(index);
+        });
+        if (m_toolsTabs->currentIndex() == index) {
+            button->setChecked(true);
+        }
+        return index;
+    };
+    connect(m_toolsTabs, &QStackedWidget::currentChanged, this, [toolsButtonGroup](int index) {
+        if (QAbstractButton* button = toolsButtonGroup->button(index)) {
+            button->setChecked(true);
+        }
+    });
+    toolsLayout->addWidget(toolsTabBar);
+    toolsLayout->addWidget(m_toolsTabs, 1);
+    toolsContainer->setLayout(toolsLayout);
+    auto* framesTab = new QWidget(m_toolsTabs);
+    auto* spritesTab = new QWidget(m_toolsTabs);
+    auto* imagesTab = new QWidget(m_toolsTabs);
+    auto* masksTab = new QWidget(m_toolsTabs);
+    auto* dynamicMasksTab = new QWidget(m_toolsTabs);
+    auto* backgroundsTab = new QWidget(m_toolsTabs);
     auto* spriteZonesTab = new QWidget();
     m_masksTab = masksTab;
     m_dynamicMasksTab = dynamicMasksTab;
@@ -1220,9 +1416,16 @@ MainWindow::MainWindow(QWidget* parent)
     m_framesList->setGridSize(QSize());
     m_framesList->setSpacing(4);
     m_framesList->setItemDelegate(new ToolPreviewDelegate(m_framesList));
+    m_bookmarksCombo = new QComboBox(framesTab);
+    m_bookmarksCombo->setEnabled(false);
     auto* framesLayout = new QVBoxLayout(framesTab);
     framesLayout->addWidget(m_frameFilter);
     framesLayout->addWidget(m_framesList, 1);
+    auto* bookmarksRow = new QHBoxLayout();
+    auto* bookmarksLabel = new QLabel("Bookmarks", framesTab);
+    bookmarksRow->addWidget(bookmarksLabel);
+    bookmarksRow->addWidget(m_bookmarksCombo, 1);
+    framesLayout->addLayout(bookmarksRow);
     framesTab->setLayout(framesLayout);
 
     m_spriteFilter = new QLineEdit(spritesTab);
@@ -1408,7 +1611,7 @@ MainWindow::MainWindow(QWidget* parent)
     dynLayout->addLayout(dynButtons);
     dynamicMasksTab->setLayout(dynLayout);
 
-    auto* colorsTab = new QWidget(toolsTabs);
+    auto* colorsTab = new QWidget(m_toolsTabs);
     m_colorsTab = colorsTab;
     m_currentColorButton = new QToolButton(colorsTab);
     m_currentColorButton->setAutoRaise(true);
@@ -1519,7 +1722,7 @@ MainWindow::MainWindow(QWidget* parent)
     });
     auto* reducedLayout = new QVBoxLayout();
     auto* reducedTop = new QHBoxLayout();
-    reducedTop->addWidget(new QLabel("Reduced set", colorsTab));
+    reducedTop->addWidget(new QLabel("Replacement Set", colorsTab));
     reducedTop->addWidget(m_reducedSetCombo);
     reducedTop->addStretch(1);
     reducedTop->addWidget(m_reducedAssignButton);
@@ -1601,7 +1804,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     auto* dynamicLayout = new QVBoxLayout();
     auto* dynamicTop = new QHBoxLayout();
-    dynamicTop->addWidget(new QLabel("Dynamic set", colorsTab));
+    dynamicTop->addWidget(new QLabel("Dynamic Set", colorsTab));
     dynamicTop->addWidget(m_dynamicSetCombo);
     dynamicTop->addStretch(1);
     dynamicTop->addWidget(m_dynamicAssignButton);
@@ -1664,13 +1867,13 @@ MainWindow::MainWindow(QWidget* parent)
             if (frameIndex < 0) {
                 return;
             }
+            const bool useHd = m_useHdFrame && hasHdFrame(frameIndex);
+            pushRotationUndoSnapshot(frameIndex, m_rotationSetIndex, useHd);
             const std::size_t blockSize =
                 static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
             const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize +
                 static_cast<std::size_t>(m_rotationSetIndex) * MAX_LENGTH_COLOR_ROTATION;
-            std::vector<uint16_t>& rotations = (m_useHdFrame && hasHdFrame(frameIndex))
-                ? m_frameRotationsX
-                : m_frameRotations;
+            std::vector<uint16_t>& rotations = useHd ? m_frameRotationsX : m_frameRotations;
             if (base + MAX_LENGTH_COLOR_ROTATION > rotations.size()) {
                 cancelPaletteSetSlot();
                 return;
@@ -1710,13 +1913,13 @@ MainWindow::MainWindow(QWidget* parent)
         if (frameIndex < 0) {
             return;
         }
+        const bool useHd = m_useHdFrame && hasHdFrame(frameIndex);
+        pushRotationUndoSnapshot(frameIndex, m_rotationSetIndex, useHd);
         const std::size_t blockSize =
             static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
         const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize +
             static_cast<std::size_t>(m_rotationSetIndex) * MAX_LENGTH_COLOR_ROTATION;
-        std::vector<uint16_t>& rotations = (m_useHdFrame && hasHdFrame(frameIndex))
-            ? m_frameRotationsX
-            : m_frameRotations;
+        std::vector<uint16_t>& rotations = useHd ? m_frameRotationsX : m_frameRotations;
         if (base + MAX_LENGTH_COLOR_ROTATION > rotations.size()) {
             return;
         }
@@ -1742,13 +1945,13 @@ MainWindow::MainWindow(QWidget* parent)
         if (frameIndex < 0) {
             return;
         }
+        const bool useHd = m_useHdFrame && hasHdFrame(frameIndex);
+        pushRotationUndoSnapshot(frameIndex, m_rotationSetIndex, useHd);
         const std::size_t blockSize =
             static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
         const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize +
             static_cast<std::size_t>(m_rotationSetIndex) * MAX_LENGTH_COLOR_ROTATION;
-        std::vector<uint16_t>& rotations = (m_useHdFrame && hasHdFrame(frameIndex))
-            ? m_frameRotationsX
-            : m_frameRotations;
+        std::vector<uint16_t>& rotations = useHd ? m_frameRotationsX : m_frameRotations;
         if (base + MAX_LENGTH_COLOR_ROTATION > rotations.size()) {
             return;
         }
@@ -1773,13 +1976,13 @@ MainWindow::MainWindow(QWidget* parent)
         if (frameIndex < 0) {
             return;
         }
+        const bool useHd = m_useHdFrame && hasHdFrame(frameIndex);
+        pushRotationUndoSnapshot(frameIndex, m_rotationSetIndex, useHd);
         const std::size_t blockSize =
             static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
         const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize +
             static_cast<std::size_t>(m_rotationSetIndex) * MAX_LENGTH_COLOR_ROTATION;
-        std::vector<uint16_t>& rotations = (m_useHdFrame && hasHdFrame(frameIndex))
-            ? m_frameRotationsX
-            : m_frameRotations;
+        std::vector<uint16_t>& rotations = useHd ? m_frameRotationsX : m_frameRotations;
         if (base + MAX_LENGTH_COLOR_ROTATION > rotations.size()) {
             return;
         }
@@ -1801,13 +2004,13 @@ MainWindow::MainWindow(QWidget* parent)
         if (frameIndex < 0) {
             return;
         }
+        const bool useHd = m_useHdFrame && hasHdFrame(frameIndex);
+        pushRotationUndoSnapshot(frameIndex, m_rotationSetIndex, useHd);
         const std::size_t blockSize =
             static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
         const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize +
             static_cast<std::size_t>(m_rotationSetIndex) * MAX_LENGTH_COLOR_ROTATION;
-        std::vector<uint16_t>& rotations = (m_useHdFrame && hasHdFrame(frameIndex))
-            ? m_frameRotationsX
-            : m_frameRotations;
+        std::vector<uint16_t>& rotations = useHd ? m_frameRotationsX : m_frameRotations;
         if (base + MAX_LENGTH_COLOR_ROTATION > rotations.size()) {
             return;
         }
@@ -1825,13 +2028,13 @@ MainWindow::MainWindow(QWidget* parent)
         if (frameIndex < 0) {
             return;
         }
+        const bool useHd = m_useHdFrame && hasHdFrame(frameIndex);
+        pushRotationUndoSnapshot(frameIndex, m_rotationSetIndex, useHd);
         const std::size_t blockSize =
             static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
         const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize +
             static_cast<std::size_t>(m_rotationSetIndex) * MAX_LENGTH_COLOR_ROTATION;
-        std::vector<uint16_t>& rotations = (m_useHdFrame && hasHdFrame(frameIndex))
-            ? m_frameRotationsX
-            : m_frameRotations;
+        std::vector<uint16_t>& rotations = useHd ? m_frameRotationsX : m_frameRotations;
         if (base + MAX_LENGTH_COLOR_ROTATION > rotations.size()) {
             return;
         }
@@ -1884,37 +2087,69 @@ MainWindow::MainWindow(QWidget* parent)
     fullTop->addWidget(m_paletteAssignButton);
     colorLayout->addLayout(fullTop);
     colorLayout->addWidget(m_paletteList);
-    colorLayout->addSpacing(8);
-    colorLayout->addLayout(reducedLayout);
-    colorLayout->addSpacing(8);
-    colorLayout->addLayout(dynamicLayout);
-    colorLayout->addSpacing(8);
-    colorLayout->addLayout(rotationLayout);
     colorsContent->setLayout(colorLayout);
     colorsScrollArea->setWidget(colorsContent);
     auto* colorsTabLayout = new QVBoxLayout(colorsTab);
     colorsTabLayout->addWidget(colorsScrollArea);
     colorsTab->setLayout(colorsTabLayout);
 
-    toolsTabs->addTab(framesTab, "Frames");
-    toolsTabs->addTab(spritesTab, "Sprites");
-    toolsTabs->addTab(imagesTab, "Images");
-    toolsTabs->addTab(masksTab, "Masks");
-    toolsTabs->addTab(dynamicMasksTab, "Dynamic Masks");
-    toolsTabs->addTab(backgroundsTab, "Backgrounds");
-    toolsTabs->addTab(colorsTab, "Colors");
-    toolDock->setWidget(toolsTabs);
+    addToolsTab(framesTab, "Frames");
+    addToolsTab(spritesTab, "Sprites");
+    addToolsTab(imagesTab, "Images");
+    addToolsTab(masksTab, "Masks");
+    addToolsTab(dynamicMasksTab, "Dynamic Masks");
+    addToolsTab(backgroundsTab, "Backgrounds");
+    addToolsTab(colorsTab, "Colors");
+    toolDock->setWidget(toolsContainer);
     addDockWidget(Qt::LeftDockWidgetArea, toolDock);
 
     auto* inspectorDock = new QDockWidget("Tools", this);
     inspectorDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
-    auto* inspectorTabs = new QTabWidget(inspectorDock);
+    auto* inspectorContainer = new QWidget(inspectorDock);
+    auto* inspectorContainerLayout = new QVBoxLayout(inspectorContainer);
+    inspectorContainerLayout->setContentsMargins(4, 4, 4, 4);
+    inspectorContainerLayout->setSpacing(4);
+    auto* inspectorTabBar = new QWidget(inspectorContainer);
+    auto* inspectorTabLayout = new FlowLayout(inspectorTabBar, 0, 6, 6);
+    inspectorTabBar->setLayout(inspectorTabLayout);
+    auto* inspectorTabs = new QStackedWidget(inspectorContainer);
+    auto* inspectorButtonGroup = new QButtonGroup(inspectorContainer);
+    inspectorButtonGroup->setExclusive(true);
+    auto addInspectorTab = [inspectorTabs, inspectorTabLayout, inspectorButtonGroup](QWidget* page,
+                                                                                    const QString& label) {
+        if (!page) {
+            return -1;
+        }
+        const int index = inspectorTabs->addWidget(page);
+        auto* button = new QToolButton();
+        button->setText(label);
+        button->setCheckable(true);
+        button->setAutoRaise(true);
+        button->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
+        inspectorTabLayout->addWidget(button);
+        inspectorButtonGroup->addButton(button, index);
+        QObject::connect(button, &QToolButton::clicked, inspectorTabs, [inspectorTabs, index]() {
+            inspectorTabs->setCurrentIndex(index);
+        });
+        if (inspectorTabs->currentIndex() == index) {
+            button->setChecked(true);
+        }
+        return index;
+    };
+    connect(inspectorTabs, &QStackedWidget::currentChanged, this, [inspectorButtonGroup](int index) {
+        if (QAbstractButton* button = inspectorButtonGroup->button(index)) {
+            button->setChecked(true);
+        }
+    });
+    inspectorContainerLayout->addWidget(inspectorTabBar);
+    inspectorContainerLayout->addWidget(inspectorTabs, 1);
+    inspectorContainer->setLayout(inspectorContainerLayout);
     auto* inspectorWidget = new QWidget(inspectorTabs);
     auto* inspectorLayout = new QFormLayout(inspectorWidget);
     m_projectLabel = new QLabel("None", inspectorWidget);
     m_projectLabel->setWordWrap(true);
-    m_bookmarksCombo = new QComboBox(inspectorWidget);
-    m_bookmarksCombo->setEnabled(false);
+    m_projectLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    m_projectLabel->installEventFilter(this);
     m_frameJump = new QSpinBox(inspectorWidget);
     m_frameJump->setEnabled(false);
     m_frameJump->setPrefix("Frame ");
@@ -1951,21 +2186,26 @@ MainWindow::MainWindow(QWidget* parent)
     m_hdScaleCombo->addItem("Bilinear", static_cast<int>(cv::INTER_LINEAR));
     m_hdScaleCombo->addItem("Bicubic", static_cast<int>(cv::INTER_CUBIC));
     inspectorLayout->addRow("Project", m_projectLabel);
-    inspectorLayout->addRow("Bookmarks", m_bookmarksCombo);
     inspectorLayout->addRow("Go to frame", m_frameJump);
     inspectorLayout->addRow("Counts", m_countsLabel);
     inspectorLayout->addRow("Selection", m_selectionLabel);
     inspectorLayout->addRow("Frame info", m_frameMetaLabel);
-    inspectorLayout->addRow("Sprite info", m_spriteMetaLabel);
-    inspectorLayout->addRow("Sprite dynamic", m_spriteDynamicSetCombo);
-    inspectorLayout->addRow("Sprite detect", m_spriteDetAreaCombo);
-    inspectorLayout->addRow("Detect clear", m_spriteDetAreaClearButton);
     inspectorLayout->addRow("Mask", m_frameMaskAssign);
     inspectorLayout->addRow("Dynamic mask", m_frameDynamicMaskAssign);
     inspectorLayout->addRow("Dynamic copy", m_frameDynamicCopyButton);
     inspectorLayout->addRow(m_backgroundAssignLabel, m_frameBackgroundAssign);
     inspectorLayout->addRow("Shape compare", m_shapeCompToggle);
     inspectorWidget->setLayout(inspectorLayout);
+    auto* colorSetsWidget = new QWidget(inspectorTabs);
+    auto* colorSetsLayout = new QVBoxLayout(colorSetsWidget);
+    colorSetsLayout->addLayout(reducedLayout);
+    colorSetsLayout->addSpacing(8);
+    colorSetsLayout->addLayout(dynamicLayout);
+    colorSetsLayout->addSpacing(8);
+    colorSetsLayout->addLayout(rotationLayout);
+    colorSetsLayout->addStretch(1);
+    colorSetsWidget->setLayout(colorSetsLayout);
+
     auto* hdWidget = new QWidget(inspectorTabs);
     auto* hdLayout = new QFormLayout(hdWidget);
     hdLayout->addRow("HD source", m_hdSourceCombo);
@@ -1973,11 +2213,20 @@ MainWindow::MainWindow(QWidget* parent)
     hdLayout->addRow("HD create", m_hdCreateButton);
     hdLayout->addRow("HD delete", m_hdDeleteButton);
     hdWidget->setLayout(hdLayout);
-    inspectorTabs->addTab(inspectorWidget, "Inspector");
+    auto* spriteInspectorWidget = new QWidget(inspectorTabs);
+    auto* spriteInspectorLayout = new QFormLayout(spriteInspectorWidget);
+    spriteInspectorLayout->addRow("Sprite info", m_spriteMetaLabel);
+    spriteInspectorLayout->addRow("Dynamic Set", m_spriteDynamicSetCombo);
+    spriteInspectorLayout->addRow("Detect area", m_spriteDetAreaCombo);
+    spriteInspectorLayout->addRow("Detect clear", m_spriteDetAreaClearButton);
+    spriteInspectorWidget->setLayout(spriteInspectorLayout);
+    addInspectorTab(inspectorWidget, "Inspector");
+    addInspectorTab(spriteInspectorWidget, "Sprite");
+    addInspectorTab(colorSetsWidget, "Color Sets");
     spriteZonesTab->setParent(inspectorTabs);
-    inspectorTabs->addTab(spriteZonesTab, "Sprite Zones");
-    inspectorTabs->addTab(hdWidget, "HD");
-    inspectorDock->setWidget(inspectorTabs);
+    addInspectorTab(spriteZonesTab, "Sprite Zones");
+    addInspectorTab(hdWidget, "HD");
+    inspectorDock->setWidget(inspectorContainer);
     addDockWidget(Qt::RightDockWidgetArea, inspectorDock);
 
     auto* previewDock = new QDockWidget("Frame Preview", this);
@@ -2103,6 +2352,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_state, &ProjectState::projectPathChanged, this, [this](const QString& path) {
         updateWindowTitle();
         m_projectLabel->setText(path.isEmpty() ? "None" : path);
+        updateProjectLabelHeight();
     });
     connect(m_state, &ProjectState::recentFilesChanged, this, [this]() {
         refreshRecentMenu();
@@ -3108,10 +3358,11 @@ MainWindow::MainWindow(QWidget* parent)
         const int bottomWidth = reference.cols > 0 && topFrame->cols == reference.cols * 2 ? topFrame->cols : reference.cols;
         const int bottomHeight = reference.rows > 0 && topFrame->rows == reference.rows * 2 ? topFrame->rows : reference.rows;
         FrameLayout layout = BuildFrameLayout(topFrame->cols, topFrame->rows, bottomWidth, bottomHeight);
+        const int gap = FrameGapForWidth(layout.topWidth);
         if (y >= 0 && y < layout.topHeight && x >= layout.topX && x < layout.topX + layout.topWidth) {
             m_frameHoverArea = FrameHoverArea::Top;
-        } else if (y >= layout.topHeight + kFrameGapPixels &&
-                   y < layout.topHeight + kFrameGapPixels + layout.bottomHeight &&
+        } else if (y >= layout.topHeight + gap &&
+                   y < layout.topHeight + gap + layout.bottomHeight &&
                    x >= layout.bottomX && x < layout.bottomX + layout.bottomWidth) {
             m_frameHoverArea = FrameHoverArea::Bottom;
         } else {
@@ -3152,7 +3403,7 @@ MainWindow::MainWindow(QWidget* parent)
             return;
         }
         if (m_showOriginalFrame && !displayOriginal.empty()) {
-            const int gap = kFrameGapPixels;
+            const int gap = FrameGapForWidth(layout.topWidth);
             if (y >= layout.topHeight + gap &&
                 y < layout.topHeight + gap + layout.bottomHeight &&
                 x >= layout.bottomX && x < layout.bottomX + layout.bottomWidth) {
@@ -3214,7 +3465,7 @@ MainWindow::MainWindow(QWidget* parent)
             m_coordLabel->setText(QString("Sprite %1,%2").arg(spriteX).arg(spriteY));
             return;
         }
-        const int gap = kFrameGapPixels;
+        const int gap = FrameGapForWidth(layout.topWidth);
         if (!original.empty() &&
             y >= layout.topHeight + gap &&
             y < layout.topHeight + gap + layout.bottomHeight &&
@@ -3782,7 +4033,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_dynamicAssignButton, &QPushButton::clicked, this, [this]() {
         startDynamicSetSlot();
     });
-    connect(m_toolsTabs, &QTabWidget::currentChanged, this, [this](int) {
+    connect(m_toolsTabs, &QStackedWidget::currentChanged, this, [this](int) {
         if (m_previewFilterEnabled) {
             updatePreviewFilterState();
         }
@@ -4058,6 +4309,7 @@ void MainWindow::openProjectFile(const QString& filename)
         resetUndoStacks();
         updateWindowTitle();
         m_projectLabel->setText(cromPath);
+        updateProjectLabelHeight();
         refreshRecentMenu();
         refreshImageList();
         refreshCounts();
@@ -4815,7 +5067,9 @@ cv::Mat MainWindow::buildPreviewFrame(int index,
     const QColor gap = m_framePreviewList
         ? m_framePreviewList->palette().color(QPalette::Window)
         : QApplication::palette().color(QPalette::Window);
-    return BuildStackedFrames({color, original, hd}, cv::Scalar(gap.blue(), gap.green(), gap.red()));
+    const int maxWidth = std::max({color.cols, original.cols, hd.cols});
+    const int gapPixels = FrameGapForWidth(maxWidth);
+    return BuildStackedFrames({color, original, hd}, cv::Scalar(gap.blue(), gap.green(), gap.red()), gapPixels);
 }
 
 cv::Mat MainWindow::applyRotationPreview(const cv::Mat& colorized,
@@ -5197,7 +5451,8 @@ cv::Mat MainWindow::buildCombinedFrame(const cv::Mat& colorized,
     }
     cv::Mat top = EnsureBgr(colorized);
     cv::Mat bottom = EnsureBgr(reference);
-    return BuildStackedFrames({top, bottom}, gapColor);
+    const int gap = FrameGapForWidth(top.cols);
+    return BuildStackedFrames({top, bottom}, gapColor, gap);
 }
 
 cv::Mat MainWindow::buildCombinedMaskPreview(const cv::Mat& colorized,
@@ -6289,7 +6544,8 @@ void MainWindow::setFrameCanvasFromComposed(int index, const cv::Mat& composed)
         displayOriginal.rows == original.rows * 2 && displayOriginal.cols == original.cols * 2) {
         bottomScale = 2;
     }
-    m_framesCanvas->canvas()->setGridSegments(composed.rows, kFrameGapPixels, displayOriginal.rows);
+    const int gapPixels = FrameGapForWidth(composed.cols);
+    m_framesCanvas->canvas()->setGridSegments(composed.rows, gapPixels, displayOriginal.rows);
     m_framesCanvas->canvas()->setGridScales(1, bottomScale);
     FrameLayout layout = BuildFrameLayout(composed, displayOriginal);
     const QRect topRegion(layout.topX, 0, layout.topWidth, layout.topHeight);
@@ -6378,7 +6634,8 @@ void MainWindow::updateSpriteCanvasImage(int index)
             displayOriginal.rows == original.rows * 2 && displayOriginal.cols == original.cols * 2) {
             bottomScale = 2;
         }
-        m_spritesCanvas->canvas()->setGridSegments(display.rows, kFrameGapPixels, displayOriginal.rows);
+        const int gapPixels = FrameGapForWidth(display.cols);
+        m_spritesCanvas->canvas()->setGridSegments(display.rows, gapPixels, displayOriginal.rows);
         m_spritesCanvas->canvas()->setGridScales(1, bottomScale);
     } else {
         m_spritesCanvas->setImage(display);
@@ -6976,8 +7233,9 @@ void MainWindow::updateMaskPreviewForFrame(int index)
         }
         cv::Mat displayOriginal = BuildDisplayOriginal(bottomPreview, topPreview.size());
         FrameLayout layout = BuildFrameLayout(topPreview, displayOriginal);
+        const int gap = FrameGapForWidth(layout.topWidth);
         bottomRegion = QRect(layout.bottomX,
-                             layout.topHeight + kFrameGapPixels,
+                             layout.topHeight + gap,
                              layout.bottomWidth,
                              layout.bottomHeight);
         cv::Mat combined = buildCombinedFrame(topPreview, displayOriginal, gapColor);
@@ -7104,8 +7362,9 @@ void MainWindow::updateSpriteZoneOverlay(int index)
     if (useOriginal) {
         cv::Mat displayOriginal = BuildDisplayOriginal(original, frame->size());
         FrameLayout layout = BuildFrameLayout(*frame, displayOriginal);
+        const int gap = FrameGapForWidth(layout.topWidth);
         region = QRect(layout.bottomX,
-                       layout.topHeight + kFrameGapPixels,
+                       layout.topHeight + gap,
                        layout.bottomWidth,
                        layout.bottomHeight);
     } else {
@@ -7168,14 +7427,18 @@ void MainWindow::updateSpriteDetAreaOverlay(int index)
     cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseWidth, baseHeight));
     FrameLayout layout = BuildFrameLayout(baseWidth, baseHeight,
                                           displayOriginal.cols, displayOriginal.rows);
+    const int gap = FrameGapForWidth(layout.topWidth);
     QRect region(layout.bottomX,
-                 layout.topHeight + kFrameGapPixels,
+                 layout.topHeight + gap,
                  layout.bottomWidth,
                  layout.bottomHeight);
     const cv::Size size = original.size();
     cv::Mat allMask(size, CV_8UC1, cv::Scalar(0));
     cv::Mat selectedMask(size, CV_8UC1, cv::Scalar(0));
     const std::size_t base = static_cast<std::size_t>(index) * MAX_SPRITE_DETECT_AREAS * 4;
+    int firstValidIndex = -1;
+    cv::Rect firstValidRect;
+    bool hasDifferentValid = false;
     for (int area = 0; area < MAX_SPRITE_DETECT_AREAS; ++area) {
         const std::size_t areaBase = base + static_cast<std::size_t>(area) * 4;
         if (areaBase + 3 >= m_spriteDetAreas.size()) {
@@ -7189,17 +7452,59 @@ void MainWindow::updateSpriteDetAreaOverlay(int index)
         const int fullY = static_cast<int>(m_spriteDetAreas[areaBase + 1]);
         const int w = static_cast<int>(m_spriteDetAreas[areaBase + 2]);
         const int h = static_cast<int>(m_spriteDetAreas[areaBase + 3]);
+        if (w <= 0 || h <= 0) {
+            continue;
+        }
         cv::Rect rect(fullX - offsetX, fullY - offsetY, w, h);
         rect &= cv::Rect(0, 0, size.width, size.height);
         if (rect.width <= 0 || rect.height <= 0) {
             continue;
         }
+        if (firstValidIndex < 0) {
+            firstValidIndex = area;
+            firstValidRect = rect;
+        } else if (rect != firstValidRect) {
+            hasDifferentValid = true;
+        }
+    }
+    bool selectedValid = false;
+    for (int area = 0; area < MAX_SPRITE_DETECT_AREAS; ++area) {
+        const std::size_t areaBase = base + static_cast<std::size_t>(area) * 4;
+        if (areaBase + 3 >= m_spriteDetAreas.size()) {
+            continue;
+        }
+        const uint16_t left = m_spriteDetAreas[areaBase];
+        if (left == 0xffff) {
+            continue;
+        }
+        const int fullX = static_cast<int>(left);
+        const int fullY = static_cast<int>(m_spriteDetAreas[areaBase + 1]);
+        const int w = static_cast<int>(m_spriteDetAreas[areaBase + 2]);
+        const int h = static_cast<int>(m_spriteDetAreas[areaBase + 3]);
+        if (w <= 0 || h <= 0) {
+            continue;
+        }
+        cv::Rect rect(fullX - offsetX, fullY - offsetY, w, h);
+        rect &= cv::Rect(0, 0, size.width, size.height);
+        if (rect.width <= 0 || rect.height <= 0) {
+            continue;
+        }
+        if (!hasDifferentValid && area != firstValidIndex && rect == firstValidRect) {
+            continue;
+        }
         cv::rectangle(allMask, rect, cv::Scalar(1), 1);
         if (area == m_spriteDetAreaIndex) {
             cv::rectangle(selectedMask, rect, cv::Scalar(1), 1);
+            selectedValid = true;
         }
     }
     cv::Mat otherMask = allMask.clone();
+    if (!selectedValid && firstValidIndex >= 0 && !hasDifferentValid &&
+        m_spriteDetAreaIndex != firstValidIndex) {
+        m_spritesCanvas->canvas()->clearMaskOutline();
+        m_spritesCanvas->canvas()->setSecondaryMaskOutline(cv::Mat(), QColor());
+        return;
+    }
     if (MaskHasContent(selectedMask)) {
         for (int y = 0; y < otherMask.rows; ++y) {
             uint8_t* row = otherMask.ptr<uint8_t>(y);
@@ -9469,6 +9774,42 @@ void MainWindow::pushDynamicUndoSnapshot(int frameIndex, int setIndex)
     updateUndoActions();
 }
 
+void MainWindow::pushRotationUndoSnapshot(int frameIndex, int setIndex, bool useHd)
+{
+    if (setIndex < 0 || setIndex >= MAX_COLOR_ROTATIONN) {
+        return;
+    }
+    std::vector<uint16_t>& rotations = useHd ? m_frameRotationsX : m_frameRotations;
+    const std::size_t rotationSize = rotations.size();
+    const std::size_t blockSize =
+        static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
+    if (rotationSize == 0) {
+        return;
+    }
+    const std::size_t frameCount = rotationSize / blockSize;
+    if (frameIndex < 0 || static_cast<std::size_t>(frameIndex) >= frameCount) {
+        return;
+    }
+    const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize +
+        static_cast<std::size_t>(setIndex) * MAX_LENGTH_COLOR_ROTATION;
+    if (base + MAX_LENGTH_COLOR_ROTATION > rotations.size()) {
+        return;
+    }
+    PaletteUndoState state;
+    state.kind = PaletteUndoState::Kind::Rotation;
+    state.frame_index = frameIndex;
+    state.set_index = setIndex;
+    state.use_hd = useHd;
+    state.values.resize(MAX_LENGTH_COLOR_ROTATION);
+    std::copy_n(rotations.begin() + base, MAX_LENGTH_COLOR_ROTATION, state.values.begin());
+    m_paletteUndo.push_back(state);
+    if (m_paletteUndo.size() > m_maxUndoDepth) {
+        m_paletteUndo.erase(m_paletteUndo.begin());
+    }
+    m_paletteRedo.clear();
+    updateUndoActions();
+}
+
 bool MainWindow::undoPaletteEdit()
 {
     if (m_paletteUndo.empty()) {
@@ -9508,6 +9849,20 @@ bool MainWindow::undoPaletteEdit()
                 current.values.resize(static_cast<std::size_t>(stride));
                 std::copy_n(colors.begin() + offset, stride, current.values.begin());
             }
+        }
+    } else if (previous.kind == PaletteUndoState::Kind::Rotation) {
+        current.kind = PaletteUndoState::Kind::Rotation;
+        current.frame_index = previous.frame_index;
+        current.set_index = previous.set_index;
+        current.use_hd = previous.use_hd;
+        std::vector<uint16_t>& rotations = previous.use_hd ? m_frameRotationsX : m_frameRotations;
+        const std::size_t blockSize =
+            static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
+        const std::size_t base = static_cast<std::size_t>(previous.frame_index) * blockSize +
+            static_cast<std::size_t>(previous.set_index) * MAX_LENGTH_COLOR_ROTATION;
+        if (base + MAX_LENGTH_COLOR_ROTATION <= rotations.size()) {
+            current.values.resize(MAX_LENGTH_COLOR_ROTATION);
+            std::copy_n(rotations.begin() + base, MAX_LENGTH_COLOR_ROTATION, current.values.begin());
         }
     }
     m_paletteRedo.push_back(current);
@@ -9555,6 +9910,21 @@ bool MainWindow::undoPaletteEdit()
                 updateFrameCanvasImage(previous.frame_index);
             }
         }
+    } else if (previous.kind == PaletteUndoState::Kind::Rotation) {
+        std::vector<uint16_t>& rotations = previous.use_hd ? m_frameRotationsX : m_frameRotations;
+        const std::size_t blockSize =
+            static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
+        const std::size_t base = static_cast<std::size_t>(previous.frame_index) * blockSize +
+            static_cast<std::size_t>(previous.set_index) * MAX_LENGTH_COLOR_ROTATION;
+        if (base + MAX_LENGTH_COLOR_ROTATION <= rotations.size() &&
+            previous.values.size() >= MAX_LENGTH_COLOR_ROTATION) {
+            std::copy_n(previous.values.begin(), MAX_LENGTH_COLOR_ROTATION, rotations.begin() + base);
+            m_rotationSetIndex = previous.set_index;
+            if (m_framesList && previous.frame_index == m_framesList->currentRow()) {
+                refreshRotationEditor();
+                resetCanvasRotationState();
+            }
+        }
     }
     updateUndoActions();
     return true;
@@ -9600,6 +9970,20 @@ bool MainWindow::redoPaletteEdit()
                 std::copy_n(colors.begin() + offset, stride, current.values.begin());
             }
         }
+    } else if (next.kind == PaletteUndoState::Kind::Rotation) {
+        current.kind = PaletteUndoState::Kind::Rotation;
+        current.frame_index = next.frame_index;
+        current.set_index = next.set_index;
+        current.use_hd = next.use_hd;
+        std::vector<uint16_t>& rotations = next.use_hd ? m_frameRotationsX : m_frameRotations;
+        const std::size_t blockSize =
+            static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
+        const std::size_t base = static_cast<std::size_t>(next.frame_index) * blockSize +
+            static_cast<std::size_t>(next.set_index) * MAX_LENGTH_COLOR_ROTATION;
+        if (base + MAX_LENGTH_COLOR_ROTATION <= rotations.size()) {
+            current.values.resize(MAX_LENGTH_COLOR_ROTATION);
+            std::copy_n(rotations.begin() + base, MAX_LENGTH_COLOR_ROTATION, current.values.begin());
+        }
     }
     m_paletteUndo.push_back(current);
     if (m_paletteUndo.size() > m_maxUndoDepth) {
@@ -9644,6 +10028,21 @@ bool MainWindow::redoPaletteEdit()
             updateFramePreviewAt(next.frame_index);
             if (m_framesList && next.frame_index == m_framesList->currentRow()) {
                 updateFrameCanvasImage(next.frame_index);
+            }
+        }
+    } else if (next.kind == PaletteUndoState::Kind::Rotation) {
+        std::vector<uint16_t>& rotations = next.use_hd ? m_frameRotationsX : m_frameRotations;
+        const std::size_t blockSize =
+            static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
+        const std::size_t base = static_cast<std::size_t>(next.frame_index) * blockSize +
+            static_cast<std::size_t>(next.set_index) * MAX_LENGTH_COLOR_ROTATION;
+        if (base + MAX_LENGTH_COLOR_ROTATION <= rotations.size() &&
+            next.values.size() >= MAX_LENGTH_COLOR_ROTATION) {
+            std::copy_n(next.values.begin(), MAX_LENGTH_COLOR_ROTATION, rotations.begin() + base);
+            m_rotationSetIndex = next.set_index;
+            if (m_framesList && next.frame_index == m_framesList->currentRow()) {
+                refreshRotationEditor();
+                resetCanvasRotationState();
             }
         }
     }
@@ -9991,13 +10390,17 @@ void MainWindow::updateRotationDelay(int delayMs)
         static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
     const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize +
         static_cast<std::size_t>(m_rotationSetIndex) * MAX_LENGTH_COLOR_ROTATION;
-    std::vector<uint16_t>& rotations = (m_useHdFrame && hasHdFrame(frameIndex))
-        ? m_frameRotationsX
-        : m_frameRotations;
+    const bool useHd = m_useHdFrame && hasHdFrame(frameIndex);
+    std::vector<uint16_t>& rotations = useHd ? m_frameRotationsX : m_frameRotations;
     if (base + MAX_LENGTH_COLOR_ROTATION > rotations.size()) {
         return;
     }
-    rotations[base + 1] = static_cast<uint16_t>(std::clamp(delayMs, 0, 60000));
+    const uint16_t clamped = static_cast<uint16_t>(std::clamp(delayMs, 0, 60000));
+    if (rotations[base + 1] == clamped) {
+        return;
+    }
+    pushRotationUndoSnapshot(frameIndex, m_rotationSetIndex, useHd);
+    rotations[base + 1] = clamped;
     resetCanvasRotationState();
 }
 
@@ -11086,6 +11489,9 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
     if (!m_uiReady) {
         return QMainWindow::eventFilter(obj, event);
     }
+    if (m_projectLabel && obj == m_projectLabel && event->type() == QEvent::Resize) {
+        updateProjectLabelHeight();
+    }
     if (m_paletteList &&
         (obj == m_paletteList || obj == m_paletteList->viewport())) {
         if (event->type() == QEvent::MouseButtonPress) {
@@ -11319,13 +11725,13 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
             if (frameIndex < 0) {
                 return;
             }
+            const bool useHd = m_useHdFrame && hasHdFrame(frameIndex);
+            pushRotationUndoSnapshot(frameIndex, m_rotationSetIndex, useHd);
             const std::size_t blockSize =
                 static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
             const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize +
                 static_cast<std::size_t>(m_rotationSetIndex) * MAX_LENGTH_COLOR_ROTATION;
-            std::vector<uint16_t>& rotations = (m_useHdFrame && hasHdFrame(frameIndex))
-                ? m_frameRotationsX
-                : m_frameRotations;
+            std::vector<uint16_t>& rotations = useHd ? m_frameRotationsX : m_frameRotations;
             if (base + MAX_LENGTH_COLOR_ROTATION > rotations.size()) {
                 return;
             }
@@ -11681,6 +12087,25 @@ void MainWindow::populateBookmarks(const std::vector<uint32_t>& frameStarts,
     }
 }
 
+void MainWindow::updateProjectLabelHeight()
+{
+    if (!m_projectLabel) {
+        return;
+    }
+    const int width = std::max(0, m_projectLabel->width());
+    if (width == 0) {
+        m_projectLabel->adjustSize();
+        return;
+    }
+    const QFontMetrics metrics(m_projectLabel->font());
+    const QRect bounds = metrics.boundingRect(QRect(0, 0, width, 100000),
+                                              Qt::TextWordWrap,
+                                              m_projectLabel->text());
+    const int height = std::max(bounds.height(), metrics.lineSpacing());
+    m_projectLabel->setFixedHeight(height + 2);
+    m_projectLabel->updateGeometry();
+}
+
 void MainWindow::handleToolPress(bool isFrame,
                                  int x,
                                  int y,
@@ -11701,6 +12126,7 @@ void MainWindow::handleToolPress(bool isFrame,
         }
         cv::Mat reference = buildOriginalPreviewForIndex(index);
         FrameLayout layout = BuildFrameLayout(*topFrame, reference);
+        const int gap = FrameGapForWidth(layout.topWidth);
         int localX = x;
         int localY = y;
         m_frameDrawOnMask = false;
@@ -11721,7 +12147,6 @@ void MainWindow::handleToolPress(bool isFrame,
             }
             const bool useBottom = m_showOriginalFrame && !reference.empty();
             if (useBottom) {
-                const int gap = kFrameGapPixels;
                 if (y < layout.topHeight + gap || y >= layout.topHeight + gap + layout.bottomHeight ||
                     x < layout.bottomX || x >= layout.bottomX + layout.bottomWidth) {
                     return;
@@ -11822,7 +12247,6 @@ void MainWindow::handleToolPress(bool isFrame,
         if (!m_showOriginalFrame) {
             m_frameDrawOnMask = false;
         } else if (m_maskMode != MaskMode::None) {
-            const int gap = kFrameGapPixels;
             if (y >= layout.topHeight + gap &&
                 y < layout.topHeight + gap + layout.bottomHeight &&
                 x >= layout.bottomX && x < layout.bottomX + layout.bottomWidth) {
@@ -11985,7 +12409,7 @@ void MainWindow::handleToolPress(bool isFrame,
         cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseWidth, baseHeight));
         FrameLayout layout = BuildFrameLayout(baseWidth, baseHeight,
                                               displayOriginal.cols, displayOriginal.rows);
-        const int gap = kFrameGapPixels;
+        const int gap = FrameGapForWidth(layout.topWidth);
         if (y < layout.topHeight + gap || y >= layout.topHeight + gap + layout.bottomHeight ||
             x < layout.bottomX || x >= layout.bottomX + layout.bottomWidth) {
             return;
@@ -12242,11 +12666,11 @@ void MainWindow::handleToolDrag(bool isFrame,
         }
         cv::Mat reference = buildOriginalPreviewForIndex(index);
         FrameLayout layout = BuildFrameLayout(*topFrame, reference);
+        const int gap = FrameGapForWidth(layout.topWidth);
         const bool useBottom = m_showOriginalFrame && !reference.empty();
         int localX = x;
         int localY = y;
         if (useBottom) {
-            const int gap = kFrameGapPixels;
             if (y < layout.topHeight + gap || y >= layout.topHeight + gap + layout.bottomHeight ||
                 x < layout.bottomX || x >= layout.bottomX + layout.bottomWidth) {
                 return;
@@ -12300,7 +12724,7 @@ void MainWindow::handleToolDrag(bool isFrame,
         QRect region;
         if (useBottom) {
             region = QRect(layout.bottomX,
-                           layout.topHeight + kFrameGapPixels,
+                           layout.topHeight + gap,
                            layout.bottomWidth,
                            layout.bottomHeight);
         } else {
@@ -12394,7 +12818,7 @@ void MainWindow::handleToolDrag(bool isFrame,
         const int bottomWidth = reference.cols > 0 && frameImage->cols == reference.cols * 2 ? frameImage->cols : reference.cols;
         const int bottomHeight = reference.rows > 0 && frameImage->rows == reference.rows * 2 ? frameImage->rows : reference.rows;
         FrameLayout layout = BuildFrameLayout(frameImage->cols, frameImage->rows, bottomWidth, bottomHeight);
-        const int gap = kFrameGapPixels;
+        const int gap = FrameGapForWidth(layout.topWidth);
         if (y < layout.topHeight + gap || y >= layout.topHeight + gap + layout.bottomHeight ||
             x < layout.bottomX || x >= layout.bottomX + layout.bottomWidth) {
             return;
@@ -12480,15 +12904,15 @@ void MainWindow::handleToolDrag(bool isFrame,
             applyToolToMask(previewMask, m_drawTool, m_frameStart, QPoint(x, y), erase);
         }
         if (const cv::Mat* frame = activeFrameImage(index, false)) {
-            const QColor gap = m_framesCanvas->palette().color(QPalette::Window);
-            const cv::Scalar gapColor(gap.blue(), gap.green(), gap.red());
+            const QColor gapColorQt = m_framesCanvas->palette().color(QPalette::Window);
+            const cv::Scalar gapColor(gapColorQt.blue(), gapColorQt.green(), gapColorQt.red());
             cv::Mat base = renderFrameWithSerum(index, m_useHdFrame);
             cv::Mat preview = buildCombinedMaskPreview(base, reference, previewMask, color, gapColor);
             m_framesCanvas->canvas()->setPreviewImage(preview);
             QRect outlineRegion;
             if (m_showOriginalFrame) {
                 outlineRegion = QRect(layout.bottomX,
-                                      layout.topHeight + kFrameGapPixels,
+                                      layout.topHeight + gap,
                                       layout.bottomWidth,
                                       layout.bottomHeight);
             }
@@ -12537,7 +12961,7 @@ void MainWindow::handleToolDrag(bool isFrame,
         cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseWidth, baseHeight));
         FrameLayout layout = BuildFrameLayout(baseWidth, baseHeight,
                                               displayOriginal.cols, displayOriginal.rows);
-        const int gap = kFrameGapPixels;
+        const int gap = FrameGapForWidth(layout.topWidth);
         if (y < layout.topHeight + gap || y >= layout.topHeight + gap + layout.bottomHeight ||
             x < layout.bottomX || x >= layout.bottomX + layout.bottomWidth) {
             return;
@@ -12587,7 +13011,7 @@ void MainWindow::handleToolDrag(bool isFrame,
             cv::rectangle(otherMask, rect, cv::Scalar(1), 1);
         }
         QRect region(layout.bottomX,
-                     layout.topHeight + kFrameGapPixels,
+                     layout.topHeight + gap,
                      layout.bottomWidth,
                      layout.bottomHeight);
         m_spritesCanvas->canvas()->setMaskOutline(previewMask, QColor(255, 200, 0), region);
@@ -12879,11 +13303,11 @@ void MainWindow::handleToolRelease(bool isFrame,
         }
         cv::Mat reference = buildOriginalPreviewForIndex(index);
         FrameLayout layout = BuildFrameLayout(*topFrame, reference);
+        const int gap = FrameGapForWidth(layout.topWidth);
         const bool useBottom = m_showOriginalFrame && !reference.empty();
         int localX = x;
         int localY = y;
         if (useBottom) {
-            const int gap = kFrameGapPixels;
             if (y < layout.topHeight + gap || y >= layout.topHeight + gap + layout.bottomHeight ||
                 x < layout.bottomX || x >= layout.bottomX + layout.bottomWidth) {
                 m_frameHasStart = false;
@@ -13046,7 +13470,7 @@ void MainWindow::handleToolRelease(bool isFrame,
         const int bottomWidth = reference.cols > 0 && frameImage->cols == reference.cols * 2 ? frameImage->cols : reference.cols;
         const int bottomHeight = reference.rows > 0 && frameImage->rows == reference.rows * 2 ? frameImage->rows : reference.rows;
         FrameLayout layout = BuildFrameLayout(frameImage->cols, frameImage->rows, bottomWidth, bottomHeight);
-        const int gap = kFrameGapPixels;
+        const int gap = FrameGapForWidth(layout.topWidth);
         if (y < layout.topHeight + gap || y >= layout.topHeight + gap + layout.bottomHeight ||
             x < layout.bottomX || x >= layout.bottomX + layout.bottomWidth) {
             m_frameHasStart = false;
@@ -13164,7 +13588,7 @@ void MainWindow::handleToolRelease(bool isFrame,
         cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseWidth, baseHeight));
         FrameLayout layout = BuildFrameLayout(baseWidth, baseHeight,
                                               displayOriginal.cols, displayOriginal.rows);
-        const int gap = kFrameGapPixels;
+        const int gap = FrameGapForWidth(layout.topWidth);
         if (y < layout.topHeight + gap || y >= layout.topHeight + gap + layout.bottomHeight ||
             x < layout.bottomX || x >= layout.bottomX + layout.bottomWidth) {
             m_spriteHasStart = false;

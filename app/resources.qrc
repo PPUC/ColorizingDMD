@@ -1,6 +1,6 @@
 <RCC>
     <qresource prefix="/app">
-        <file alias="app.ico">../ColorizingDMD.ico</file>
+        <file alias="app.png">../icons/app-icon.png</file>
     </qresource>
     <qresource prefix="/icons">
         <file alias="new.png">../icons/new.png</file>
@@ -10,5 +10,12 @@
         <file alias="add.png">../icons/add.png</file>
         <file alias="addspr.png">../icons/addspr.png</file>
         <file alias="remove.png">../icons/delimage.png</file>
+        <file alias="crayon.png">../icons/crayon.png</file>
+        <file alias="trait.png">../icons/trait.png</file>
+        <file alias="select.png">../icons/select.png</file>
+        <file alias="cercle.png">../icons/cercle.png</file>
+        <file alias="ellipse.png">../icons/ellipse.png</file>
+        <file alias="colpick.png">../icons/colpick.png</file>
+        <file alias="drawall.png">../icons/drawall.png</file>
     </qresource>
 </RCC>
