@@ -116,8 +116,8 @@ bool SaveLegacyProject(const std::string& crom_path,
         return false;
     }
 
-    uint32_t frame_width_x = frame_width;
-    uint32_t frame_height_x = frame_height;
+    uint32_t frame_width_x = project.frame_width_x > 0 ? project.frame_width_x : frame_width;
+    uint32_t frame_height_x = project.frame_height_x > 0 ? project.frame_height_x : frame_height;
     const uint32_t n_frames = static_cast<uint32_t>(project.frames.size());
     const uint32_t n_sprites = static_cast<uint32_t>(project.sprites.size());
     const uint32_t no_colors = project.no_colors > 0 ? project.no_colors : 64;
@@ -265,6 +265,12 @@ bool SaveLegacyProject(const std::string& crom_path,
                                              static_cast<std::size_t>(shape_comp.size())); ++i) {
             shape_comp[i] = project.frame_shape_comp_modes[i];
         }
+    }
+
+    if (!project.hash_codes.empty()) {
+        const std::size_t copy = std::min(project.hash_codes.size(),
+                                          static_cast<std::size_t>(hash_codes.size()));
+        std::copy_n(project.hash_codes.begin(), copy, hash_codes.begin());
     }
 
     for (uint32_t index = 0; index < n_frames; ++index) {
@@ -502,6 +508,11 @@ bool SaveLegacyProject(const std::string& crom_path,
     }
 
     std::vector<uint8_t> active_frames(n_frames, 0);
+    if (!project.active_frames.empty()) {
+        const std::size_t copy = std::min(project.active_frames.size(),
+                                          static_cast<std::size_t>(active_frames.size()));
+        std::copy_n(project.active_frames.begin(), copy, active_frames.begin());
+    }
     if (!WriteExact(crom, active_frames.data(), active_frames.size())) {
         if (error) {
             *error = "Failed to write .cROM active frames";
@@ -554,6 +565,11 @@ bool SaveLegacyProject(const std::string& crom_path,
     }
 
     std::vector<uint32_t> trigger_ids(n_frames, 0xffffffffu);
+    if (!project.trigger_ids.empty()) {
+        const std::size_t copy = std::min(project.trigger_ids.size(),
+                                          static_cast<std::size_t>(trigger_ids.size()));
+        std::copy_n(project.trigger_ids.begin(), copy, trigger_ids.begin());
+    }
     if (!WriteExact(crom, trigger_ids.data(), trigger_ids.size() * sizeof(uint32_t))) {
         if (error) {
             *error = "Failed to write .cROM trigger IDs";
@@ -630,6 +646,22 @@ bool SaveLegacyProject(const std::string& crom_path,
     std::vector<uint16_t> dyna_shadow_col_o(dyna_shadow_dirs, 0);
     std::vector<uint8_t> dyna_shadow_dir_x(dyna_shadow_dirs, 0);
     std::vector<uint16_t> dyna_shadow_col_x(dyna_shadow_dirs, 0);
+    if (!project.dynashadow_dir.empty()) {
+        const std::size_t copy = std::min(project.dynashadow_dir.size(), dyna_shadow_dir_o.size());
+        std::copy_n(project.dynashadow_dir.begin(), copy, dyna_shadow_dir_o.begin());
+    }
+    if (!project.dynashadow_col.empty()) {
+        const std::size_t copy = std::min(project.dynashadow_col.size(), dyna_shadow_col_o.size());
+        std::copy_n(project.dynashadow_col.begin(), copy, dyna_shadow_col_o.begin());
+    }
+    if (!project.dynashadow_dir_x.empty()) {
+        const std::size_t copy = std::min(project.dynashadow_dir_x.size(), dyna_shadow_dir_x.size());
+        std::copy_n(project.dynashadow_dir_x.begin(), copy, dyna_shadow_dir_x.begin());
+    }
+    if (!project.dynashadow_col_x.empty()) {
+        const std::size_t copy = std::min(project.dynashadow_col_x.size(), dyna_shadow_col_x.size());
+        std::copy_n(project.dynashadow_col_x.begin(), copy, dyna_shadow_col_x.begin());
+    }
     if (!WriteExact(crom, dyna_shadow_dir_o.data(), dyna_shadow_dir_o.size()) ||
         !WriteExact(crom, dyna_shadow_col_o.data(), dyna_shadow_col_o.size() * sizeof(uint16_t)) ||
         !WriteExact(crom, dyna_shadow_dir_x.data(), dyna_shadow_dir_x.size()) ||
@@ -702,10 +734,10 @@ bool SaveLegacyProject(const std::string& crom_path,
     uint8_t ac_col_set = 0;
     uint8_t pre_col_set = 0;
     std::vector<char> name_col_set(MAX_COL_SETS * 64, 0);
-    uint32_t draw_col_mode = 0;
-    uint8_t draw_mode = 0;
-    int32_t mask_sel_mode = 0;
-    uint32_t fill_mode = 0;
+    uint32_t draw_col_mode = project.draw_col_mode;
+    uint8_t draw_mode = project.draw_mode;
+    int32_t mask_sel_mode = project.mask_sel_mode;
+    uint32_t fill_mode = project.fill_mode;
     std::vector<char> mask_names(MAX_MASKS * SIZE_MASK_NAME, 0);
 
     uint32_t n_sections = static_cast<uint32_t>(project.section_firsts.size());
@@ -737,11 +769,17 @@ bool SaveLegacyProject(const std::string& crom_path,
         }
     }
 
+    if (!project.active_col_sets.empty() &&
+        project.active_col_sets.size() >= static_cast<std::size_t>(MAX_COL_SETS)) {
+        std::copy_n(project.active_col_sets.begin(), MAX_COL_SETS, active_col_set.begin());
+    }
     if (!project.reduced_palettes.empty() &&
         project.reduced_palettes.size() >= static_cast<std::size_t>(MAX_COL_SETS * 16)) {
         col_sets.assign(project.reduced_palettes.begin(),
                         project.reduced_palettes.begin() + static_cast<std::size_t>(MAX_COL_SETS * 16));
-        std::fill(active_col_set.begin(), active_col_set.end(), 1);
+        if (project.active_col_sets.empty()) {
+            std::fill(active_col_set.begin(), active_col_set.end(), 1);
+        }
     }
     if (!project.reduced_palette_names.empty()) {
         for (uint32_t i = 0; i < MAX_COL_SETS && i < project.reduced_palette_names.size(); ++i) {
@@ -750,6 +788,10 @@ bool SaveLegacyProject(const std::string& crom_path,
     }
     ac_col_set = project.active_reduced_palette;
     pre_col_set = project.preview_reduced_palette;
+    if (!project.mask_names.empty()) {
+        const std::size_t copy = std::min(project.mask_names.size(), mask_names.size());
+        std::copy_n(project.mask_names.begin(), copy, mask_names.begin());
+    }
 
     if (!WriteExact(crp, o_frames.data(), o_frames.size()) ||
         !WriteExact(crp, active_col_set.data(), active_col_set.size() * sizeof(uint32_t)) ||
@@ -786,13 +828,13 @@ bool SaveLegacyProject(const std::string& crom_path,
     }
     std::vector<uint16_t> palette(N_PALETTES * 64, 0);
     std::vector<uint16_t> edit_colors(16, 0);
-    uint32_t n_image_pos_saves = 0;
+    uint32_t n_image_pos_saves = project.n_image_pos_saves;
     std::vector<char> image_pos_name(N_IMAGE_POS_TO_SAVE * 64, 0);
     std::vector<int32_t> image_pos(N_IMAGE_POS_TO_SAVE * 16, 0);
     std::vector<char> pal_names(N_PALETTES * 64, 0);
-    uint32_t is_imported = 0;
-    uint32_t time_elapsed = 0;
-    uint32_t is_pup_pack = 0;
+    uint32_t is_imported = project.is_imported;
+    uint32_t time_elapsed = project.time_elapsed;
+    uint32_t is_pup_pack = project.is_pup_pack;
     std::vector<char> pup_pack(sizeof(wchar_t) * 256, 0);
 
     if (!project.palettes.empty() &&
@@ -804,6 +846,22 @@ bool SaveLegacyProject(const std::string& crom_path,
         for (uint32_t i = 0; i < N_PALETTES && i < project.palette_names.size(); ++i) {
             WriteFixedString(pal_names, i * 64, 64, project.palette_names[i]);
         }
+    }
+    if (!project.edit_colors.empty()) {
+        const std::size_t copy = std::min(project.edit_colors.size(), edit_colors.size());
+        std::copy_n(project.edit_colors.begin(), copy, edit_colors.begin());
+    }
+    if (!project.image_pos_names.empty()) {
+        const std::size_t copy = std::min(project.image_pos_names.size(), image_pos_name.size());
+        std::copy_n(project.image_pos_names.begin(), copy, image_pos_name.begin());
+    }
+    if (!project.image_pos_data.empty()) {
+        const std::size_t copy = std::min(project.image_pos_data.size(), image_pos.size());
+        std::copy_n(project.image_pos_data.begin(), copy, image_pos.begin());
+    }
+    if (!project.pup_pack.empty()) {
+        const std::size_t copy = std::min(project.pup_pack.size(), pup_pack.size());
+        std::copy_n(project.pup_pack.begin(), copy, pup_pack.begin());
     }
 
     if (!WriteExact(crp, sprite_rect.data(), sprite_rect.size() * sizeof(uint16_t)) ||

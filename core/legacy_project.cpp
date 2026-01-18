@@ -137,6 +137,7 @@ bool LoadLegacyMetadataFromRP(const std::string& path,
         }
         return false;
     }
+    out.active_col_sets = active_col_set;
 
     out.reduced_palettes.resize(MAX_COL_SETS * 16);
     if (!ReadExact(file, out.reduced_palettes.data(),
@@ -181,13 +182,19 @@ bool LoadLegacyMetadataFromRP(const std::string& path,
         }
         return false;
     }
+    out.draw_col_mode = draw_col_mode;
+    out.draw_mode = draw_mode;
+    out.mask_sel_mode = mask_sel_mode;
+    out.fill_mode = fill_mode;
 
-    if (!SkipExact(file, MAX_MASKS * SIZE_MASK_NAME)) {
+    std::vector<char> mask_names(MAX_MASKS * SIZE_MASK_NAME, 0);
+    if (!ReadExact(file, mask_names.data(), mask_names.size())) {
         if (error) {
             *error = "Unexpected end of .cRP file (mask names)";
         }
         return false;
     }
+    out.mask_names = mask_names;
 
     uint32_t n_sections = 0;
     if (!ReadExact(file, &n_sections, sizeof(n_sections))) {
@@ -260,12 +267,14 @@ bool LoadLegacyMetadataFromRP(const std::string& path,
         return false;
     }
 
-    if (!SkipExact(file, 16 * sizeof(uint16_t))) {
+    std::vector<uint16_t> edit_colors(16, 0);
+    if (!ReadExact(file, edit_colors.data(), edit_colors.size() * sizeof(uint16_t))) {
         if (error) {
             *error = "Unexpected end of .cRP file (edit colors)";
         }
         return false;
     }
+    out.edit_colors = edit_colors;
 
     uint32_t n_image_pos_saves = 0;
     if (!ReadExact(file, &n_image_pos_saves, sizeof(n_image_pos_saves))) {
@@ -274,18 +283,23 @@ bool LoadLegacyMetadataFromRP(const std::string& path,
         }
         return false;
     }
-    if (!SkipExact(file, N_IMAGE_POS_TO_SAVE * 64)) {
+    out.n_image_pos_saves = n_image_pos_saves;
+    std::vector<char> image_pos_names(N_IMAGE_POS_TO_SAVE * 64, 0);
+    if (!ReadExact(file, image_pos_names.data(), image_pos_names.size())) {
         if (error) {
             *error = "Unexpected end of .cRP file (image pos names)";
         }
         return false;
     }
-    if (!SkipExact(file, N_IMAGE_POS_TO_SAVE * 16 * sizeof(int32_t))) {
+    out.image_pos_names = image_pos_names;
+    std::vector<int32_t> image_pos_data(N_IMAGE_POS_TO_SAVE * 16, 0);
+    if (!ReadExact(file, image_pos_data.data(), image_pos_data.size() * sizeof(int32_t))) {
         if (error) {
             *error = "Unexpected end of .cRP file (image pos data)";
         }
         return false;
     }
+    out.image_pos_data = image_pos_data;
 
     std::vector<char> pal_names(N_PALETTES * 64, 0);
     if (!ReadExact(file, pal_names.data(), pal_names.size())) {
@@ -311,12 +325,17 @@ bool LoadLegacyMetadataFromRP(const std::string& path,
         }
         return false;
     }
-    if (!SkipExact(file, sizeof(wchar_t) * 256)) {
+    out.is_imported = is_imported;
+    out.time_elapsed = time_elapsed;
+    out.is_pup_pack = is_pup_pack;
+    std::vector<char> pup_pack(sizeof(wchar_t) * 256, 0);
+    if (!ReadExact(file, pup_pack.data(), pup_pack.size())) {
         if (error) {
             *error = "Unexpected end of .cRP file (pup pack)";
         }
         return false;
     }
+    out.pup_pack = pup_pack;
 
     const uint32_t sections_to_use = std::min<uint32_t>(n_sections, MAX_SECTIONS);
     section_firsts.assign(section_firsts_raw.begin(), section_firsts_raw.begin() + sections_to_use);
@@ -500,6 +519,7 @@ bool LoadLegacyProject(const std::string& path,
         }
         return false;
     }
+    out.hash_codes = hash_codes;
 
     const std::size_t comp_masks_bytes =
         static_cast<std::size_t>(n_comp_masks) * frame_width * frame_height;
@@ -643,12 +663,14 @@ bool LoadLegacyProject(const std::string& path,
         }
     }
 
-    if (!SkipExact(file, static_cast<std::size_t>(n_frames))) {
+    std::vector<uint8_t> active_frames(n_frames, 0);
+    if (!ReadExact(file, active_frames.data(), active_frames.size())) {
         if (error) {
             *error = "Unexpected end of file (active frame data)";
         }
         return false;
     }
+    out.active_frames = active_frames;
 
     std::vector<uint16_t> sprite_dyna_cols;
     std::vector<uint8_t> sprite_dyna_masks;
@@ -697,12 +719,14 @@ bool LoadLegacyProject(const std::string& path,
             out.sprite_det_areas = std::move(det_areas);
             if (length_header >= 11 * sizeof(uint32_t)) {
                 const std::size_t trigger_bytes = static_cast<std::size_t>(n_frames) * sizeof(uint32_t);
-                if (!SkipExact(file, trigger_bytes)) {
+                std::vector<uint32_t> trigger_ids(n_frames, 0xffffffffu);
+                if (trigger_bytes > 0 && !ReadExact(file, trigger_ids.data(), trigger_bytes)) {
                     if (error) {
                         *error = "Unexpected end of file (trigger IDs)";
                     }
                     return false;
                 }
+                out.trigger_ids = std::move(trigger_ids);
                 if (length_header >= 12 * sizeof(uint32_t)) {
                     const std::size_t frame_sprite_bb_bytes =
                         static_cast<std::size_t>(n_frames) * MAX_SPRITES_PER_FRAME * 4 * sizeof(uint16_t);
@@ -756,13 +780,23 @@ bool LoadLegacyProject(const std::string& path,
                                 static_cast<std::size_t>(n_frames) * MAX_DYNA_SETS_PER_FRAMEN;
                             const std::size_t dyna_shadow_cols =
                                 static_cast<std::size_t>(n_frames) * MAX_DYNA_SETS_PER_FRAMEN * sizeof(uint16_t);
-                            if (!SkipExact(file, dyna_shadow_dirs + dyna_shadow_cols +
-                                                   dyna_shadow_dirs + dyna_shadow_cols)) {
+                            std::vector<uint8_t> dyna_shadow_dir_o(dyna_shadow_dirs, 0);
+                            std::vector<uint16_t> dyna_shadow_col_o(dyna_shadow_dirs, 0);
+                            std::vector<uint8_t> dyna_shadow_dir_x(dyna_shadow_dirs, 0);
+                            std::vector<uint16_t> dyna_shadow_col_x(dyna_shadow_dirs, 0);
+                            if (!ReadExact(file, dyna_shadow_dir_o.data(), dyna_shadow_dir_o.size()) ||
+                                !ReadExact(file, dyna_shadow_col_o.data(), dyna_shadow_col_o.size() * sizeof(uint16_t)) ||
+                                !ReadExact(file, dyna_shadow_dir_x.data(), dyna_shadow_dir_x.size()) ||
+                                !ReadExact(file, dyna_shadow_col_x.data(), dyna_shadow_col_x.size() * sizeof(uint16_t))) {
                                 if (error) {
                                     *error = "Unexpected end of file (dynamic shadows)";
                                 }
                                 return false;
                             }
+                            out.dynashadow_dir = std::move(dyna_shadow_dir_o);
+                            out.dynashadow_col = std::move(dyna_shadow_col_o);
+                            out.dynashadow_dir_x = std::move(dyna_shadow_dir_x);
+                            out.dynashadow_col_x = std::move(dyna_shadow_col_x);
                             if (length_header >= 18 * sizeof(uint32_t)) {
                                 const std::size_t sprite_dyna_cols_bytes =
                                     static_cast<std::size_t>(n_sprites) * MAX_DYNA_SETS_PER_SPRITE * no_colors * sizeof(uint16_t);

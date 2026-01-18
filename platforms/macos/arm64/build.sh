@@ -15,14 +15,21 @@ CMAKE_ARGS=()
 if [ -n "${VCPKG_ROOT}" ]; then
    CMAKE_ARGS+=("-DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
 fi
-if [ -z "${CMAKE_PREFIX_PATH}" ] && command -v brew >/dev/null 2>&1; then
+if [ -n "${CMAKE_PREFIX_PATH}" ]; then
+   CMAKE_ARGS+=("-DCMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}")
+   if [ -z "${Qt6_DIR}" ]; then
+      CMAKE_ARGS+=("-DQt6_DIR=${CMAKE_PREFIX_PATH}/lib/cmake/Qt6")
+   fi
+elif command -v brew >/dev/null 2>&1; then
    QT_PREFIX=$(brew --prefix qt 2>/dev/null || true)
    if [ -n "${QT_PREFIX}" ]; then
       CMAKE_ARGS+=("-DCMAKE_PREFIX_PATH=${QT_PREFIX}")
       CMAKE_ARGS+=("-DQt6_DIR=${QT_PREFIX}/lib/cmake/Qt6")
    fi
 fi
-if [ -z "${OpenCV_DIR}" ] && command -v brew >/dev/null 2>&1; then
+if [ -n "${OpenCV_DIR}" ]; then
+   CMAKE_ARGS+=("-DOpenCV_DIR=${OpenCV_DIR}")
+elif command -v brew >/dev/null 2>&1; then
    OPENCV_PREFIX=$(brew --prefix opencv 2>/dev/null || true)
    if [ -n "${OPENCV_PREFIX}" ]; then
       CMAKE_ARGS+=("-DOpenCV_DIR=${OPENCV_PREFIX}/lib/cmake/opencv4")

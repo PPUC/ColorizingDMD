@@ -305,6 +305,34 @@ private:
     void cancelPaletteSetSlot();
     void keyPressEvent(QKeyEvent* event) override;
 
+    struct LegacyRoundTripData {
+        std::string name;
+        uint32_t frame_width_x = 0;
+        uint32_t frame_height_x = 0;
+        std::vector<uint32_t> hash_codes;
+        std::vector<uint8_t> active_frames;
+        std::vector<uint32_t> trigger_ids;
+        std::vector<uint8_t> dynashadow_dir;
+        std::vector<uint16_t> dynashadow_col;
+        std::vector<uint8_t> dynashadow_dir_x;
+        std::vector<uint16_t> dynashadow_col_x;
+        std::vector<uint32_t> active_col_sets;
+        std::vector<char> mask_names;
+        uint32_t draw_col_mode = 0;
+        uint8_t draw_mode = 0;
+        int32_t mask_sel_mode = 0;
+        uint32_t fill_mode = 0;
+        std::vector<uint16_t> edit_colors;
+        uint32_t n_image_pos_saves = 0;
+        std::vector<char> image_pos_names;
+        std::vector<int32_t> image_pos_data;
+        uint32_t is_imported = 0;
+        uint32_t time_elapsed = 0;
+        uint32_t is_pup_pack = 0;
+        std::vector<char> pup_pack;
+        uint8_t preview_reduced_palette = 0;
+    };
+
     class CanvasWidget* m_framesCanvas;
     class CanvasWidget* m_spritesCanvas;
     class CanvasWidget* m_imagesCanvas;
@@ -378,6 +406,8 @@ private:
     class QLabel* m_selectionLabel;
     class QLabel* m_frameMetaLabel;
     class QLabel* m_spriteMetaLabel;
+    bool m_hasLegacyRoundTrip = false;
+    LegacyRoundTripData m_legacyRoundTrip;
     class QLabel* m_coordLabel;
     class QToolButton* m_currentColorButton;
     class QLabel* m_colorInfoLabel;

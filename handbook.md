@@ -117,6 +117,7 @@ This handbook captures editor behaviors and workflows that differ from the legac
 
 - Undo/redo stacks are separated for frames, masks, backgrounds, sprites, and palettes (including rotation edits).
 - Undo/redo applies to all selected frames where relevant.
+- Legacy `.cROM/.cRP` saves preserve existing metadata even if the editor does not expose it yet.
 - Settings dialog allows adjusting undo and navigation history sizes.
 
 ## Open/Save and Legacy Compatibility

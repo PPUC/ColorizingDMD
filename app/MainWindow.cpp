@@ -945,6 +945,10 @@ MainWindow::MainWindow(QWidget* parent)
     auto* openAction = new QAction(QIcon(":/icons/open.png"), "&Open...", this);
     auto* saveAction = new QAction(QIcon(":/icons/save.png"), "&Save", this);
     auto* saveAsAction = new QAction("Save &As...", this);
+    saveAction->setShortcut(QKeySequence::Save);
+    saveAction->setShortcutContext(Qt::ApplicationShortcut);
+    saveAsAction->setShortcut(QKeySequence::SaveAs);
+    saveAsAction->setShortcutContext(Qt::ApplicationShortcut);
     auto* importImageAction = new QAction(QIcon(":/icons/import.png"), "Import &Image...", this);
     auto* exitAction = new QAction("E&xit", this);
     auto* addFrameAction = new QAction(QIcon(":/icons/add.png"), "Add &Frame", this);
@@ -1165,10 +1169,16 @@ MainWindow::MainWindow(QWidget* parent)
         updateMetadataForFrame(-1);
         updateMetadataForSprite(-1);
         populateBookmarks({}, {});
+        m_hasLegacyRoundTrip = false;
+        m_legacyRoundTrip = LegacyRoundTripData{};
         statusBar()->showMessage("New project (stub)", 3000);
     });
     connect(openAction, &QAction::triggered, this, [this]() {
-        const QString filename = QFileDialog::getOpenFileName(this, "Open Project", QString(), "Serum Projects (*.crom *.cROM *.crp *.cRP);;All Files (*.*)");
+        const QString filename = QFileDialog::getOpenFileName(
+            this,
+            "Open Project",
+            QString(),
+            "Serum Projects (*.crom *.cROM *.crp *.cRP);;All Files (*.*)");
         if (!filename.isEmpty()) {
             openProjectFile(filename);
         }
@@ -1188,12 +1198,21 @@ MainWindow::MainWindow(QWidget* parent)
         }
     });
     connect(saveAsAction, &QAction::triggered, this, [this]() {
-        const QString filename = QFileDialog::getSaveFileName(this, "Save Project As", QString(), "Serum Projects (*.crom *.cROM *.crp *.cRP)");
+        const QString filename = QFileDialog::getSaveFileName(
+            this,
+            "Save Project As",
+            QString(),
+            "Serum Projects (*.crom *.cROM *.crp *.cRP)");
+        if (filename.isEmpty()) {
+            return;
+        }
         if (filename.isEmpty()) {
             return;
         }
         if (saveProjectToPath(filename)) {
-            statusBar()->showMessage(QString("Save As: %1").arg(m_state->projectPath()), 5000);
+            updateWindowTitle();
+            persistRecentFiles();
+            statusBar()->showMessage(QString("Save As: %1").arg(filename), 5000);
         } else {
             statusBar()->showMessage("Save failed", 5000);
         }
@@ -4420,6 +4439,8 @@ void MainWindow::openProjectFile(const QString& filename)
             updateMetadataForFrame(-1);
             updateMetadataForSprite(-1);
             populateBookmarks({}, {});
+            m_hasLegacyRoundTrip = false;
+            m_legacyRoundTrip = LegacyRoundTripData{};
             if (LoadProjectJson(*m_state, filename, &error)) {
                 resetUndoStacks();
                 resetNavigationHistory();
@@ -4459,6 +4480,33 @@ void MainWindow::openProjectFile(const QString& filename)
             statusBar()->showMessage(QString("Open failed: %1").arg(QString::fromStdString(error)), 5000);
             return;
         }
+        m_hasLegacyRoundTrip = true;
+        m_legacyRoundTrip = LegacyRoundTripData{};
+        m_legacyRoundTrip.name = legacy.name;
+        m_legacyRoundTrip.frame_width_x = legacy.frame_width_x;
+        m_legacyRoundTrip.frame_height_x = legacy.frame_height_x;
+        m_legacyRoundTrip.hash_codes = legacy.hash_codes;
+        m_legacyRoundTrip.active_frames = legacy.active_frames;
+        m_legacyRoundTrip.trigger_ids = legacy.trigger_ids;
+        m_legacyRoundTrip.dynashadow_dir = legacy.dynashadow_dir;
+        m_legacyRoundTrip.dynashadow_col = legacy.dynashadow_col;
+        m_legacyRoundTrip.dynashadow_dir_x = legacy.dynashadow_dir_x;
+        m_legacyRoundTrip.dynashadow_col_x = legacy.dynashadow_col_x;
+        m_legacyRoundTrip.active_col_sets = legacy.active_col_sets;
+        m_legacyRoundTrip.mask_names = legacy.mask_names;
+        m_legacyRoundTrip.draw_col_mode = legacy.draw_col_mode;
+        m_legacyRoundTrip.draw_mode = legacy.draw_mode;
+        m_legacyRoundTrip.mask_sel_mode = legacy.mask_sel_mode;
+        m_legacyRoundTrip.fill_mode = legacy.fill_mode;
+        m_legacyRoundTrip.edit_colors = legacy.edit_colors;
+        m_legacyRoundTrip.n_image_pos_saves = legacy.n_image_pos_saves;
+        m_legacyRoundTrip.image_pos_names = legacy.image_pos_names;
+        m_legacyRoundTrip.image_pos_data = legacy.image_pos_data;
+        m_legacyRoundTrip.is_imported = legacy.is_imported;
+        m_legacyRoundTrip.time_elapsed = legacy.time_elapsed;
+        m_legacyRoundTrip.is_pup_pack = legacy.is_pup_pack;
+        m_legacyRoundTrip.pup_pack = legacy.pup_pack;
+        m_legacyRoundTrip.preview_reduced_palette = legacy.preview_reduced_palette;
 
         m_imageStore->clear();
         m_frameStore->clear();
@@ -4640,6 +4688,8 @@ void MainWindow::openProjectFile(const QString& filename)
     updateMetadataForFrame(-1);
     updateMetadataForSprite(-1);
     populateBookmarks({}, {});
+    m_hasLegacyRoundTrip = false;
+    m_legacyRoundTrip = LegacyRoundTripData{};
     if (LoadProjectJson(*m_state, filename, &error)) {
         statusBar()->showMessage(QString("Open: %1").arg(filename), 5000);
         persistRecentFiles();
@@ -4703,8 +4753,42 @@ LegacyProject MainWindow::buildLegacyProject(const QString& baseName) const
 {
     LegacyProject project;
     project.name = baseName.toStdString();
+    if (m_hasLegacyRoundTrip) {
+        if (!m_legacyRoundTrip.name.empty()) {
+            project.name = m_legacyRoundTrip.name;
+        }
+        project.frame_width_x = m_legacyRoundTrip.frame_width_x;
+        project.frame_height_x = m_legacyRoundTrip.frame_height_x;
+        project.hash_codes = m_legacyRoundTrip.hash_codes;
+        project.active_frames = m_legacyRoundTrip.active_frames;
+        project.trigger_ids = m_legacyRoundTrip.trigger_ids;
+        project.dynashadow_dir = m_legacyRoundTrip.dynashadow_dir;
+        project.dynashadow_col = m_legacyRoundTrip.dynashadow_col;
+        project.dynashadow_dir_x = m_legacyRoundTrip.dynashadow_dir_x;
+        project.dynashadow_col_x = m_legacyRoundTrip.dynashadow_col_x;
+        project.active_col_sets = m_legacyRoundTrip.active_col_sets;
+        project.mask_names = m_legacyRoundTrip.mask_names;
+        project.draw_col_mode = m_legacyRoundTrip.draw_col_mode;
+        project.draw_mode = m_legacyRoundTrip.draw_mode;
+        project.mask_sel_mode = m_legacyRoundTrip.mask_sel_mode;
+        project.fill_mode = m_legacyRoundTrip.fill_mode;
+        project.edit_colors = m_legacyRoundTrip.edit_colors;
+        project.n_image_pos_saves = m_legacyRoundTrip.n_image_pos_saves;
+        project.image_pos_names = m_legacyRoundTrip.image_pos_names;
+        project.image_pos_data = m_legacyRoundTrip.image_pos_data;
+        project.is_imported = m_legacyRoundTrip.is_imported;
+        project.time_elapsed = m_legacyRoundTrip.time_elapsed;
+        project.is_pup_pack = m_legacyRoundTrip.is_pup_pack;
+        project.pup_pack = m_legacyRoundTrip.pup_pack;
+        project.preview_reduced_palette = m_legacyRoundTrip.preview_reduced_palette;
+    }
 
     const int frameCount = m_frameStore->count();
+    if (m_hasLegacyRoundTrip) {
+        project.hash_codes.resize(static_cast<std::size_t>(frameCount), 0);
+        project.active_frames.resize(static_cast<std::size_t>(frameCount), 0);
+        project.trigger_ids.resize(static_cast<std::size_t>(frameCount), 0xffffffffu);
+    }
     project.frames.reserve(static_cast<std::size_t>(frameCount));
     for (int i = 0; i < frameCount; ++i) {
         if (const cv::Mat* frame = m_frameStore->at(i)) {
@@ -4783,7 +4867,11 @@ LegacyProject MainWindow::buildLegacyProject(const QString& baseName) const
     project.background_masks = m_frameBackgroundMasks;
     project.background_masks_x = m_frameBackgroundMasksX;
     project.active_reduced_palette = static_cast<uint8_t>(std::max(0, std::min(m_reducedPaletteIndex, kReducedPaletteCount - 1)));
-    project.preview_reduced_palette = project.active_reduced_palette;
+    if (!m_hasLegacyRoundTrip) {
+        project.preview_reduced_palette = project.active_reduced_palette;
+    } else if (project.preview_reduced_palette >= kReducedPaletteCount) {
+        project.preview_reduced_palette = project.active_reduced_palette;
+    }
     project.reduced_palettes = m_reducedPaletteIndices;
     project.reduced_palette_names = m_reducedPaletteNames;
     project.palettes.clear();
@@ -12438,7 +12526,28 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
                     pos = m_framePreviewList->viewport()->mapFrom(m_framePreviewList, pos);
                 }
                 QListWidgetItem* hit = m_framePreviewList->itemAt(pos);
-                if (!hit) {
+                bool hitContent = false;
+                if (hit) {
+                    const QRect itemRect = m_framePreviewList->visualItemRect(hit);
+                    const QFontMetrics metrics(m_framePreviewList->font());
+                    const int padding = 6;
+                    const int textHeight = metrics.height() + 4;
+                    QRect contentRect = itemRect.adjusted(padding, padding, -padding, -padding);
+                    const QVariant sizeData = hit->data(kPreviewIconSizeRole);
+                    const QSize iconSize = sizeData.isValid() && sizeData.toSize().isValid()
+                        ? sizeData.toSize()
+                        : m_framePreviewList->iconSize().isValid()
+                            ? m_framePreviewList->iconSize()
+                            : QSize(kPreviewIconWidth, kPreviewIconHeight);
+                    const int iconX = contentRect.left() + (contentRect.width() - iconSize.width()) / 2;
+                    QRect iconRect(iconX,
+                                   contentRect.top() + textHeight + 2,
+                                   iconSize.width(),
+                                   contentRect.height() - textHeight - 2);
+                    QRect textRect(iconRect.left(), contentRect.top(), iconRect.width(), textHeight);
+                    hitContent = iconRect.contains(pos) || textRect.contains(pos);
+                }
+                if (!hit || !hitContent) {
                     clearPreviewSelection();
                     return true;
                 }

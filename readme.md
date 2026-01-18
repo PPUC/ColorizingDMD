@@ -8,6 +8,10 @@ Click on the "releases" link on the right hand side of this page.
 
 # Build
 
+## Full rebuild
+1. `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release`
+2. `cmake --build build --config Release --target PPUC-Serum-Colorizer`
+
 ## macOS (Homebrew)
 1. `brew install qt opencv`
 2. `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix qt)" -DOpenCV_DIR="$(brew --prefix opencv)/lib/cmake/opencv4"`

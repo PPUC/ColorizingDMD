@@ -1,4 +1,5 @@
 set(APP_NAME "PPUC-Serum-Colorizer")
+set(APP_BUNDLE_ID "org.ppuc.serum-colorizer")
 add_executable(${APP_NAME})
 
 set(APP_ICON_PNG ${CMAKE_SOURCE_DIR}/icons/app-icon.png)
@@ -7,9 +8,11 @@ set(APP_ICON_ICO ${CMAKE_SOURCE_DIR}/icons/app-icon.ico)
 
 set(HANDBOOK_MD ${CMAKE_SOURCE_DIR}/handbook.md)
 set(HANDBOOK_QRC ${CMAKE_CURRENT_BINARY_DIR}/handbook.qrc)
+set(APP_INFO_PLIST ${CMAKE_CURRENT_BINARY_DIR}/Info.plist)
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/handbook.qrc.in ${HANDBOOK_QRC} @ONLY)
 set_source_files_properties(${HANDBOOK_QRC} PROPERTIES GENERATED TRUE)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in ${APP_INFO_PLIST} @ONLY)
 
 target_sources(${APP_NAME} PRIVATE
     main.cpp
@@ -38,6 +41,7 @@ if (APPLE)
     set_target_properties(${APP_NAME} PROPERTIES
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_ICON_FILE "app-icon"
+        MACOSX_BUNDLE_INFO_PLIST ${APP_INFO_PLIST}
     )
     if (EXISTS ${APP_ICON_ICNS})
         set_source_files_properties(${APP_ICON_ICNS} PROPERTIES
