@@ -145,6 +145,7 @@ private:
     cv::Mat* activeSpriteImageMutable(int index);
     const cv::Mat* spriteOriginalForDisplay(int index) const;
     QRect spriteDisplayRect(int index, const cv::Mat& image) const;
+    QRect spriteDisplayContentRect(int index) const;
     void refreshRotationEditor();
     void refreshRotationList();
     void updateRotationDelay(int delayMs);

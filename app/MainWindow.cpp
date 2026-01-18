@@ -125,6 +125,7 @@ uint16_t BgrToRgb565(const cv::Vec3b& color);
 cv::Vec3b Rgb565ToBgr(uint16_t value);
 std::vector<uint16_t> ConvertBgrMatToRgb565(const cv::Mat& source);
 cv::Mat ConvertRgb565ToBgrMat(const uint16_t* data, int width, int height);
+cv::Mat Scale2xBgr(const cv::Mat& source);
 
 struct FrameLayout {
     int topWidth = 0;
@@ -245,6 +246,87 @@ cv::Mat AdjustBrightnessToSource(const cv::Mat& source, const cv::Mat& resized)
     cv::Mat adjusted;
     floatMat.convertTo(adjusted, CV_8UC3);
     return adjusted;
+}
+
+cv::Mat UpscaleSpriteToHd(const cv::Mat& source,
+                          const QRect& contentRect,
+                          int interpolation,
+                          bool isMask,
+                          uint8_t fillValue)
+{
+    if (source.empty()) {
+        return cv::Mat();
+    }
+    const cv::Size targetSize(MAX_SPRITE_WIDTH, MAX_SPRITE_HEIGHT);
+    cv::Mat output;
+    if (source.channels() == 1) {
+        output = cv::Mat(targetSize, CV_8UC1, cv::Scalar(fillValue));
+    } else {
+        output = cv::Mat(targetSize, CV_8UC3, cv::Scalar(0, 0, 0));
+    }
+    QRect srcRect = contentRect;
+    if (!srcRect.isValid() || srcRect.isEmpty()) {
+        srcRect = QRect(0, 0, source.cols, source.rows);
+    }
+    srcRect = srcRect.intersected(QRect(0, 0, source.cols, source.rows));
+    if (srcRect.width() <= 0 || srcRect.height() <= 0) {
+        return output;
+    }
+    const cv::Rect roi(srcRect.x(), srcRect.y(), srcRect.width(), srcRect.height());
+    cv::Mat cropped = source(roi).clone();
+    const int scaledWidth = srcRect.width() * 2;
+    const int scaledHeight = srcRect.height() * 2;
+    cv::Mat scaled;
+    if (scaledWidth > targetSize.width || scaledHeight > targetSize.height) {
+        if (isMask) {
+            cv::resize(cropped, scaled, targetSize, 0.0, 0.0, cv::INTER_NEAREST);
+        } else if (interpolation == -1) {
+            scaled = Scale2xBgr(EnsureBgr(cropped));
+            if (scaled.size() != targetSize) {
+                cv::resize(EnsureBgr(cropped), scaled, targetSize, 0.0, 0.0, cv::INTER_NEAREST);
+            }
+        } else {
+            cv::resize(EnsureBgr(cropped), scaled, targetSize, 0.0, 0.0, interpolation);
+            if (interpolation == cv::INTER_LINEAR || interpolation == cv::INTER_CUBIC) {
+                scaled = AdjustBrightnessToSource(EnsureBgr(cropped), scaled);
+            }
+        }
+        if (!scaled.empty()) {
+            scaled.copyTo(output);
+        }
+        return output;
+    }
+
+    if (isMask) {
+        cv::resize(cropped, scaled, cv::Size(scaledWidth, scaledHeight), 0.0, 0.0, cv::INTER_NEAREST);
+    } else if (interpolation == -1) {
+        scaled = Scale2xBgr(EnsureBgr(cropped));
+        if (scaled.size() != cv::Size(scaledWidth, scaledHeight)) {
+            cv::resize(EnsureBgr(cropped), scaled, cv::Size(scaledWidth, scaledHeight), 0.0, 0.0, cv::INTER_NEAREST);
+        }
+    } else {
+        cv::resize(EnsureBgr(cropped), scaled, cv::Size(scaledWidth, scaledHeight), 0.0, 0.0, interpolation);
+        if (interpolation == cv::INTER_LINEAR || interpolation == cv::INTER_CUBIC) {
+            scaled = AdjustBrightnessToSource(EnsureBgr(cropped), scaled);
+        }
+    }
+
+    if (scaled.empty()) {
+        return output;
+    }
+    const QRect dstRect(srcRect.x() * 2, srcRect.y() * 2, scaled.cols, scaled.rows);
+    const QRect targetRect(0, 0, targetSize.width, targetSize.height);
+    const QRect clipped = dstRect.intersected(targetRect);
+    if (clipped.isEmpty()) {
+        return output;
+    }
+    const cv::Rect srcClip(clipped.x() - dstRect.x(),
+                           clipped.y() - dstRect.y(),
+                           clipped.width(),
+                           clipped.height());
+    const cv::Rect dstClip(clipped.x(), clipped.y(), clipped.width(), clipped.height());
+    scaled(srcClip).copyTo(output(dstClip));
+    return output;
 }
 
 cv::Mat Scale2xBgr(const cv::Mat& source)
@@ -2470,15 +2552,10 @@ MainWindow::MainWindow(QWidget* parent)
                 m_spriteExtraFlags.resize(static_cast<std::size_t>(index + 1), 0);
             }
             const int interpolation = m_hdScaleCombo ? m_hdScaleCombo->currentData().toInt() : cv::INTER_NEAREST;
-            cv::Mat hd;
-            if (interpolation == -1) {
-                hd = Scale2xBgr(EnsureBgr(*src));
-            } else {
-                cv::resize(EnsureBgr(*src), hd, cv::Size(src->cols * 2, src->rows * 2), 0.0, 0.0, interpolation);
-                if (interpolation == cv::INTER_LINEAR || interpolation == cv::INTER_CUBIC) {
-                    hd = AdjustBrightnessToSource(*src, hd);
-                }
-            }
+            const QRect contentRect = spriteContentRect(index);
+            const cv::Size targetSize(MAX_SPRITE_WIDTH, MAX_SPRITE_HEIGHT);
+            const cv::Mat srcBgr = EnsureBgr(*src);
+            cv::Mat hd = UpscaleSpriteToHd(srcBgr, contentRect, interpolation, false, 0);
             if (hd.empty()) {
                 statusBar()->showMessage("HD sprite create failed.", 2000);
                 return;
@@ -2491,8 +2568,8 @@ MainWindow::MainWindow(QWidget* parent)
             if (index < static_cast<int>(m_spriteDynamicMasks.size())) {
                 const cv::Mat& sdMask = m_spriteDynamicMasks[static_cast<std::size_t>(index)];
                 cv::Mat& hdMask = m_spriteDynamicMasksX[static_cast<std::size_t>(index)];
-                if (!sdMask.empty() && (hdMask.empty() || hdMask.size() != hd.size())) {
-                    cv::resize(sdMask, hdMask, hd.size(), 0.0, 0.0, cv::INTER_NEAREST);
+                if (!sdMask.empty() && (hdMask.empty() || hdMask.size() != targetSize)) {
+                    hdMask = UpscaleSpriteToHd(sdMask, contentRect, cv::INTER_NEAREST, true, 255);
                 }
             }
             if (m_spriteMasksX.size() <= static_cast<std::size_t>(index)) {
@@ -2501,8 +2578,8 @@ MainWindow::MainWindow(QWidget* parent)
             if (index < static_cast<int>(m_spriteOriginals.size())) {
                 const cv::Mat& sdOriginal = m_spriteOriginals[static_cast<std::size_t>(index)];
                 cv::Mat& hdMask = m_spriteMasksX[static_cast<std::size_t>(index)];
-                if (!sdOriginal.empty() && (hdMask.empty() || hdMask.size() != hd.size())) {
-                    cv::resize(sdOriginal, hdMask, hd.size(), 0.0, 0.0, cv::INTER_NEAREST);
+                if (!sdOriginal.empty() && (hdMask.empty() || hdMask.size() != targetSize)) {
+                    hdMask = UpscaleSpriteToHd(sdOriginal, contentRect, cv::INTER_NEAREST, true, 255);
                 }
             }
             m_useHdSprite = true;
@@ -2532,6 +2609,168 @@ MainWindow::MainWindow(QWidget* parent)
         }
         const int sourceMode = m_hdSourceCombo ? m_hdSourceCombo->currentData().toInt() : 0;
         const int interpolation = m_hdScaleCombo ? m_hdScaleCombo->currentData().toInt() : cv::INTER_NEAREST;
+        std::unordered_set<int> spritesToScale;
+        if (m_spriteStore) {
+            const int spriteCount = m_spriteStore->count();
+            for (int index : targets) {
+                if (index < 0 || index >= frameCount) {
+                    continue;
+                }
+                const std::size_t baseSlot = static_cast<std::size_t>(index) * MAX_SPRITES_PER_FRAME;
+                if (baseSlot + MAX_SPRITES_PER_FRAME > m_frameSpriteAssignments.size()) {
+                    continue;
+                }
+                for (int slot = 0; slot < MAX_SPRITES_PER_FRAME; ++slot) {
+                    const uint8_t spriteId = m_frameSpriteAssignments[baseSlot + static_cast<std::size_t>(slot)];
+                    if (spriteId == 255 || spriteId >= spriteCount) {
+                        continue;
+                    }
+                    const bool hasExtra = spriteId < m_spriteColoredX.size() &&
+                        !m_spriteColoredX[static_cast<std::size_t>(spriteId)].empty();
+                    if (!hasExtra) {
+                        spritesToScale.insert(static_cast<int>(spriteId));
+                    }
+                }
+            }
+        }
+        if (!spritesToScale.empty()) {
+            QMessageBox::StandardButton reply = QMessageBox::question(
+                this,
+                "Create HD Sprites",
+                QString("The selected frames use %1 sprite(s) without HD images.\n"
+                        "Create HD sprites now?")
+                    .arg(spritesToScale.size()),
+                QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel,
+                QMessageBox::Yes);
+            if (reply == QMessageBox::Cancel) {
+                return;
+            }
+            if (reply == QMessageBox::Yes && m_spriteStore) {
+                for (int spriteIndex : spritesToScale) {
+                    if (spriteIndex < 0 || spriteIndex >= m_spriteStore->count()) {
+                        continue;
+                    }
+                    if (spriteIndex < static_cast<int>(m_spriteColoredX.size()) &&
+                        !m_spriteColoredX[static_cast<std::size_t>(spriteIndex)].empty()) {
+                        continue;
+                    }
+                    const cv::Mat* src = m_spriteStore->at(spriteIndex);
+                    if (!src || src->empty()) {
+                        continue;
+                    }
+                    if (m_spriteColoredX.size() <= static_cast<std::size_t>(spriteIndex)) {
+                        m_spriteColoredX.resize(static_cast<std::size_t>(spriteIndex + 1));
+                    }
+                    if (m_spriteExtraFlags.size() <= static_cast<std::size_t>(spriteIndex)) {
+                        m_spriteExtraFlags.resize(static_cast<std::size_t>(spriteIndex + 1), 0);
+                    }
+                    const QRect contentRect = spriteContentRect(spriteIndex);
+                    const cv::Size targetSize(MAX_SPRITE_WIDTH, MAX_SPRITE_HEIGHT);
+                    const cv::Mat srcBgr = EnsureBgr(*src);
+                    cv::Mat hd = UpscaleSpriteToHd(srcBgr, contentRect, interpolation, false, 0);
+                    if (hd.empty()) {
+                        continue;
+                    }
+                    m_spriteColoredX[static_cast<std::size_t>(spriteIndex)] = hd;
+                    m_spriteExtraFlags[static_cast<std::size_t>(spriteIndex)] = 1;
+                    if (m_spriteDynamicMasksX.size() <= static_cast<std::size_t>(spriteIndex)) {
+                        m_spriteDynamicMasksX.resize(static_cast<std::size_t>(spriteIndex + 1));
+                    }
+                    if (spriteIndex < static_cast<int>(m_spriteDynamicMasks.size())) {
+                        const cv::Mat& sdMask = m_spriteDynamicMasks[static_cast<std::size_t>(spriteIndex)];
+                        cv::Mat& hdMask = m_spriteDynamicMasksX[static_cast<std::size_t>(spriteIndex)];
+                        if (!sdMask.empty() && (hdMask.empty() || hdMask.size() != targetSize)) {
+                            hdMask = UpscaleSpriteToHd(sdMask, contentRect, cv::INTER_NEAREST, true, 255);
+                        }
+                    }
+                    if (m_spriteMasksX.size() <= static_cast<std::size_t>(spriteIndex)) {
+                        m_spriteMasksX.resize(static_cast<std::size_t>(spriteIndex + 1));
+                    }
+                    if (spriteIndex < static_cast<int>(m_spriteOriginals.size())) {
+                        const cv::Mat& sdOriginal = m_spriteOriginals[static_cast<std::size_t>(spriteIndex)];
+                        cv::Mat& hdMask = m_spriteMasksX[static_cast<std::size_t>(spriteIndex)];
+                        if (!sdOriginal.empty() && (hdMask.empty() || hdMask.size() != targetSize)) {
+                            hdMask = UpscaleSpriteToHd(sdOriginal, contentRect, cv::INTER_NEAREST, true, 255);
+                        }
+                    }
+                }
+                refreshFrameSpriteLists();
+            }
+        }
+        std::unordered_set<int> backgroundsToScale;
+        if (m_backgroundStore) {
+            const int bgCount = m_backgroundStore->count();
+            for (int index : targets) {
+                if (index < 0 || index >= frameCount) {
+                    continue;
+                }
+                if (index >= static_cast<int>(m_frameBackgroundIds.size())) {
+                    continue;
+                }
+                const uint16_t bgId = m_frameBackgroundIds[static_cast<std::size_t>(index)];
+                if (bgId == 0xffff || bgId >= bgCount) {
+                    continue;
+                }
+                if (!hasHdBackground(static_cast<int>(bgId))) {
+                    backgroundsToScale.insert(static_cast<int>(bgId));
+                }
+            }
+        }
+        if (!backgroundsToScale.empty()) {
+            QMessageBox::StandardButton reply = QMessageBox::question(
+                this,
+                "Create HD Backgrounds",
+                QString("The selected frames use %1 background(s) without HD images.\n"
+                        "Create HD backgrounds now?")
+                    .arg(backgroundsToScale.size()),
+                QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel,
+                QMessageBox::Yes);
+            if (reply == QMessageBox::Cancel) {
+                return;
+            }
+            if (reply == QMessageBox::Yes && m_backgroundStore) {
+                const int bgCount = m_backgroundStore->count();
+                const cv::Size targetSize(kDefaultFrameWidth * 2, kDefaultFrameHeight * 2);
+                for (int bgIndex : backgroundsToScale) {
+                    if (bgIndex < 0 || bgIndex >= bgCount) {
+                        continue;
+                    }
+                    if (hasHdBackground(bgIndex)) {
+                        continue;
+                    }
+                    const cv::Mat* src = m_backgroundStore->at(bgIndex);
+                    if (!src || src->empty()) {
+                        continue;
+                    }
+                    if (m_backgroundFramesX.size() <= static_cast<std::size_t>(bgIndex)) {
+                        m_backgroundFramesX.resize(static_cast<std::size_t>(bgIndex + 1));
+                    }
+                    if (m_backgroundExtraFlags.size() <= static_cast<std::size_t>(bgIndex)) {
+                        m_backgroundExtraFlags.resize(static_cast<std::size_t>(bgIndex + 1), 0);
+                    }
+                    cv::Mat hd;
+                    if (interpolation == -1) {
+                        cv::Mat scaled = Scale2xBgr(EnsureBgr(*src));
+                        if (scaled.size() == targetSize) {
+                            hd = scaled;
+                        } else {
+                            cv::resize(scaled, hd, targetSize, 0.0, 0.0, cv::INTER_NEAREST);
+                        }
+                    } else {
+                        cv::resize(EnsureBgr(*src), hd, targetSize, 0.0, 0.0, interpolation);
+                        if (interpolation == cv::INTER_LINEAR || interpolation == cv::INTER_CUBIC) {
+                            hd = AdjustBrightnessToSource(*src, hd);
+                        }
+                    }
+                    if (hd.empty()) {
+                        continue;
+                    }
+                    m_backgroundFramesX[static_cast<std::size_t>(bgIndex)] = hd;
+                    m_backgroundExtraFlags[static_cast<std::size_t>(bgIndex)] = 1;
+                }
+                refreshBackgroundList();
+            }
+        }
         bool createdAny = false;
         for (int index : targets) {
             if (index < 0 || index >= frameCount) {
@@ -2539,6 +2778,18 @@ MainWindow::MainWindow(QWidget* parent)
             }
             if (hasHdFrame(index)) {
                 continue;
+            }
+            cv::Size baseSize;
+            if (const cv::Mat* baseFrame = m_frameStore->at(index)) {
+                if (baseFrame && !baseFrame->empty()) {
+                    baseSize = baseFrame->size();
+                }
+            }
+            if (baseSize.width <= 0 || baseSize.height <= 0) {
+                cv::Mat reference = buildOriginalPreviewForIndex(index);
+                if (!reference.empty()) {
+                    baseSize = reference.size();
+                }
             }
             cv::Mat source;
             if (sourceMode == 1) {
@@ -2552,11 +2803,19 @@ MainWindow::MainWindow(QWidget* parent)
             if (source.empty()) {
                 continue;
             }
+            if (baseSize.width <= 0 || baseSize.height <= 0) {
+                baseSize = source.size();
+            }
+            const cv::Size targetSize(baseSize.width * 2, baseSize.height * 2);
             cv::Mat resized;
             if (interpolation == -1) {
-                resized = Scale2xBgr(source);
+                cv::Mat scaled = Scale2xBgr(source);
+                if (scaled.size() == targetSize) {
+                    resized = scaled;
+                } else {
+                    cv::resize(scaled, resized, targetSize, 0.0, 0.0, cv::INTER_NEAREST);
+                }
             } else {
-                const cv::Size targetSize(source.cols * 2, source.rows * 2);
                 cv::resize(source, resized, targetSize, 0.0, 0.0, interpolation);
                 if (interpolation == cv::INTER_LINEAR || interpolation == cv::INTER_CUBIC) {
                     resized = AdjustBrightnessToSource(source, resized);
@@ -5537,6 +5796,13 @@ cv::Mat MainWindow::buildSpriteCoverageMask(int index, bool useHd) const
         if (spriteId == 255 || spriteId >= spriteCount) {
             continue;
         }
+        if (useHd) {
+            const bool hasExtra = spriteId < m_spriteColoredX.size() &&
+                !m_spriteColoredX[static_cast<std::size_t>(spriteId)].empty();
+            if (!hasExtra) {
+                continue;
+            }
+        }
         SerumEditorSpriteView& view = spriteViews[spriteId];
         if (view.original) {
             continue;
@@ -6303,22 +6569,50 @@ QRect MainWindow::spriteDisplayRect(int index, const cv::Mat& image) const
     if (image.empty()) {
         return QRect();
     }
-    QRect rect = spriteContentRect(index);
+    QRect rect = spriteDisplayContentRect(index);
     if (!rect.isValid() || rect.isEmpty()) {
         return QRect(0, 0, image.cols, image.rows);
     }
     if (m_useHdSprite) {
-        const cv::Mat* original = spriteOriginalForDisplay(index);
-        if (original && original->cols > 0 && original->rows > 0) {
-            const double scaleX = static_cast<double>(image.cols) / original->cols;
-            const double scaleY = static_cast<double>(image.rows) / original->rows;
-            rect = QRect(static_cast<int>(std::lround(rect.x() * scaleX)),
-                         static_cast<int>(std::lround(rect.y() * scaleY)),
-                         static_cast<int>(std::lround(rect.width() * scaleX)),
-                         static_cast<int>(std::lround(rect.height() * scaleY)));
+        const bool hasHdMask = index >= 0 &&
+            index < static_cast<int>(m_spriteMasksX.size()) &&
+            !m_spriteMasksX[static_cast<std::size_t>(index)].empty();
+        if (!hasHdMask) {
+            rect = QRect(rect.x() * 2,
+                         rect.y() * 2,
+                         rect.width() * 2,
+                         rect.height() * 2);
         }
     }
     return rect.intersected(QRect(0, 0, image.cols, image.rows));
+}
+
+namespace {
+QRect ContentRectFromMask(const cv::Mat& mask, uint8_t emptyValue)
+{
+    if (mask.empty()) {
+        return QRect();
+    }
+    int minx = mask.cols;
+    int miny = mask.rows;
+    int maxx = -1;
+    int maxy = -1;
+    for (int y = 0; y < mask.rows; ++y) {
+        const uint8_t* row = mask.ptr<uint8_t>(y);
+        for (int x = 0; x < mask.cols; ++x) {
+            if (row[x] != emptyValue) {
+                minx = std::min(minx, x);
+                miny = std::min(miny, y);
+                maxx = std::max(maxx, x);
+                maxy = std::max(maxy, y);
+            }
+        }
+    }
+    if (maxx >= minx && maxy >= miny) {
+        return QRect(minx, miny, maxx - minx + 1, maxy - miny + 1);
+    }
+    return QRect();
+}
 }
 
 QRect MainWindow::spriteContentRect(int index) const
@@ -6356,6 +6650,19 @@ QRect MainWindow::spriteContentRect(int index) const
         return QRect();
     }
     return QRect(0, 0, width, height);
+}
+
+QRect MainWindow::spriteDisplayContentRect(int index) const
+{
+    if (index < 0) {
+        return QRect();
+    }
+    if (m_useHdSprite &&
+        index < static_cast<int>(m_spriteMasksX.size()) &&
+        !m_spriteMasksX[static_cast<std::size_t>(index)].empty()) {
+        return ContentRectFromMask(m_spriteMasksX[static_cast<std::size_t>(index)], 255);
+    }
+    return spriteContentRect(index);
 }
 
 cv::Mat MainWindow::applyBackgroundComposite(int index, const cv::Mat& frame, bool useHd) const
