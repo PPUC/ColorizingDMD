@@ -111,9 +111,6 @@ jobs:
         with:
           path: vcpkg/installed
           key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-installed-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
-          restore-keys: |
-            vcpkg-${{ runner.os }}-${{ matrix.arch }}-installed-static-
-            vcpkg-${{ runner.os }}-${{ matrix.arch }}-installed-dynamic-
 
       - if: matrix.platform == 'win'
         name: Restore vcpkg cache (Windows downloads)
@@ -121,9 +118,6 @@ jobs:
         with:
           path: vcpkg/downloads
           key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-downloads-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
-          restore-keys: |
-            vcpkg-${{ runner.os }}-${{ matrix.arch }}-downloads-static-
-            vcpkg-${{ runner.os }}-${{ matrix.arch }}-downloads-dynamic-
 
       - if: matrix.platform == 'win'
         name: Restore vcpkg cache (Windows buildtrees)
@@ -131,9 +125,6 @@ jobs:
         with:
           path: vcpkg/buildtrees
           key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-buildtrees-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
-          restore-keys: |
-            vcpkg-${{ runner.os }}-${{ matrix.arch }}-buildtrees-static-
-            vcpkg-${{ runner.os }}-${{ matrix.arch }}-buildtrees-dynamic-
 
       - if: matrix.platform == 'win'
         name: Restore vcpkg cache (Windows packages)
@@ -141,9 +132,6 @@ jobs:
         with:
           path: vcpkg/packages
           key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-packages-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
-          restore-keys: |
-            vcpkg-${{ runner.os }}-${{ matrix.arch }}-packages-static-
-            vcpkg-${{ runner.os }}-${{ matrix.arch }}-packages-dynamic-
 
       - if: matrix.platform == 'win'
         name: Restore vcpkg cache (Windows registry)
@@ -151,9 +139,13 @@ jobs:
         with:
           path: vcpkg/registry
           key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-registry-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
-          restore-keys: |
-            vcpkg-${{ runner.os }}-${{ matrix.arch }}-registry-static-
-            vcpkg-${{ runner.os }}-${{ matrix.arch }}-registry-dynamic-
+
+      - if: matrix.platform == 'win'
+        name: Restore vcpkg binary cache (Windows)
+        uses: actions/cache/restore@v4
+        with:
+          path: vcpkg-binary-cache
+          key: vcpkg-bin-${{ runner.os }}-${{ matrix.arch }}-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
 
       - if: matrix.platform == 'win'
         name: Setup vcpkg (Windows)
@@ -175,15 +167,6 @@ jobs:
           "VCPKG_DEFAULT_TRIPLET=$triplet" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VCPKG_DEFAULT_BINARY_CACHE=$binaryCache" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - if: matrix.platform == 'win'
-        name: Restore vcpkg binary cache (Windows)
-        uses: actions/cache/restore@v4
-        with:
-          path: vcpkg-binary-cache
-          key: vcpkg-bin-${{ runner.os }}-${{ matrix.arch }}-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
-          restore-keys: |
-            vcpkg-bin-${{ runner.os }}-${{ matrix.arch }}-static-
-            vcpkg-bin-${{ runner.os }}-${{ matrix.arch }}-dynamic-
 
       - if: matrix.platform == 'win'
         name: vcpkg install (Windows static)
