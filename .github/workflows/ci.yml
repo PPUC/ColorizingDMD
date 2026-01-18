@@ -112,6 +112,7 @@ jobs:
           path: vcpkg/installed
           key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-installed-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
           restore-keys: |
+            vcpkg-${{ runner.os }}-${{ matrix.arch }}-installed-static-
             vcpkg-${{ runner.os }}-${{ matrix.arch }}-installed-dynamic-
 
       - if: matrix.platform == 'win'
@@ -121,6 +122,7 @@ jobs:
           path: vcpkg/downloads
           key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-downloads-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
           restore-keys: |
+            vcpkg-${{ runner.os }}-${{ matrix.arch }}-downloads-static-
             vcpkg-${{ runner.os }}-${{ matrix.arch }}-downloads-dynamic-
 
       - if: matrix.platform == 'win'
@@ -130,6 +132,7 @@ jobs:
           path: vcpkg/buildtrees
           key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-buildtrees-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
           restore-keys: |
+            vcpkg-${{ runner.os }}-${{ matrix.arch }}-buildtrees-static-
             vcpkg-${{ runner.os }}-${{ matrix.arch }}-buildtrees-dynamic-
 
       - if: matrix.platform == 'win'
@@ -139,6 +142,7 @@ jobs:
           path: vcpkg/packages
           key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-packages-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
           restore-keys: |
+            vcpkg-${{ runner.os }}-${{ matrix.arch }}-packages-static-
             vcpkg-${{ runner.os }}-${{ matrix.arch }}-packages-dynamic-
 
       - if: matrix.platform == 'win'
@@ -148,6 +152,7 @@ jobs:
           path: vcpkg/registry
           key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-registry-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
           restore-keys: |
+            vcpkg-${{ runner.os }}-${{ matrix.arch }}-registry-static-
             vcpkg-${{ runner.os }}-${{ matrix.arch }}-registry-dynamic-
 
       - if: matrix.platform == 'win'
@@ -177,58 +182,8 @@ jobs:
           path: vcpkg-binary-cache
           key: vcpkg-bin-${{ runner.os }}-${{ matrix.arch }}-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
           restore-keys: |
+            vcpkg-bin-${{ runner.os }}-${{ matrix.arch }}-static-
             vcpkg-bin-${{ runner.os }}-${{ matrix.arch }}-dynamic-
-
-      - if: matrix.platform == 'win'
-        name: vcpkg install (Windows dynamic)
-        shell: pwsh
-        run: |
-          $root = Join-Path $env:GITHUB_WORKSPACE "vcpkg"
-          $env:VCPKG_DEFAULT_BINARY_CACHE = Join-Path $env:GITHUB_WORKSPACE "vcpkg-binary-cache"
-          $triplet = if ("${{ matrix.arch }}" -eq "x86") { "x86-windows" } else { "x64-windows" }
-          & "$root/vcpkg.exe" install opencv qtbase --triplet $triplet
-
-      - if: matrix.platform == 'win'
-        name: Save vcpkg cache (Windows installed)
-        uses: actions/cache/save@v4
-        with:
-          path: vcpkg/installed
-          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-installed-dynamic-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
-
-      - if: matrix.platform == 'win'
-        name: Save vcpkg cache (Windows downloads)
-        uses: actions/cache/save@v4
-        with:
-          path: vcpkg/downloads
-          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-downloads-dynamic-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
-
-      - if: matrix.platform == 'win'
-        name: Save vcpkg cache (Windows buildtrees)
-        uses: actions/cache/save@v4
-        with:
-          path: vcpkg/buildtrees
-          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-buildtrees-dynamic-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
-
-      - if: matrix.platform == 'win'
-        name: Save vcpkg cache (Windows packages)
-        uses: actions/cache/save@v4
-        with:
-          path: vcpkg/packages
-          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-packages-dynamic-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
-
-      - if: matrix.platform == 'win'
-        name: Save vcpkg cache (Windows registry)
-        uses: actions/cache/save@v4
-        with:
-          path: vcpkg/registry
-          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-registry-dynamic-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
-
-      - if: matrix.platform == 'win'
-        name: Save vcpkg binary cache (Windows)
-        uses: actions/cache/save@v4
-        with:
-          path: vcpkg-binary-cache
-          key: vcpkg-bin-${{ runner.os }}-${{ matrix.arch }}-dynamic-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
 
       - if: matrix.platform == 'win'
         name: vcpkg install (Windows static)
@@ -290,9 +245,10 @@ jobs:
           BUILD_TYPE: Release
         run: |
           find platforms \( -name "build.sh" -o -name "external.sh" \) -exec chmod +x {} \;
-          ./platforms/${{ matrix.platform }}/${{ matrix.arch }}/build.sh
           if [ "${{ matrix.platform }}" = "win" ]; then
             STATIC_LINKING=1 ./platforms/${{ matrix.platform }}/${{ matrix.arch }}/build.sh
+          else
+            ./platforms/${{ matrix.platform }}/${{ matrix.arch }}/build.sh
           fi
 
       - if: matrix.platform != 'win'
@@ -303,15 +259,8 @@ jobs:
           path: artifacts/${{ matrix.platform }}-${{ matrix.arch }}
 
       - if: matrix.platform == 'win'
-        name: Upload artifacts (Windows dynamic)
-        uses: actions/upload-artifact@v4
-        with:
-          name: PPUC-Serum-Colorizer-${{ matrix.platform }}-${{ matrix.arch }}
-          path: artifacts/${{ matrix.platform }}-${{ matrix.arch }}
-
-      - if: matrix.platform == 'win'
         name: Upload artifacts (Windows static)
         uses: actions/upload-artifact@v4
         with:
-          name: PPUC-Serum-Colorizer-${{ matrix.platform }}-${{ matrix.arch }}-static
+          name: PPUC-Serum-Colorizer-${{ matrix.platform }}-${{ matrix.arch }}
           path: artifacts/${{ matrix.platform }}-${{ matrix.arch }}-static
