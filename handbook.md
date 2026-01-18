@@ -8,6 +8,7 @@ This handbook captures editor behaviors and workflows that differ from the legac
 - The preview row supports multi-selection with native shortcuts (Cmd/Ctrl and Shift).
 - The last selected frame in a multi-selection is the active canvas frame; clicking within the selection switches the active frame.
 - Use the preview-row filter button to show only the selected frames.
+- Press `Esc` or click empty space in the preview row to clear a frame selection.
 
 ## Preview Row
 

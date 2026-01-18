@@ -988,6 +988,7 @@ MainWindow::MainWindow(QWidget* parent)
     toolMagicFillAction->setIcon(QIcon(":/icons/drawall.png"));
     auto* cancelDrawAction = new QAction("&Cancel Draw", this);
     cancelDrawAction->setShortcut(QKeySequence(Qt::Key_Escape));
+    cancelDrawAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
     m_settingsAction = new QAction("&Settings...", this);
     auto* fitToViewAction = new QAction("Fit to &View", this);
     removeSelectedAction->setShortcut(QKeySequence::Delete);
@@ -1059,8 +1060,6 @@ MainWindow::MainWindow(QWidget* parent)
     drawToolbar->addAction(toolEllipseFillAction);
     drawToolbar->addAction(toolColorPickerAction);
     drawToolbar->addAction(toolMagicFillAction);
-
-    addAction(cancelDrawAction);
 
     auto* status = statusBar();
     status->showMessage("Qt port: UI scaffolding in progress");
@@ -1295,7 +1294,13 @@ MainWindow::MainWindow(QWidget* parent)
     connect(toolEllipseFillAction, &QAction::triggered, this, [this]() { m_drawTool = DrawTool::EllipseFill; });
     connect(toolColorPickerAction, &QAction::triggered, this, [this]() { m_drawTool = DrawTool::ColorPicker; });
     connect(toolMagicFillAction, &QAction::triggered, this, [this]() { m_drawTool = DrawTool::MagicFill; });
-    connect(cancelDrawAction, &QAction::triggered, this, [this]() { cancelCurrentDraw(); });
+    connect(cancelDrawAction, &QAction::triggered, this, [this]() {
+        if (m_framePreviewList &&
+            (m_framePreviewList->hasFocus() || m_framePreviewList->viewport()->hasFocus())) {
+            return;
+        }
+        cancelCurrentDraw();
+    });
     connect(m_settingsAction, &QAction::triggered, this, [this]() { showSettingsDialog(); });
     connect(fitToViewAction, &QAction::triggered, this, [this]() {
         m_framesCanvas->canvas()->requestFitOnResize(true);
@@ -1393,6 +1398,9 @@ MainWindow::MainWindow(QWidget* parent)
     m_spritesCanvas->setMaskButtonToolTip("Edit sprite detection areas");
     m_imagesCanvas = new CanvasWidget("Images canvas (placeholder)", tabs);
     m_backgroundsCanvas = new CanvasWidget("Backgrounds canvas (placeholder)", tabs);
+    m_framesCanvas->addAction(cancelDrawAction);
+    m_spritesCanvas->addAction(cancelDrawAction);
+    m_backgroundsCanvas->addAction(cancelDrawAction);
     m_framesCanvas->setMaskButtonsVisible(true);
     m_framesCanvas->setZoneButtonVisible(true);
     m_spritesCanvas->setMaskButtonsVisible(true);
@@ -3483,6 +3491,12 @@ MainWindow::MainWindow(QWidget* parent)
             m_restorePreviewSelection = false;
         }
         const std::vector<int> newSelection = selectedPreviewFrameIndices();
+        if (m_previewSelectionClearRequested) {
+            m_previewSelectionClearRequested = false;
+            m_previewSelectedFrames = newSelection;
+            schedulePreviewSelectionUpdate();
+            return;
+        }
         const bool previewHasFocus = m_framePreviewList->hasFocus() || m_framePreviewList->viewport()->hasFocus();
         if (!previewHasFocus && m_previewSelectedFrames.size() > 1 && newSelection.size() <= 1) {
             const int candidate = newSelection.empty() ? -1 : newSelection.front();
@@ -3519,10 +3533,7 @@ MainWindow::MainWindow(QWidget* parent)
         } else {
             m_previewSelectedFrames = newSelection;
         }
-        updatePreviewSelectionStyles();
-        if (m_previewSelectedOnly) {
-            refreshFramePreviews();
-        }
+        schedulePreviewSelectionUpdate();
     });
 
     // Drag-reorder disabled; up/down buttons apply ordering changes.
@@ -4075,6 +4086,14 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_previewRotationTimer, &QTimer::timeout, this, [this]() {
         refreshFramePreviews();
         schedulePreviewRotationUpdate();
+    });
+    m_previewSelectionTimer = new QTimer(this);
+    m_previewSelectionTimer->setSingleShot(true);
+    connect(m_previewSelectionTimer, &QTimer::timeout, this, [this]() {
+        updatePreviewSelectionStyles();
+        if (m_previewSelectedOnly) {
+            refreshFramePreviews();
+        }
     });
     m_paletteBlinkTimer = new QTimer(this);
     m_paletteBlinkTimer->setInterval(350);
@@ -4825,7 +4844,7 @@ void MainWindow::refreshFramePreviewSelection()
             item->setSelected(selected);
         }
     }
-    updatePreviewSelectionStyles();
+    schedulePreviewSelectionUpdate();
     const std::vector<int> currentSelection = selectedPreviewFrameIndices();
     if (!currentSelection.empty()) {
         m_previewSelectedFrames = currentSelection;
@@ -4848,6 +4867,41 @@ void MainWindow::updatePreviewSelectionStyles()
         item->setData(kPreviewSecondarySelectedRole, secondary);
     }
     m_framePreviewList->viewport()->update();
+}
+
+void MainWindow::schedulePreviewSelectionUpdate()
+{
+    if (!m_previewSelectionTimer) {
+        updatePreviewSelectionStyles();
+        if (m_previewSelectedOnly) {
+            refreshFramePreviews();
+        }
+        return;
+    }
+    if (!m_previewSelectionTimer->isActive()) {
+        m_previewSelectionTimer->start(0);
+    }
+}
+
+void MainWindow::clearPreviewSelection()
+{
+    if (!m_framePreviewList) {
+        return;
+    }
+    QSignalBlocker blocker(m_framePreviewList);
+    if (m_framePreviewList->selectionModel()) {
+        QSignalBlocker selectionBlocker(m_framePreviewList->selectionModel());
+        m_framePreviewList->clearSelection();
+    } else {
+        m_framePreviewList->clearSelection();
+    }
+    m_framePreviewList->setCurrentRow(-1);
+    m_previewSelectedFrames.clear();
+    m_restorePreviewSelection = false;
+    m_restorePreviewCurrent = -1;
+    m_restorePreviewSelectionIndices.clear();
+    m_previewSelectionClearRequested = true;
+    schedulePreviewSelectionUpdate();
 }
 
 std::vector<int> MainWindow::selectedPreviewFrameIndices() const
@@ -5234,7 +5288,7 @@ void MainWindow::refreshFramePreviews()
     }
 
     refreshFramePreviewSelection();
-    updatePreviewSelectionStyles();
+    schedulePreviewSelectionUpdate();
     m_framePreviewList->doItemsLayout();
     if (m_framePreviewList && m_framePreviewList->horizontalScrollBar()) {
         m_framePreviewList->horizontalScrollBar()->setValue(scrollValue);
@@ -5355,39 +5409,28 @@ cv::Mat MainWindow::applyRotationPreview(const cv::Mat& colorized,
         return EnsureBgr(colorized);
     }
 
+    std::vector<uint16_t> base565;
+    std::vector<uint16_t> rotationsInFrame;
+    int width = 0;
+    int height = 0;
+    if (!renderFrameWithSerumRaw(frameIndex, useHd, cv::Mat(), base565, width,
+                                 height, &rotationsInFrame, nullptr) ||
+        base565.empty()) {
+        return EnsureBgr(colorized);
+    }
+
     const uint32_t elapsed = m_previewRotationClock.isValid()
         ? static_cast<uint32_t>(m_previewRotationClock.elapsed())
         : 0;
-    std::vector<uint16_t> mapping(65536, 0);
-    std::vector<uint8_t> mapped(65536, 0);
-    const uint16_t* data = rotations.data() + offset;
-    for (int rot = 0; rot < MAX_COLOR_ROTATIONN; ++rot) {
-        const std::size_t base = static_cast<std::size_t>(rot) * MAX_LENGTH_COLOR_ROTATION;
-        const uint16_t length = data[base];
-        const uint16_t delay = data[base + 1];
-        if (length == 0 || length > MAX_LENGTH_COLOR_ROTATION - 2 || delay == 0) {
-            continue;
-        }
-        const uint16_t* colors = data + base + 2;
-        const uint16_t step = static_cast<uint16_t>((elapsed / delay) % length);
-        for (uint16_t pos = 0; pos < length; ++pos) {
-            const uint16_t from = colors[pos];
-            const uint16_t to = colors[(pos + step) % length];
-            mapping[from] = to;
-            mapped[from] = 1;
-        }
-    }
-
-    std::vector<uint16_t> pixels = ConvertBgrMatToRgb565(EnsureBgr(colorized));
-    if (pixels.empty()) {
-        return EnsureBgr(colorized);
-    }
-    for (auto& value : pixels) {
-        if (mapped[value]) {
-            value = mapping[value];
-        }
-    }
-    return ConvertRgb565ToBgrMat(pixels.data(), colorized.cols, colorized.rows);
+    SerumEditorRotationState state{};
+    SerumEditor_InitRotationState(rotations.data() + offset, &state, elapsed);
+    std::vector<uint16_t> rotated(base565.size(), 0);
+    SerumEditor_ApplyRotationsMasked(rotations.data() + offset, base565.data(),
+                                     rotated.data(), rotationsInFrame.data(),
+                                     static_cast<uint32_t>(width),
+                                     static_cast<uint32_t>(height), &state,
+                                     elapsed);
+    return ConvertRgb565ToBgrMat(rotated.data(), width, height);
 }
 
 void MainWindow::setCanvasRotationEnabled(bool enabled)
@@ -5436,22 +5479,24 @@ void MainWindow::updateCanvasRotationFrame()
         m_rotationUseHd = useHd;
     }
 
-    const cv::Mat composed = renderFrameWithSerum(frameIndex, useHd);
-    std::vector<uint16_t> pixels = ConvertBgrMatToRgb565(composed);
-    if (pixels.empty()) {
+    std::vector<uint16_t> base565;
+    std::vector<uint16_t> rotationsInFrame;
+    int width = 0;
+    int height = 0;
+    if (!renderFrameWithSerumRaw(frameIndex, useHd, cv::Mat(), base565, width,
+                                 height, &rotationsInFrame, nullptr) ||
+        base565.empty()) {
+        const cv::Mat composed = renderFrameWithSerum(frameIndex, useHd);
         setFrameCanvasFromComposed(frameIndex, composed);
         return;
     }
-    std::vector<uint16_t> rotated(pixels.size(), 0);
+    std::vector<uint16_t> rotated(base565.size(), 0);
     const uint32_t nowMs = static_cast<uint32_t>(m_rotationClock.elapsed());
-    const uint32_t nextDelay = SerumEditor_ApplyRotations(rotations.data() + offset,
-                                                          pixels.data(),
-                                                          rotated.data(),
-                                                          static_cast<uint32_t>(composed.cols),
-                                                          static_cast<uint32_t>(composed.rows),
-                                                          &m_rotationState,
-                                                          nowMs);
-    const cv::Mat rotatedMat = ConvertRgb565ToBgrMat(rotated.data(), composed.cols, composed.rows);
+    const uint32_t nextDelay = SerumEditor_ApplyRotationsMasked(
+        rotations.data() + offset, base565.data(), rotated.data(),
+        rotationsInFrame.data(), static_cast<uint32_t>(width),
+        static_cast<uint32_t>(height), &m_rotationState, nowMs);
+    const cv::Mat rotatedMat = ConvertRgb565ToBgrMat(rotated.data(), width, height);
     setFrameCanvasFromComposed(frameIndex, rotatedMat);
 
     if (m_rotationTimer) {
@@ -5982,6 +6027,287 @@ cv::Mat MainWindow::buildReferenceForSize(int index, const cv::Size& target) con
     cv::Mat resized;
     cv::resize(ref, resized, target, 0.0, 0.0, cv::INTER_NEAREST);
     return resized;
+}
+
+bool MainWindow::renderFrameWithSerumRaw(int index,
+                                         bool useHd,
+                                         const cv::Mat& overrideColorized,
+                                         std::vector<uint16_t>& out565,
+                                         int& outWidth,
+                                         int& outHeight,
+                                         std::vector<uint16_t>* rotationsInFrame,
+                                         const uint32_t* rotationShifts) const
+{
+    out565.clear();
+    outWidth = 0;
+    outHeight = 0;
+    if (index < 0 || !m_frameStore) {
+        return false;
+    }
+    const cv::Mat* frameImage = nullptr;
+    cv::Mat hdFrame;
+    const bool hasOverride = !overrideColorized.empty();
+    if (hasOverride) {
+        frameImage = &overrideColorized;
+    } else if (useHd && index >= 0 && index < static_cast<int>(m_frameExtraFrames.size())) {
+        hdFrame = m_frameExtraFrames[static_cast<std::size_t>(index)];
+        if (!hdFrame.empty()) {
+            frameImage = &hdFrame;
+        }
+    }
+    if (!frameImage) {
+        frameImage = m_frameStore->at(index);
+    }
+    if (!frameImage || frameImage->empty()) {
+        return false;
+    }
+
+    cv::Mat reference = buildOriginalPreviewForIndex(index);
+    if (reference.type() != CV_8UC1) {
+        cv::Mat gray;
+        cv::cvtColor(EnsureBgr(reference), gray, cv::COLOR_BGR2GRAY);
+        reference = gray;
+    }
+    if (reference.empty()) {
+        return false;
+    }
+    if (m_noColors > 0 && m_noColors < 64) {
+        cv::Mat clamped = reference.clone();
+        const uint8_t maxValue = static_cast<uint8_t>(m_noColors - 1);
+        for (int y = 0; y < clamped.rows; ++y) {
+            uint8_t* row = clamped.ptr<uint8_t>(y);
+            for (int x = 0; x < clamped.cols; ++x) {
+                if (row[x] > maxValue) {
+                    row[x] = maxValue;
+                }
+            }
+        }
+        reference = clamped;
+    }
+
+    const int baseWidth = reference.cols;
+    const int baseHeight = reference.rows;
+    outWidth = frameImage->cols;
+    outHeight = frameImage->rows;
+
+    std::vector<uint16_t> frame565 = ConvertBgrMatToRgb565(*frameImage);
+    std::vector<uint16_t> frame565Extra;
+    if (!useHd && !hasOverride) {
+        const cv::Mat* extra = (index >= 0 && index < static_cast<int>(m_frameExtraFrames.size()))
+            ? &m_frameExtraFrames[static_cast<std::size_t>(index)]
+            : nullptr;
+        if (extra && !extra->empty()) {
+            frame565Extra = ConvertBgrMatToRgb565(*extra);
+        }
+    }
+
+    SerumEditorFrameView frameView;
+    frameView.original = reference.data;
+    frameView.colorized = useHd ? nullptr : frame565.data();
+    frameView.colorized_extra = useHd ? frame565.data() : (frame565Extra.empty() ? nullptr : frame565Extra.data());
+
+    if (index >= 0 && index < static_cast<int>(m_frameDynamicMaskMaps.size())) {
+        frameView.dynamask = m_frameDynamicMaskMaps[static_cast<std::size_t>(index)].data;
+    }
+    if (index >= 0 && index < static_cast<int>(m_frameDynamicMaskMapsX.size())) {
+        frameView.dynamask_extra = m_frameDynamicMaskMapsX[static_cast<std::size_t>(index)].data;
+    }
+    if (index >= 0 && index < static_cast<int>(m_frameDynamicColors.size())) {
+        const std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(index)];
+        if (!colors.empty()) {
+            frameView.dyna4cols = colors.data();
+            frameView.dyna4cols_extra = colors.data();
+        }
+    }
+    cv::Mat scaledDynamicMask;
+    if (useHd) {
+        const cv::Mat* hdMap = (index >= 0 && index < static_cast<int>(m_frameDynamicMaskMapsX.size()))
+            ? &m_frameDynamicMaskMapsX[static_cast<std::size_t>(index)]
+            : nullptr;
+        const cv::Mat* sdMap = (index >= 0 && index < static_cast<int>(m_frameDynamicMaskMaps.size()))
+            ? &m_frameDynamicMaskMaps[static_cast<std::size_t>(index)]
+            : nullptr;
+        if ((!hdMap || hdMap->empty()) && sdMap && !sdMap->empty()) {
+            cv::resize(*sdMap, scaledDynamicMask, cv::Size(outWidth, outHeight), 0.0, 0.0, cv::INTER_NEAREST);
+            frameView.dynamask_extra = scaledDynamicMask.data;
+        }
+    }
+
+    uint16_t backgroundId = 0xffff;
+    if (m_showBackgroundLayer && index >= 0 && index < static_cast<int>(m_frameBackgroundIds.size())) {
+        backgroundId = m_frameBackgroundIds[static_cast<std::size_t>(index)];
+    }
+    frameView.background_id = backgroundId;
+    if (index >= 0 && index < static_cast<int>(m_frameBackgroundMasks.size())) {
+        frameView.background_mask = m_frameBackgroundMasks[static_cast<std::size_t>(index)].data;
+    }
+    if (index >= 0 && index < static_cast<int>(m_frameBackgroundMasksX.size())) {
+        frameView.background_mask_extra = m_frameBackgroundMasksX[static_cast<std::size_t>(index)].data;
+    }
+
+    std::vector<uint16_t> background565;
+    std::vector<uint16_t> background565Extra;
+    if (backgroundId != 0xffff && m_backgroundStore && backgroundId < m_backgroundStore->count()) {
+        const cv::Mat* background = m_backgroundStore->at(static_cast<int>(backgroundId));
+        if (background && !background->empty()) {
+            background565 = ConvertBgrMatToRgb565(*background);
+            frameView.background_frame = background565.data();
+        }
+    }
+    if (backgroundId != 0xffff &&
+        backgroundId < m_backgroundFramesX.size() &&
+        !m_backgroundFramesX[static_cast<std::size_t>(backgroundId)].empty()) {
+        background565Extra = ConvertBgrMatToRgb565(m_backgroundFramesX[static_cast<std::size_t>(backgroundId)]);
+        frameView.background_frame_extra = background565Extra.data();
+    }
+    cv::Mat scaledBackgroundMask;
+    cv::Mat scaledBackgroundFrame;
+    if (useHd && backgroundId != 0xffff) {
+        const cv::Mat* hdMask = (index >= 0 && index < static_cast<int>(m_frameBackgroundMasksX.size()))
+            ? &m_frameBackgroundMasksX[static_cast<std::size_t>(index)]
+            : nullptr;
+        const cv::Mat* sdMask = (index >= 0 && index < static_cast<int>(m_frameBackgroundMasks.size()))
+            ? &m_frameBackgroundMasks[static_cast<std::size_t>(index)]
+            : nullptr;
+        if ((!hdMask || hdMask->empty()) && sdMask && !sdMask->empty()) {
+            cv::resize(*sdMask, scaledBackgroundMask, cv::Size(outWidth, outHeight), 0.0, 0.0, cv::INTER_NEAREST);
+            frameView.background_mask_extra = scaledBackgroundMask.data;
+        }
+        if (!frameView.background_frame_extra && m_backgroundStore &&
+            backgroundId < m_backgroundStore->count()) {
+            const cv::Mat* sdBackground = m_backgroundStore->at(static_cast<int>(backgroundId));
+            if (sdBackground && !sdBackground->empty()) {
+                cv::resize(*sdBackground, scaledBackgroundFrame, cv::Size(outWidth, outHeight), 0.0, 0.0, cv::INTER_NEAREST);
+                background565Extra = ConvertBgrMatToRgb565(scaledBackgroundFrame);
+                frameView.background_frame_extra = background565Extra.data();
+            }
+        }
+    }
+
+    const uint8_t* frameSprites = nullptr;
+    const uint16_t* frameSpriteBBoxes = nullptr;
+    const std::size_t spriteBase = static_cast<std::size_t>(index) * MAX_SPRITES_PER_FRAME;
+    if (spriteBase + MAX_SPRITES_PER_FRAME <= m_frameSpriteAssignments.size()) {
+        frameSprites = m_frameSpriteAssignments.data() + spriteBase;
+    }
+    const std::size_t spriteBbBase = static_cast<std::size_t>(index) * MAX_SPRITES_PER_FRAME * 4;
+    if (spriteBbBase + MAX_SPRITES_PER_FRAME * 4 <= m_frameSpriteBBoxes.size()) {
+        frameSpriteBBoxes = m_frameSpriteBBoxes.data() + spriteBbBase;
+    }
+    frameView.frame_sprites = frameSprites;
+    frameView.frame_sprite_bboxes = frameSpriteBBoxes;
+
+    const std::size_t spriteCount = m_spriteOriginals.size();
+    std::vector<SerumEditorSpriteView> spriteViews(spriteCount);
+    std::vector<std::vector<uint16_t>> sprite565(spriteCount);
+    std::vector<std::vector<uint16_t>> sprite565Extra(spriteCount);
+    if (frameSprites && spriteCount > 0) {
+        for (int slot = 0; slot < MAX_SPRITES_PER_FRAME; ++slot) {
+            const uint8_t spriteId = frameSprites[slot];
+            if (spriteId == 255 || spriteId >= spriteCount) {
+                continue;
+            }
+            SerumEditorSpriteView& view = spriteViews[spriteId];
+            if (view.original) {
+                continue;
+            }
+            const std::size_t spriteIndex = static_cast<std::size_t>(spriteId);
+            if (spriteIndex < m_spriteOriginals.size()) {
+                view.original = m_spriteOriginals[spriteIndex].data;
+            }
+            if (spriteIndex < m_spriteColored.size()) {
+                const cv::Mat& colored = m_spriteColored[spriteIndex];
+                if (!colored.empty()) {
+                    sprite565[spriteIndex] = ConvertBgrMatToRgb565(colored);
+                    view.colored = sprite565[spriteIndex].data();
+                }
+            }
+            if (spriteIndex < m_spriteColoredX.size()) {
+                const cv::Mat& colored = m_spriteColoredX[spriteIndex];
+                if (!colored.empty()) {
+                    sprite565Extra[spriteIndex] = ConvertBgrMatToRgb565(colored);
+                    view.colored_extra = sprite565Extra[spriteIndex].data();
+                }
+            }
+            if (spriteIndex < m_spriteMasksX.size()) {
+                view.mask_extra = m_spriteMasksX[spriteIndex].data;
+            }
+            if (spriteIndex < m_spriteDynamicMasks.size()) {
+                view.dynasprite_mask = m_spriteDynamicMasks[spriteIndex].data;
+            }
+            if (spriteIndex < m_spriteDynamicMasksX.size()) {
+                view.dynasprite_mask_extra = m_spriteDynamicMasksX[spriteIndex].data;
+            }
+            if (spriteIndex < m_spriteDynamicColors.size()) {
+                const auto& dynCols = m_spriteDynamicColors[spriteIndex];
+                if (!dynCols.empty()) {
+                    view.dynasprite_cols = dynCols.data();
+                }
+            }
+            if (spriteIndex < m_spriteDynamicColorsX.size()) {
+                const auto& dynCols = m_spriteDynamicColorsX[spriteIndex];
+                if (!dynCols.empty()) {
+                    view.dynasprite_cols_extra = dynCols.data();
+                }
+            }
+            if (spriteIndex < m_spriteShapeModes.size()) {
+                view.shape_mode = m_spriteShapeModes[spriteIndex];
+            }
+            const std::size_t detAreaOffset = spriteIndex * MAX_SPRITE_DETECT_AREAS * 4;
+            if (detAreaOffset + MAX_SPRITE_DETECT_AREAS * 4 <= m_spriteDetAreas.size()) {
+                view.det_areas = m_spriteDetAreas.data() + detAreaOffset;
+            }
+            const std::size_t detDwordOffset = spriteIndex * MAX_SPRITE_DETECT_AREAS;
+            if (detDwordOffset + MAX_SPRITE_DETECT_AREAS <= m_spriteDetDwords.size()) {
+                view.det_dwords = m_spriteDetDwords.data() + detDwordOffset;
+            }
+            if (detDwordOffset + MAX_SPRITE_DETECT_AREAS <= m_spriteDetDwordPos.size()) {
+                view.det_dword_pos = m_spriteDetDwordPos.data() + detDwordOffset;
+            }
+        }
+    }
+
+    SerumEditorDataView dataView;
+    dataView.width = static_cast<uint32_t>(baseWidth);
+    dataView.height = static_cast<uint32_t>(baseHeight);
+    dataView.width_extra = static_cast<uint32_t>(outWidth);
+    dataView.height_extra = static_cast<uint32_t>(outHeight);
+    dataView.nocolors = m_noColors;
+    dataView.nsprites = static_cast<uint32_t>(spriteCount);
+    dataView.sprites = spriteViews.data();
+
+    SerumEditorSpriteMatch matches[MAX_SPRITES_PER_FRAME];
+    std::memset(matches, 0, sizeof(matches));
+    const uint8_t matchCount =
+        SerumEditor_MatchSprites(&dataView, &frameView, matches, MAX_SPRITES_PER_FRAME);
+
+    out565.assign(static_cast<std::size_t>(outWidth) * outHeight, 0);
+
+    const std::vector<uint16_t>& rotations = useHd && !m_frameRotationsX.empty()
+        ? m_frameRotationsX
+        : m_frameRotations;
+    const std::size_t blockSize =
+        static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
+    const std::size_t offset = static_cast<std::size_t>(index) * blockSize;
+    const uint16_t* rotationsData =
+        (!rotations.empty() && offset + blockSize <= rotations.size())
+            ? rotations.data() + offset
+            : nullptr;
+    if (rotationsInFrame) {
+        rotationsInFrame->assign(static_cast<std::size_t>(outWidth) * outHeight * 2, 0xffff);
+    }
+
+    bool ok = false;
+    if (rotationsInFrame && rotationsData) {
+        ok = SerumEditor_RenderFrameWithRotations(&dataView, &frameView, matches,
+                                                  matchCount, useHd, rotationsData,
+                                                  rotationShifts, out565.data(),
+                                                  rotationsInFrame->data());
+    } else {
+        ok = SerumEditor_RenderFrame(&dataView, &frameView, matches, matchCount, useHd,
+                                     out565.data());
+    }
+    return ok;
 }
 
 cv::Mat MainWindow::renderFrameWithSerum(int index, bool useHd) const
@@ -11034,6 +11360,18 @@ void MainWindow::applyPaletteGradient(int startIndex, int endIndex)
 void MainWindow::keyPressEvent(QKeyEvent* event)
 {
     if (event->key() == Qt::Key_Escape) {
+        if (m_framePreviewList) {
+            const QPoint globalPos = QCursor::pos();
+            const QPoint viewportPos = m_framePreviewList->viewport()->mapFromGlobal(globalPos);
+            const bool overPreview = m_framePreviewList->viewport()->rect().contains(viewportPos);
+            const bool previewFocused = m_framePreviewList->hasFocus() ||
+                m_framePreviewList->viewport()->hasFocus();
+            if (overPreview || previewFocused) {
+                clearPreviewSelection();
+                event->accept();
+                return;
+            }
+        }
         if (m_paletteGradientActive) {
             cancelPaletteGradient();
             event->accept();
@@ -12084,6 +12422,28 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
     }
     if (m_framePreviewList &&
         (obj == m_framePreviewList || obj == m_framePreviewList->viewport())) {
+        if (event->type() == QEvent::KeyPress) {
+            auto* keyEvent = static_cast<QKeyEvent*>(event);
+            if (keyEvent->key() == Qt::Key_Escape) {
+                clearPreviewSelection();
+                return true;
+            }
+        }
+        if (event->type() == QEvent::MouseButtonPress) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (mouseEvent->button() == Qt::LeftButton &&
+                mouseEvent->modifiers() == Qt::NoModifier) {
+                QPoint pos = mouseEvent->position().toPoint();
+                if (obj == m_framePreviewList) {
+                    pos = m_framePreviewList->viewport()->mapFrom(m_framePreviewList, pos);
+                }
+                QListWidgetItem* hit = m_framePreviewList->itemAt(pos);
+                if (!hit) {
+                    clearPreviewSelection();
+                    return true;
+                }
+            }
+        }
         if (event->type() == QEvent::DragEnter) {
             auto* dragEvent = static_cast<QDragEnterEvent*>(event);
             QString kind;

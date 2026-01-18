@@ -120,6 +120,8 @@ private:
     void updateFramePreviewAt(int index);
     void refreshFramePreviewSelection();
     void updatePreviewSelectionStyles();
+    void schedulePreviewSelectionUpdate();
+    void clearPreviewSelection();
     std::vector<int> selectedPreviewFrameIndices() const;
     std::vector<int> targetFrameIndices() const;
     void updatePreviewsForMaskId(int maskId);
@@ -210,6 +212,14 @@ private:
                                      const cv::Scalar& gapColor) const;
     cv::Mat renderFrameWithSerum(int index, bool useHd) const;
     cv::Mat renderFrameWithSerum(int index, bool useHd, const cv::Mat& overrideColorized) const;
+    bool renderFrameWithSerumRaw(int index,
+                                 bool useHd,
+                                 const cv::Mat& overrideColorized,
+                                 std::vector<uint16_t>& out565,
+                                 int& outWidth,
+                                 int& outHeight,
+                                 std::vector<uint16_t>* rotationsInFrame,
+                                 const uint32_t* rotationShifts) const;
     cv::Mat buildOriginalPreviewForIndex(int index) const;
     cv::Mat buildSpriteCoverageMask(int index, bool useHd) const;
     void restoreSpriteCoverage(cv::Mat& target,
@@ -478,8 +488,10 @@ private:
     QElapsedTimer m_previewRotationClock;
     SerumEditorRotationState m_rotationState;
     class QTimer* m_previewRotationTimer;
+    class QTimer* m_previewSelectionTimer = nullptr;
     std::vector<int> m_previewSelectedFrames;
     bool m_restorePreviewSelection = false;
+    bool m_previewSelectionClearRequested = false;
     int m_restorePreviewCurrent = -1;
     std::vector<int> m_restorePreviewSelectionIndices;
     class QAction* m_undoAction;

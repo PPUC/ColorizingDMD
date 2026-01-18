@@ -37,7 +37,7 @@ jobs:
         run: |
           rm -rf libserum
           git clone https://github.com/PPUC/libserum.git libserum
-          (cd libserum && git checkout c8f94a5df229888428a4421e42c1d1b640ec98b7)
+          (cd libserum && git checkout 2c0b5bacc1a84dcfb99bd8a001209ba6534d8564)
 
       - if: matrix.platform == 'linux'
         name: Install dependencies (linux)
@@ -111,6 +111,8 @@ jobs:
         with:
           path: vcpkg/installed
           key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-installed-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ matrix.arch }}-installed-dynamic-
 
       - if: matrix.platform == 'win'
         name: Restore vcpkg cache (Windows downloads)
@@ -118,6 +120,8 @@ jobs:
         with:
           path: vcpkg/downloads
           key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-downloads-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ matrix.arch }}-downloads-dynamic-
 
       - if: matrix.platform == 'win'
         name: Restore vcpkg cache (Windows buildtrees)
@@ -125,6 +129,8 @@ jobs:
         with:
           path: vcpkg/buildtrees
           key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-buildtrees-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ matrix.arch }}-buildtrees-dynamic-
 
       - if: matrix.platform == 'win'
         name: Restore vcpkg cache (Windows packages)
@@ -132,6 +138,8 @@ jobs:
         with:
           path: vcpkg/packages
           key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-packages-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ matrix.arch }}-packages-dynamic-
 
       - if: matrix.platform == 'win'
         name: Restore vcpkg cache (Windows registry)
@@ -139,13 +147,8 @@ jobs:
         with:
           path: vcpkg/registry
           key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-registry-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
-
-      - if: matrix.platform == 'win'
-        name: Restore vcpkg binary cache (Windows)
-        uses: actions/cache/restore@v4
-        with:
-          path: vcpkg-binary-cache
-          key: vcpkg-bin-${{ runner.os }}-${{ matrix.arch }}-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ matrix.arch }}-registry-dynamic-
 
       - if: matrix.platform == 'win'
         name: Setup vcpkg (Windows)
@@ -167,6 +170,65 @@ jobs:
           "VCPKG_DEFAULT_TRIPLET=$triplet" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VCPKG_DEFAULT_BINARY_CACHE=$binaryCache" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      - if: matrix.platform == 'win'
+        name: Restore vcpkg binary cache (Windows)
+        uses: actions/cache/restore@v4
+        with:
+          path: vcpkg-binary-cache
+          key: vcpkg-bin-${{ runner.os }}-${{ matrix.arch }}-static-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+          restore-keys: |
+            vcpkg-bin-${{ runner.os }}-${{ matrix.arch }}-dynamic-
+
+      - if: matrix.platform == 'win'
+        name: vcpkg install (Windows dynamic)
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:GITHUB_WORKSPACE "vcpkg"
+          $env:VCPKG_DEFAULT_BINARY_CACHE = Join-Path $env:GITHUB_WORKSPACE "vcpkg-binary-cache"
+          $triplet = if ("${{ matrix.arch }}" -eq "x86") { "x86-windows" } else { "x64-windows" }
+          & "$root/vcpkg.exe" install opencv qtbase --triplet $triplet
+
+      - if: matrix.platform == 'win'
+        name: Save vcpkg cache (Windows installed)
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg/installed
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-installed-dynamic-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+
+      - if: matrix.platform == 'win'
+        name: Save vcpkg cache (Windows downloads)
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg/downloads
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-downloads-dynamic-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+
+      - if: matrix.platform == 'win'
+        name: Save vcpkg cache (Windows buildtrees)
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg/buildtrees
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-buildtrees-dynamic-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+
+      - if: matrix.platform == 'win'
+        name: Save vcpkg cache (Windows packages)
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg/packages
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-packages-dynamic-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+
+      - if: matrix.platform == 'win'
+        name: Save vcpkg cache (Windows registry)
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg/registry
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-registry-dynamic-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
+
+      - if: matrix.platform == 'win'
+        name: Save vcpkg binary cache (Windows)
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg-binary-cache
+          key: vcpkg-bin-${{ runner.os }}-${{ matrix.arch }}-dynamic-${{ hashFiles('.github/workflows/ci.yml', 'platforms/config.sh') }}
 
       - if: matrix.platform == 'win'
         name: vcpkg install (Windows static)
@@ -228,10 +290,9 @@ jobs:
           BUILD_TYPE: Release
         run: |
           find platforms \( -name "build.sh" -o -name "external.sh" \) -exec chmod +x {} \;
+          ./platforms/${{ matrix.platform }}/${{ matrix.arch }}/build.sh
           if [ "${{ matrix.platform }}" = "win" ]; then
             STATIC_LINKING=1 ./platforms/${{ matrix.platform }}/${{ matrix.arch }}/build.sh
-          else
-            ./platforms/${{ matrix.platform }}/${{ matrix.arch }}/build.sh
           fi
 
       - if: matrix.platform != 'win'
@@ -242,8 +303,15 @@ jobs:
           path: artifacts/${{ matrix.platform }}-${{ matrix.arch }}
 
       - if: matrix.platform == 'win'
-        name: Upload artifacts (Windows static)
+        name: Upload artifacts (Windows dynamic)
         uses: actions/upload-artifact@v4
         with:
           name: PPUC-Serum-Colorizer-${{ matrix.platform }}-${{ matrix.arch }}
+          path: artifacts/${{ matrix.platform }}-${{ matrix.arch }}
+
+      - if: matrix.platform == 'win'
+        name: Upload artifacts (Windows static)
+        uses: actions/upload-artifact@v4
+        with:
+          name: PPUC-Serum-Colorizer-${{ matrix.platform }}-${{ matrix.arch }}-static
           path: artifacts/${{ matrix.platform }}-${{ matrix.arch }}-static

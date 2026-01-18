@@ -40,6 +40,8 @@
 - WYSIWYG: render canvas + preview using libserum logic.
 - Avoid data duplication for large projects.
 - Preview row only renders the visible subset of frames.
+- Every feature addition, modification, or removal must be reflected in `handbook.md`.
+- libserum is the source of truth; the editor must not render differently.
 
 ## Editor mask behavior
 - Frame uses exactly one comparison mask and one dynamic mask assignment.
