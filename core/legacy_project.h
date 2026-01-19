@@ -87,11 +87,6 @@ struct LegacyProject {
     uint32_t no_colors = 64;
 };
 
-bool LoadLegacyProject(const std::string& path,
-                       const std::string& rp_path,
-                       LegacyProject& out,
-                       std::string* error);
-
 bool LoadLegacyProjectFromConcentrate(const std::string& cromc_path,
                                       const std::string& rp_path,
                                       LegacyProject& out,
