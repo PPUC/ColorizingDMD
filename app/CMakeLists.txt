@@ -23,6 +23,7 @@ target_sources(${APP_NAME} PRIVATE
     GLCanvasWidget.cpp
     GLCanvasWidget.h
     ../libserum/src/serum-editor.cpp
+    ../libserum/src/serum-decode.cpp
     ProjectState.cpp
     ProjectState.h
     ProjectIO.cpp
@@ -80,6 +81,10 @@ target_link_libraries(${APP_NAME} PRIVATE
     Qt6::Gui
     Qt6::OpenGL
     Qt6::OpenGLWidgets
+)
+
+target_compile_definitions(${APP_NAME} PRIVATE
+    WRITE_CROMC
 )
 
 target_include_directories(${APP_NAME} PRIVATE

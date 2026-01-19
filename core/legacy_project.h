@@ -91,3 +91,9 @@ bool LoadLegacyProject(const std::string& path,
                        const std::string& rp_path,
                        LegacyProject& out,
                        std::string* error);
+
+bool LoadLegacyProjectFromConcentrate(const std::string& cromc_path,
+                                      const std::string& rp_path,
+                                      LegacyProject& out,
+                                      std::string* error,
+                                      bool skip_frame_images = false);

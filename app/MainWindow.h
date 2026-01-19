@@ -6,10 +6,12 @@
 #include <QElapsedTimer>
 #include <QTimer>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <opencv2/core.hpp>
 
 #include "legacy_project.h"
+#include "SerumData.h"
 #include "serum-editor.h"
 
 class QListWidget;
@@ -116,6 +118,13 @@ private:
     bool saveProjectToPath(const QString& filename);
     bool saveLegacyProject(const QString& filename);
     LegacyProject buildLegacyProject(const QString& baseName) const;
+    bool setupSerumData(const QString& cromcPath, const LegacyProject& legacy, std::string* error);
+    void configureFrameStoreAdapter();
+    void configureSpriteStoreAdapter();
+    void configureBackgroundStoreAdapter();
+    void commitFrameEdits(const std::vector<int>& indices, bool useHd);
+    void commitFrameToSerum(int index, const cv::Mat& image, bool useHd);
+    void commitFrameFromStore(int index, bool useHd);
     void refreshFramePreviews();
     void updateFramePreviewAt(int index);
     void refreshFramePreviewSelection();
@@ -194,6 +203,19 @@ private:
     UndoTarget currentUndoTarget() const;
     void setHdMode(bool enabled);
     bool hasHdFrame(int index) const;
+    cv::Mat* ensureHdFrameLocal(int index);
+    cv::Mat* ensureHdBackgroundLocal(int index);
+    bool hasHdSprite(int index) const;
+    cv::Mat* ensureHdSpriteLocal(int index);
+    cv::Mat* ensureHdSpriteMaskLocal(int index);
+    cv::Mat* ensureHdSpriteDynamicMaskLocal(int index);
+    std::vector<uint16_t>* ensureHdSpriteDynamicColorsLocal(int index);
+    cv::Mat* ensureSpriteOriginalLocal(int index);
+    cv::Mat* ensureSpriteDynamicMaskLocal(int index);
+    std::vector<uint16_t>* ensureSpriteDynamicColorsLocal(int index);
+    QSize serumSpriteBaseSize() const;
+    const uint8_t* serumSpriteOriginalData(uint32_t spriteId) const;
+    int spriteDynamicColorsPerSet(const std::vector<uint16_t>& colors) const;
     cv::Mat* activeFrameImage(int index, bool forEdit);
     cv::Mat* activeBackgroundImage(int index, bool forEdit);
     void ensureMaskDataSize();
@@ -281,6 +303,14 @@ private:
     int reducedSlotCount() const;
     int dynamicSlotCount() const;
     int dynamicColorsPerSet(const std::vector<uint16_t>& colors) const;
+    int serumDynamicStride() const;
+    const uint16_t* frameDynamicColorsData(int frameIndex, bool useHd, int* strideOut) const;
+    std::vector<uint16_t>* ensureFrameDynamicColorsLocal(int frameIndex, bool useHd);
+    std::size_t rotationBlockSize() const;
+    std::size_t rotationSetOffset(int setIndex) const;
+    const uint16_t* rotationBlockForRead(int frameIndex, bool useHd) const;
+    std::vector<uint16_t>* ensureRotationBlockLocal(int frameIndex, bool useHd);
+    uint16_t* rotationBlockForEdit(int frameIndex, bool useHd);
     QColor reducedSlotColor(int setIndex, int slot) const;
     QColor dynamicSlotColor(int slot) const;
     void setReducedSlotColor(int setIndex, int slot, const QColor& color);
@@ -477,6 +507,10 @@ private:
     std::vector<uint8_t> m_frameShapeCompModes;
     std::vector<uint16_t> m_frameRotations;
     std::vector<uint16_t> m_frameRotationsX;
+    std::unordered_map<int, std::vector<uint16_t>> m_frameRotationsLocal;
+    std::unordered_map<int, std::vector<uint16_t>> m_frameRotationsLocalX;
+    SerumData m_serumData;
+    bool m_serumDataLoaded = false;
 
     bool m_drawPointEnabled = false;
     MaskMode m_maskMode = MaskMode::None;
@@ -522,6 +556,7 @@ private:
     std::vector<int> m_previewSelectedFrames;
     bool m_restorePreviewSelection = false;
     bool m_previewSelectionClearRequested = false;
+    bool m_isLoadingProject = false;
     int m_restorePreviewCurrent = -1;
     std::vector<int> m_restorePreviewSelectionIndices;
     class QAction* m_undoAction;

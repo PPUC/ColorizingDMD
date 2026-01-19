@@ -32,6 +32,7 @@
 #include <QMessageBox>
 #include <QInputDialog>
 #include <QSettings>
+#include <QScopedValueRollback>
 #include <QStackedWidget>
 #include <QButtonGroup>
 #include <QLayout>
@@ -86,6 +87,10 @@
 #include "legacy_project_writer.h"
 #include "serum_constants.h"
 #include "serum-editor.h"
+#ifdef MIN
+#undef MIN
+#endif
+#include "serum-decode.h"
 
 namespace {
 constexpr int kDefaultFrameWidth = 128;
@@ -109,6 +114,10 @@ constexpr int kReducedPaletteCount = 64;
 constexpr int kDefaultUndoDepth = 50;
 constexpr int kDefaultHistoryDepth = 100;
 constexpr int kFrameGapPixels = 4;
+
+bool EnsureConcentrateExists(const QString& cromPath,
+                             const QString& cromcPath,
+                             QString* errorMessage);
 
 constexpr int kFrameIndexRole = Qt::UserRole + 1;
 constexpr int kFrameDurationRole = Qt::UserRole + 2;
@@ -162,6 +171,20 @@ int FrameGapForWidth(int width)
     (void)width;
     return kFrameGapPixels;
 }
+
+bool SpriteHasNonTransparentPixel(const uint8_t* data, std::size_t count)
+{
+    if (!data || count == 0) {
+        return false;
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+        if (data[i] != 255) {
+            return true;
+        }
+    }
+    return false;
+}
+
 
 cv::Mat BuildStackedFrames(const std::vector<cv::Mat>& frames,
                            const cv::Scalar& gapColor,
@@ -1178,7 +1201,7 @@ MainWindow::MainWindow(QWidget* parent)
             this,
             "Open Project",
             QString(),
-            "Serum Projects (*.crom *.cROM *.crp *.cRP);;All Files (*.*)");
+            "Serum Projects (*.crom *.cROM *.crp *.cRP *.cROMc);;All Files (*.*)");
         if (!filename.isEmpty()) {
             openProjectFile(filename);
         }
@@ -1186,7 +1209,10 @@ MainWindow::MainWindow(QWidget* parent)
     connect(saveAction, &QAction::triggered, this, [this]() {
         QString filename = m_state->projectPath();
         if (filename.isEmpty()) {
-            filename = QFileDialog::getSaveFileName(this, "Save Project", QString(), "Serum Projects (*.crom *.cROM *.crp *.cRP)");
+            filename = QFileDialog::getSaveFileName(this,
+                                                    "Save Project",
+                                                    QString(),
+                                                    "Serum Projects (*.cRP *.cROMc)");
             if (filename.isEmpty()) {
                 return;
             }
@@ -1202,7 +1228,7 @@ MainWindow::MainWindow(QWidget* parent)
             this,
             "Save Project As",
             QString(),
-            "Serum Projects (*.crom *.cROM *.crp *.cRP)");
+            "Serum Projects (*.cRP *.cROMc)");
         if (filename.isEmpty()) {
             return;
         }
@@ -1245,6 +1271,9 @@ MainWindow::MainWindow(QWidget* parent)
                                               cv::Scalar(55, 55, 55));
         }
         m_frameStore->add(frameImage);
+        if (m_serumDataLoaded) {
+            m_serumData.nframes = static_cast<uint32_t>(m_frameStore->count());
+        }
         m_state->addFrame();
         ensureUndoStacksSize();
         if (m_framesList->count() > 0) {
@@ -1331,6 +1360,9 @@ MainWindow::MainWindow(QWidget* parent)
         if (m_framesList->hasFocus()) {
             const int row = m_framesList->currentRow();
             m_frameStore->removeAt(row);
+            if (m_serumDataLoaded) {
+                m_serumData.nframes = static_cast<uint32_t>(m_frameStore->count());
+            }
             m_state->removeFrame(row);
             if (row >= 0 && row < static_cast<int>(m_frameRefs.size())) {
                 m_frameRefs.erase(m_frameRefs.begin() + row);
@@ -1978,12 +2010,9 @@ MainWindow::MainWindow(QWidget* parent)
             }
             const bool useHd = m_useHdFrame && hasHdFrame(frameIndex);
             pushRotationUndoSnapshot(frameIndex, m_rotationSetIndex, useHd);
-            const std::size_t blockSize =
-                static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
-            const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize +
-                static_cast<std::size_t>(m_rotationSetIndex) * MAX_LENGTH_COLOR_ROTATION;
-            std::vector<uint16_t>& rotations = useHd ? m_frameRotationsX : m_frameRotations;
-            if (base + MAX_LENGTH_COLOR_ROTATION > rotations.size()) {
+            uint16_t* rotations = rotationBlockForEdit(frameIndex, useHd);
+            const std::size_t base = rotationSetOffset(m_rotationSetIndex);
+            if (!rotations || base + MAX_LENGTH_COLOR_ROTATION > rotationBlockSize()) {
                 cancelPaletteSetSlot();
                 return;
             }
@@ -2024,12 +2053,9 @@ MainWindow::MainWindow(QWidget* parent)
         }
         const bool useHd = m_useHdFrame && hasHdFrame(frameIndex);
         pushRotationUndoSnapshot(frameIndex, m_rotationSetIndex, useHd);
-        const std::size_t blockSize =
-            static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
-        const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize +
-            static_cast<std::size_t>(m_rotationSetIndex) * MAX_LENGTH_COLOR_ROTATION;
-        std::vector<uint16_t>& rotations = useHd ? m_frameRotationsX : m_frameRotations;
-        if (base + MAX_LENGTH_COLOR_ROTATION > rotations.size()) {
+        uint16_t* rotations = rotationBlockForEdit(frameIndex, useHd);
+        const std::size_t base = rotationSetOffset(m_rotationSetIndex);
+        if (!rotations || base + MAX_LENGTH_COLOR_ROTATION > rotationBlockSize()) {
             return;
         }
         uint16_t length = rotations[base];
@@ -2056,12 +2082,9 @@ MainWindow::MainWindow(QWidget* parent)
         }
         const bool useHd = m_useHdFrame && hasHdFrame(frameIndex);
         pushRotationUndoSnapshot(frameIndex, m_rotationSetIndex, useHd);
-        const std::size_t blockSize =
-            static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
-        const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize +
-            static_cast<std::size_t>(m_rotationSetIndex) * MAX_LENGTH_COLOR_ROTATION;
-        std::vector<uint16_t>& rotations = useHd ? m_frameRotationsX : m_frameRotations;
-        if (base + MAX_LENGTH_COLOR_ROTATION > rotations.size()) {
+        uint16_t* rotations = rotationBlockForEdit(frameIndex, useHd);
+        const std::size_t base = rotationSetOffset(m_rotationSetIndex);
+        if (!rotations || base + MAX_LENGTH_COLOR_ROTATION > rotationBlockSize()) {
             return;
         }
         uint16_t length = rotations[base];
@@ -2087,12 +2110,9 @@ MainWindow::MainWindow(QWidget* parent)
         }
         const bool useHd = m_useHdFrame && hasHdFrame(frameIndex);
         pushRotationUndoSnapshot(frameIndex, m_rotationSetIndex, useHd);
-        const std::size_t blockSize =
-            static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
-        const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize +
-            static_cast<std::size_t>(m_rotationSetIndex) * MAX_LENGTH_COLOR_ROTATION;
-        std::vector<uint16_t>& rotations = useHd ? m_frameRotationsX : m_frameRotations;
-        if (base + MAX_LENGTH_COLOR_ROTATION > rotations.size()) {
+        uint16_t* rotations = rotationBlockForEdit(frameIndex, useHd);
+        const std::size_t base = rotationSetOffset(m_rotationSetIndex);
+        if (!rotations || base + MAX_LENGTH_COLOR_ROTATION > rotationBlockSize()) {
             return;
         }
         const uint16_t length = rotations[base];
@@ -2115,12 +2135,9 @@ MainWindow::MainWindow(QWidget* parent)
         }
         const bool useHd = m_useHdFrame && hasHdFrame(frameIndex);
         pushRotationUndoSnapshot(frameIndex, m_rotationSetIndex, useHd);
-        const std::size_t blockSize =
-            static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
-        const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize +
-            static_cast<std::size_t>(m_rotationSetIndex) * MAX_LENGTH_COLOR_ROTATION;
-        std::vector<uint16_t>& rotations = useHd ? m_frameRotationsX : m_frameRotations;
-        if (base + MAX_LENGTH_COLOR_ROTATION > rotations.size()) {
+        uint16_t* rotations = rotationBlockForEdit(frameIndex, useHd);
+        const std::size_t base = rotationSetOffset(m_rotationSetIndex);
+        if (!rotations || base + MAX_LENGTH_COLOR_ROTATION > rotationBlockSize()) {
             return;
         }
         const uint16_t length = rotations[base];
@@ -2139,12 +2156,9 @@ MainWindow::MainWindow(QWidget* parent)
         }
         const bool useHd = m_useHdFrame && hasHdFrame(frameIndex);
         pushRotationUndoSnapshot(frameIndex, m_rotationSetIndex, useHd);
-        const std::size_t blockSize =
-            static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
-        const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize +
-            static_cast<std::size_t>(m_rotationSetIndex) * MAX_LENGTH_COLOR_ROTATION;
-        std::vector<uint16_t>& rotations = useHd ? m_frameRotationsX : m_frameRotations;
-        if (base + MAX_LENGTH_COLOR_ROTATION > rotations.size()) {
+        uint16_t* rotations = rotationBlockForEdit(frameIndex, useHd);
+        const std::size_t base = rotationSetOffset(m_rotationSetIndex);
+        if (!rotations || base + MAX_LENGTH_COLOR_ROTATION > rotationBlockSize()) {
             return;
         }
         rotations[base] = 0;
@@ -2478,7 +2492,6 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(m_state, &ProjectState::countsChanged, this, [this]() {
         refreshCounts();
-        refreshFrameSpriteLists();
         updateFrameJumpRange();
     });
     connect(m_shapeCompToggle, &QCheckBox::toggled, this, [this](bool enabled) {
@@ -2562,8 +2575,7 @@ MainWindow::MainWindow(QWidget* parent)
             if (index < 0 || !m_spriteStore) {
                 return;
             }
-            if (index < static_cast<int>(m_spriteColoredX.size()) &&
-                !m_spriteColoredX[static_cast<std::size_t>(index)].empty()) {
+            if (hasHdSprite(index)) {
                 statusBar()->showMessage("HD sprite already exists.", 2000);
                 return;
             }
@@ -2652,8 +2664,7 @@ MainWindow::MainWindow(QWidget* parent)
                     if (spriteId == 255 || spriteId >= spriteCount) {
                         continue;
                     }
-                    const bool hasExtra = spriteId < m_spriteColoredX.size() &&
-                        !m_spriteColoredX[static_cast<std::size_t>(spriteId)].empty();
+                    const bool hasExtra = hasHdSprite(static_cast<int>(spriteId));
                     if (!hasExtra) {
                         spritesToScale.insert(static_cast<int>(spriteId));
                     }
@@ -2677,8 +2688,7 @@ MainWindow::MainWindow(QWidget* parent)
                     if (spriteIndex < 0 || spriteIndex >= m_spriteStore->count()) {
                         continue;
                     }
-                    if (spriteIndex < static_cast<int>(m_spriteColoredX.size()) &&
-                        !m_spriteColoredX[static_cast<std::size_t>(spriteIndex)].empty()) {
+                    if (hasHdSprite(spriteIndex)) {
                         continue;
                     }
                     const cv::Mat* src = m_spriteStore->at(spriteIndex);
@@ -2853,6 +2863,9 @@ MainWindow::MainWindow(QWidget* parent)
             }
             m_frameExtraFrames[static_cast<std::size_t>(index)] = resized;
             m_frameExtraFlags[static_cast<std::size_t>(index)] = 1;
+            if (m_serumDataLoaded) {
+                commitFrameToSerum(index, resized, true);
+            }
             ensureBackgroundDataSize();
             if (index < static_cast<int>(m_frameBackgroundMasks.size()) &&
                 index < static_cast<int>(m_frameBackgroundMasksX.size())) {
@@ -2955,6 +2968,10 @@ MainWindow::MainWindow(QWidget* parent)
             if (index < static_cast<int>(m_frameExtraFlags.size())) {
                 m_frameExtraFlags[static_cast<std::size_t>(index)] = 0;
             }
+            if (m_serumDataLoaded) {
+                const uint8_t extra = 0;
+                m_serumData.isextraframe.setIndex(static_cast<uint32_t>(index), &extra, 1);
+            }
             if (index < static_cast<int>(m_frameHdUndoStacks.size())) {
                 m_frameHdUndoStacks[static_cast<std::size_t>(index)] = UndoStack{};
             }
@@ -3044,8 +3061,17 @@ MainWindow::MainWindow(QWidget* parent)
         }
         if (sourceIndex < static_cast<int>(m_frameDynamicColors.size()) &&
             targetIndex < static_cast<int>(m_frameDynamicColors.size())) {
-            m_frameDynamicColors[static_cast<std::size_t>(targetIndex)] =
-                m_frameDynamicColors[static_cast<std::size_t>(sourceIndex)];
+            const bool useHd = m_useHdFrame && hasHdFrame(sourceIndex);
+            int stride = 0;
+            const uint16_t* data = frameDynamicColorsData(sourceIndex, useHd, &stride);
+            std::vector<uint16_t>* targetColors = ensureFrameDynamicColorsLocal(targetIndex, useHd);
+            if (targetColors && data && stride > 0) {
+                const std::size_t size =
+                    static_cast<std::size_t>(MAX_DYNA_SETS_PER_FRAMEN) * static_cast<std::size_t>(stride);
+                targetColors->assign(data, data + size);
+            } else if (targetColors) {
+                targetColors->clear();
+            }
         }
         updateFramePreviewAt(targetIndex);
         if (m_framesList && m_framesList->currentRow() == targetIndex) {
@@ -4021,6 +4047,7 @@ MainWindow::MainWindow(QWidget* parent)
         m_showBackgroundLayer = enabled;
         updateFrameCanvasImage(m_framesList->currentRow());
         updateMaskPreviewForFrame(m_framesList->currentRow());
+        refreshFramePreviews();
     });
     connect(m_framesCanvas, &CanvasWidget::originalToggled, this, [this](bool enabled) {
         m_showOriginalFrame = enabled;
@@ -4387,9 +4414,10 @@ void MainWindow::openProjectFile(const QString& filename)
     if (filename.isEmpty()) {
         return;
     }
+    QScopedValueRollback<bool> loadGuard(m_isLoadingProject, true);
     const QFileInfo info(filename);
     const QString suffix = info.suffix().toLower();
-    if (suffix == "crom" || suffix == "crp") {
+    if (suffix == "crom" || suffix == "crp" || suffix == "cromc") {
         if (suffix == "crom" && IsLikelyJsonFile(filename)) {
             QString error;
             m_imageStore->clear();
@@ -4427,6 +4455,8 @@ void MainWindow::openProjectFile(const QString& filename)
             m_frameShapeCompModes.clear();
             m_frameRotations.clear();
             m_frameRotationsX.clear();
+            m_frameRotationsLocal.clear();
+            m_frameRotationsLocalX.clear();
             m_frameExtraFrames.clear();
             m_frameExtraFlags.clear();
             m_backgroundFramesX.clear();
@@ -4436,6 +4466,9 @@ void MainWindow::openProjectFile(const QString& filename)
             m_frameBackgroundMasksX.clear();
             m_useHdFrame = false;
             m_noColors = 64;
+            m_serumData.Clear();
+            m_serumDataLoaded = false;
+            configureFrameStoreAdapter();
             updateMetadataForFrame(-1);
             updateMetadataForSprite(-1);
             populateBookmarks({}, {});
@@ -4446,12 +4479,16 @@ void MainWindow::openProjectFile(const QString& filename)
                 resetNavigationHistory();
                 statusBar()->showMessage(QString("Open: %1").arg(filename), 5000);
                 persistRecentFiles();
+                QTimer::singleShot(0, this, [this]() {
+                    refreshAllPreviews();
+                    refreshFrameSpriteLists();
+                });
             } else {
                 statusBar()->showMessage(QString("Open failed: %1").arg(error), 5000);
             }
             return;
         }
-        QString cromPath = filename;
+        QString cromPath;
         QString rpPath;
         if (suffix == "crp") {
             const QString base = info.completeBaseName();
@@ -4466,6 +4503,16 @@ void MainWindow::openProjectFile(const QString& filename)
                 }
             }
             rpPath = filename;
+        } else if (suffix == "cromc") {
+            const QString base = info.completeBaseName();
+            const QString dir = info.absolutePath();
+            const QString candidate = dir + "/" + base + ".cRP";
+            const QString candidateLower = dir + "/" + base + ".crp";
+            if (QFileInfo::exists(candidate)) {
+                rpPath = candidate;
+            } else if (QFileInfo::exists(candidateLower)) {
+                rpPath = candidateLower;
+            }
         } else {
             const QString base = info.completeBaseName();
             const QString dir = info.absolutePath();
@@ -4473,10 +4520,23 @@ void MainWindow::openProjectFile(const QString& filename)
             if (QFileInfo::exists(candidate)) {
                 rpPath = candidate;
             }
+            cromPath = filename;
         }
+        const QString base = suffix == "cromc" ? info.completeBaseName() : QFileInfo(cromPath).completeBaseName();
+        const QString dir = suffix == "cromc" ? info.absolutePath() : QFileInfo(cromPath).absolutePath();
+        const QString cromcPath = dir + "/" + base + ".cROMc";
         LegacyProject legacy;
         std::string error;
-        if (!LoadLegacyProject(cromPath.toStdString(), rpPath.toStdString(), legacy, &error)) {
+        QString detail;
+        if (!EnsureConcentrateExists(cromPath, cromcPath, &detail)) {
+            statusBar()->showMessage(QString("Open failed: %1").arg(detail), 5000);
+            return;
+        }
+        if (!LoadLegacyProjectFromConcentrate(cromcPath.toStdString(),
+                                              rpPath.toStdString(),
+                                              legacy,
+                                              &error,
+                                              true)) {
             statusBar()->showMessage(QString("Open failed: %1").arg(QString::fromStdString(error)), 5000);
             return;
         }
@@ -4543,6 +4603,8 @@ void MainWindow::openProjectFile(const QString& filename)
         m_frameShapeCompModes.clear();
         m_frameRotations.clear();
         m_frameRotationsX.clear();
+        m_frameRotationsLocal.clear();
+        m_frameRotationsLocalX.clear();
         m_frameExtraFrames.clear();
         m_frameExtraFlags.clear();
         m_backgroundFramesX.clear();
@@ -4554,21 +4616,66 @@ void MainWindow::openProjectFile(const QString& filename)
         m_noColors = legacy.no_colors > 0 ? legacy.no_colors : 64;
         updateMetadataForFrame(-1);
         updateMetadataForSprite(-1);
-        for (const auto& frame : legacy.frames) {
-            m_frameStore->add(frame);
+        if (!setupSerumData(cromcPath, legacy, &error)) {
+            statusBar()->showMessage(QString("Open failed: %1").arg(QString::fromStdString(error)), 5000);
+            return;
         }
-        for (const auto& sprite : legacy.sprites) {
-            m_spriteStore->add(sprite);
+        configureFrameStoreAdapter();
+        configureSpriteStoreAdapter();
+        configureBackgroundStoreAdapter();
+        if (!m_serumDataLoaded) {
+            for (const auto& frame : legacy.frames) {
+                m_frameStore->add(frame);
+            }
+        } else if (m_frameStore) {
+            m_frameStore->setCount(static_cast<int>(legacy.frames.size()));
+        }
+        if (!m_serumDataLoaded) {
+            for (const auto& sprite : legacy.sprites) {
+                m_spriteStore->add(sprite);
+            }
         }
         m_frameDurations = legacy.frame_durations;
         m_spriteNames = legacy.sprite_labels;
-        m_spriteColored = legacy.sprite_colored;
+        if (!m_serumDataLoaded) {
+            m_spriteColored = legacy.sprite_colored;
+        } else {
+            m_spriteColored.assign(legacy.sprites.size(), cv::Mat());
+        }
         m_spriteColoredX = legacy.sprite_colored_x;
-        m_spriteOriginals = legacy.sprite_originals;
+        if (!m_serumDataLoaded) {
+            m_spriteOriginals = legacy.sprite_originals;
+        } else {
+            m_spriteOriginals.assign(legacy.sprites.size(), cv::Mat());
+            const std::size_t serumCount = m_serumData.spriteoriginal.elementCount();
+            const std::size_t legacyCount = m_serumData.spritedescriptionso.elementCount();
+            const std::size_t serumScanCount = (serumCount > 0) ? serumCount : legacyCount;
+            const std::size_t legacyScanCount = (legacyCount > 0) ? legacyCount : serumCount;
+            for (std::size_t i = 0; i < legacy.sprite_originals.size(); ++i) {
+                if (legacy.sprite_originals[i].empty()) {
+                    continue;
+                }
+                const uint8_t* serum = serumSpriteOriginalData(static_cast<uint32_t>(i));
+                const bool serumHasOpaque = SpriteHasNonTransparentPixel(serum, serumScanCount);
+                const bool legacyHasOpaque =
+                    SpriteHasNonTransparentPixel(legacy.sprite_originals[i].data, legacyScanCount);
+                if (!serumHasOpaque && legacyHasOpaque) {
+                    m_spriteOriginals[i] = legacy.sprite_originals[i];
+                }
+            }
+        }
         m_spriteMasksX = legacy.sprite_masks_x;
-        m_spriteDynamicMasks = legacy.sprite_dynamic_masks;
+        if (!m_serumDataLoaded) {
+            m_spriteDynamicMasks = legacy.sprite_dynamic_masks;
+        } else {
+            m_spriteDynamicMasks.assign(legacy.sprites.size(), cv::Mat());
+        }
         m_spriteDynamicMasksX = legacy.sprite_dynamic_masks_x;
-        m_spriteDynamicColors = legacy.sprite_dynamic_colors;
+        if (!m_serumDataLoaded) {
+            m_spriteDynamicColors = legacy.sprite_dynamic_colors;
+        } else {
+            m_spriteDynamicColors.assign(legacy.sprites.size(), std::vector<uint16_t>());
+        }
         m_spriteDynamicColorsX = legacy.sprite_dynamic_colors_x;
         m_spriteExtraFlags = legacy.sprite_extra_flags;
         m_spriteShapeModes = legacy.sprite_shape_modes;
@@ -4583,23 +4690,44 @@ void MainWindow::openProjectFile(const QString& filename)
         m_sectionStarts = legacy.section_firsts;
         m_sectionNames = legacy.section_names;
         m_frameRefs = legacy.frame_refs;
-        m_frameDynamicColors = legacy.frame_dynamic_colors;
-        m_compMasks = legacy.comp_masks;
-        m_frameDynamicMaskMaps = legacy.frame_dynamic_mask_maps;
-        m_frameDynamicMaskMapsX = legacy.frame_dynamic_mask_maps_x;
         m_frameCompMaskIds = legacy.frame_comp_mask_ids;
         m_frameShapeCompModes = legacy.frame_shape_comp_modes;
-        m_frameRotations = legacy.frame_rotations;
-        m_frameRotationsX = legacy.frame_rotations_x;
-        m_frameExtraFrames = legacy.frames_x;
         m_frameExtraFlags = legacy.frame_extra_flags;
         m_backgroundExtraFlags = legacy.background_extra_flags;
         m_frameBackgroundIds = legacy.background_ids;
-        m_frameBackgroundMasks = legacy.background_masks;
-        m_frameBackgroundMasksX = legacy.background_masks_x;
-        m_backgroundFramesX = legacy.background_frames_x;
-        for (const auto& bg : legacy.background_frames) {
-            m_backgroundStore->add(bg);
+        if (m_serumDataLoaded) {
+            const std::size_t spriteCount = legacy.sprites.size();
+            m_spriteColoredX.assign(spriteCount, cv::Mat());
+            m_spriteMasksX.assign(spriteCount, cv::Mat());
+            m_spriteDynamicMasksX.assign(spriteCount, cv::Mat());
+            m_spriteDynamicColorsX.assign(spriteCount, std::vector<uint16_t>());
+        }
+        if (!m_serumDataLoaded) {
+            m_frameDynamicColors = legacy.frame_dynamic_colors;
+            m_compMasks = legacy.comp_masks;
+            m_frameDynamicMaskMaps = legacy.frame_dynamic_mask_maps;
+            m_frameDynamicMaskMapsX = legacy.frame_dynamic_mask_maps_x;
+            m_frameRotations = legacy.frame_rotations;
+            m_frameRotationsX = legacy.frame_rotations_x;
+            m_frameExtraFrames = legacy.frames_x;
+            m_frameBackgroundMasks = legacy.background_masks;
+            m_frameBackgroundMasksX = legacy.background_masks_x;
+            m_backgroundFramesX = legacy.background_frames_x;
+        } else {
+            const std::size_t frameCount = legacy.frames.size();
+            m_frameDynamicColors.assign(frameCount, std::vector<uint16_t>());
+            m_compMasks.assign(MAX_MASKS, cv::Mat());
+            m_frameDynamicMaskMaps.assign(frameCount, cv::Mat());
+            m_frameDynamicMaskMapsX.assign(frameCount, cv::Mat());
+            m_frameExtraFrames.assign(frameCount, cv::Mat());
+            m_frameBackgroundMasks = legacy.background_masks;
+            m_frameBackgroundMasksX = legacy.background_masks_x;
+            m_backgroundFramesX.assign(static_cast<std::size_t>(m_backgroundStore->count()), cv::Mat());
+        }
+        if (!m_serumDataLoaded) {
+            for (const auto& bg : legacy.background_frames) {
+                m_backgroundStore->add(bg);
+            }
         }
         if (m_backgroundFramesX.size() < static_cast<std::size_t>(m_backgroundStore->count())) {
             m_backgroundFramesX.resize(static_cast<std::size_t>(m_backgroundStore->count()));
@@ -4633,28 +4761,37 @@ void MainWindow::openProjectFile(const QString& filename)
         {
             QSignalBlocker blocker(m_state);
             m_state->newProject();
-            m_state->openProject(cromPath);
+        m_state->openProject(cromcPath);
             m_state->setFramesAndSprites(frames, sprites);
         }
         resetUndoStacks();
         updateWindowTitle();
-        m_projectLabel->setText(cromPath);
+        m_projectLabel->setText(cromcPath);
         updateProjectLabelHeight();
         refreshRecentMenu();
         refreshImageList();
         refreshCounts();
         refreshFrameSpriteLists();
         resetNavigationHistory();
-        if (!legacy.frames.empty()) {
-            m_framesList->setCurrentRow(0);
-            QTimer::singleShot(0, this, [this]() {
-                m_framesCanvas->canvas()->requestFitOnResize(true);
-            });
-        }
+        const bool wantSelectFirst = !legacy.frames.empty();
         populateBookmarks(legacy.section_firsts, legacy.section_names);
-        statusBar()->showMessage(QString("Open legacy: %1").arg(cromPath), 5000);
+        statusBar()->showMessage(QString("Open legacy: %1").arg(cromcPath), 5000);
         m_state->setRecentFiles(m_state->recentFiles());
         persistRecentFiles();
+        QTimer::singleShot(0, this, [this]() {
+            refreshAllPreviews();
+            refreshFrameSpriteLists();
+            if (m_framesCanvas) {
+                m_framesCanvas->canvas()->requestFitOnResize(true);
+            }
+        });
+        if (wantSelectFirst && m_framesList && m_framesList->count() > 0) {
+            QTimer::singleShot(0, this, [this]() {
+                if (m_framesList && m_framesList->count() > 0) {
+                    m_framesList->setCurrentRow(0);
+                }
+            });
+        }
         return;
     }
 
@@ -4676,7 +4813,14 @@ void MainWindow::openProjectFile(const QString& filename)
     m_frameShapeCompModes.clear();
     m_frameRotations.clear();
     m_frameRotationsX.clear();
+    m_frameRotationsLocal.clear();
+    m_frameRotationsLocalX.clear();
     m_frameExtraFrames.clear();
+    m_serumData.Clear();
+    m_serumDataLoaded = false;
+    configureFrameStoreAdapter();
+    configureSpriteStoreAdapter();
+    configureBackgroundStoreAdapter();
     m_frameExtraFlags.clear();
     m_backgroundFramesX.clear();
     m_backgroundExtraFlags.clear();
@@ -4693,6 +4837,10 @@ void MainWindow::openProjectFile(const QString& filename)
     if (LoadProjectJson(*m_state, filename, &error)) {
         statusBar()->showMessage(QString("Open: %1").arg(filename), 5000);
         persistRecentFiles();
+        QTimer::singleShot(0, this, [this]() {
+            refreshAllPreviews();
+            refreshFrameSpriteLists();
+        });
     } else {
         statusBar()->showMessage(QString("Open failed: %1").arg(error), 5000);
     }
@@ -4707,10 +4855,10 @@ bool MainWindow::saveProjectToPath(const QString& filename)
     QString suffix = info.suffix().toLower();
     QString target = filename;
     if (suffix.isEmpty()) {
-        target = filename + ".crom";
-        suffix = "crom";
+        target = filename + ".cRP";
+        suffix = "crp";
     }
-    if (suffix == "crom" || suffix == "crp") {
+    if (suffix == "crom" || suffix == "crp" || suffix == "cromc") {
         return saveLegacyProject(target);
     }
     if (SaveProjectJson(*m_state, target)) {
@@ -4726,26 +4874,33 @@ bool MainWindow::saveLegacyProject(const QString& filename)
         statusBar()->showMessage("Save failed: no frames", 5000);
         return false;
     }
+    if (m_frameStore) {
+        m_frameStore->flush();
+    }
     ensureMaskDataSize();
     QFileInfo info(filename);
     const QString suffix = info.suffix().toLower();
     const QString dir = info.absolutePath();
     const QString base = info.completeBaseName();
-    QString cromPath = filename;
     QString rpPath = dir + "/" + base + ".cRP";
     if (suffix == "crp") {
         rpPath = filename;
-        cromPath = dir + "/" + base + ".crom";
     }
+    const QString cromcPath = dir + "/" + base + ".cROMc";
 
     LegacyProject project = buildLegacyProject(base);
     std::string error;
-    if (!SaveLegacyProject(cromPath.toStdString(), rpPath.toStdString(), project, &error)) {
+    if (!SaveLegacyProjectRp(rpPath.toStdString(), project, &error)) {
         statusBar()->showMessage(QString("Save failed: %1").arg(QString::fromStdString(error)), 5000);
         return false;
     }
+    std::string cromcError;
+    if (!SaveConcentrateProject(cromcPath.toStdString(), project, &cromcError)) {
+        statusBar()->showMessage(QString("Saved, but .cROMc failed: %1").arg(QString::fromStdString(cromcError)),
+                                 5000);
+    }
 
-    m_state->saveProject(cromPath);
+    m_state->saveProject(cromcPath);
     return true;
 }
 
@@ -4789,18 +4944,34 @@ LegacyProject MainWindow::buildLegacyProject(const QString& baseName) const
         project.active_frames.resize(static_cast<std::size_t>(frameCount), 0);
         project.trigger_ids.resize(static_cast<std::size_t>(frameCount), 0xffffffffu);
     }
-    project.frames.reserve(static_cast<std::size_t>(frameCount));
+    project.frames.resize(static_cast<std::size_t>(frameCount));
+    cv::Size baseSize(kDefaultFrameWidth, kDefaultFrameHeight);
     for (int i = 0; i < frameCount; ++i) {
         if (const cv::Mat* frame = m_frameStore->at(i)) {
-            project.frames.push_back(frame->clone());
+            if (!frame->empty()) {
+                baseSize = frame->size();
+                break;
+            }
         }
+    }
+    for (int i = 0; i < frameCount; ++i) {
+        if (const cv::Mat* frame = m_frameStore->at(i)) {
+            if (!frame->empty()) {
+                project.frames[static_cast<std::size_t>(i)] = frame->clone();
+                continue;
+            }
+        }
+        project.frames[static_cast<std::size_t>(i)] =
+            cv::Mat(baseSize, CV_8UC3, cv::Scalar(0, 0, 0));
     }
 
     const int spriteCount = m_spriteStore->count();
-    project.sprites.reserve(static_cast<std::size_t>(spriteCount));
+    project.sprites.resize(static_cast<std::size_t>(spriteCount));
     for (int i = 0; i < spriteCount; ++i) {
         if (const cv::Mat* sprite = m_spriteStore->at(i)) {
-            project.sprites.push_back(sprite->clone());
+            if (!sprite->empty()) {
+                project.sprites[static_cast<std::size_t>(i)] = sprite->clone();
+            }
         }
     }
     if (!m_spriteColored.empty()) {
@@ -4815,6 +4986,118 @@ LegacyProject MainWindow::buildLegacyProject(const QString& baseName) const
     project.sprite_dynamic_masks_x = m_spriteDynamicMasksX;
     project.sprite_dynamic_colors = m_spriteDynamicColors;
     project.sprite_dynamic_colors_x = m_spriteDynamicColorsX;
+    if (m_serumDataLoaded) {
+        const std::size_t spriteCountSize = static_cast<std::size_t>(spriteCount);
+        if (project.sprite_originals.size() < spriteCountSize) {
+            project.sprite_originals.resize(spriteCountSize);
+        }
+        if (project.sprite_dynamic_masks.size() < spriteCountSize) {
+            project.sprite_dynamic_masks.resize(spriteCountSize);
+        }
+        if (project.sprite_dynamic_colors.size() < spriteCountSize) {
+            project.sprite_dynamic_colors.resize(spriteCountSize);
+        }
+        if (project.sprite_colored_x.size() < spriteCountSize) {
+            project.sprite_colored_x.resize(spriteCountSize);
+        }
+        if (project.sprite_masks_x.size() < spriteCountSize) {
+            project.sprite_masks_x.resize(spriteCountSize);
+        }
+        if (project.sprite_dynamic_masks_x.size() < spriteCountSize) {
+            project.sprite_dynamic_masks_x.resize(spriteCountSize);
+        }
+        if (project.sprite_dynamic_colors_x.size() < spriteCountSize) {
+            project.sprite_dynamic_colors_x.resize(spriteCountSize);
+        }
+        const int stride = serumDynamicStride();
+        const std::size_t colorsPerSprite =
+            static_cast<std::size_t>(MAX_DYNA_SETS_PER_SPRITE) * static_cast<std::size_t>(stride);
+        for (int i = 0; i < spriteCount; ++i) {
+            const std::size_t idx = static_cast<std::size_t>(i);
+            if (project.sprite_originals[idx].empty() &&
+                i < static_cast<int>(m_serumData.nsprites) &&
+                m_serumData.spriteoriginal.hasData(static_cast<uint32_t>(i)) &&
+                m_serumData.fwidth > 0 && m_serumData.fheight > 0) {
+                const uint8_t* data = m_serumData.spriteoriginal[static_cast<uint32_t>(i)];
+                if (data) {
+                    cv::Mat original(static_cast<int>(m_serumData.fheight),
+                                     static_cast<int>(m_serumData.fwidth),
+                                     CV_8UC1,
+                                     cv::Scalar(255));
+                    std::memcpy(original.data,
+                                data,
+                                static_cast<std::size_t>(m_serumData.fwidth) * m_serumData.fheight);
+                    project.sprite_originals[idx] = original;
+                }
+            }
+            if (project.sprite_dynamic_masks[idx].empty() &&
+                i < static_cast<int>(m_serumData.nsprites) &&
+                m_serumData.dynaspritemasks.hasData(static_cast<uint32_t>(i)) &&
+                m_serumData.fwidth > 0 && m_serumData.fheight > 0) {
+                const uint8_t* data = m_serumData.dynaspritemasks[static_cast<uint32_t>(i)];
+                if (data) {
+                    cv::Mat mask(static_cast<int>(m_serumData.fheight),
+                                 static_cast<int>(m_serumData.fwidth),
+                                 CV_8UC1,
+                                 cv::Scalar(255));
+                    std::memcpy(mask.data,
+                                data,
+                                static_cast<std::size_t>(m_serumData.fwidth) * m_serumData.fheight);
+                    project.sprite_dynamic_masks[idx] = mask;
+                }
+            }
+            if (project.sprite_dynamic_colors[idx].empty() &&
+                i < static_cast<int>(m_serumData.nsprites) &&
+                m_serumData.dynasprite4cols.hasData(static_cast<uint32_t>(i)) &&
+                colorsPerSprite > 0) {
+                const uint16_t* data = m_serumData.dynasprite4cols[static_cast<uint32_t>(i)];
+                if (data) {
+                    project.sprite_dynamic_colors[idx].assign(data, data + colorsPerSprite);
+                }
+            }
+            if (project.sprite_colored_x[idx].empty() &&
+                i < static_cast<int>(m_serumData.nsprites) &&
+                m_serumData.spritecolored_extra.hasData(static_cast<uint32_t>(i))) {
+                const uint16_t* data = m_serumData.spritecolored_extra[static_cast<uint32_t>(i)];
+                if (data) {
+                    project.sprite_colored_x[idx] = ConvertRgb565ToBgrMat(data,
+                                                                         MAX_SPRITE_WIDTH,
+                                                                         MAX_SPRITE_HEIGHT);
+                }
+            }
+            if (project.sprite_masks_x[idx].empty() &&
+                i < static_cast<int>(m_serumData.nsprites) &&
+                m_serumData.spritemask_extra.hasData(static_cast<uint32_t>(i))) {
+                const uint8_t* data = m_serumData.spritemask_extra[static_cast<uint32_t>(i)];
+                if (data) {
+                    cv::Mat mask(MAX_SPRITE_HEIGHT, MAX_SPRITE_WIDTH, CV_8UC1, cv::Scalar(255));
+                    std::memcpy(mask.data, data,
+                                static_cast<std::size_t>(MAX_SPRITE_WIDTH) * MAX_SPRITE_HEIGHT);
+                    project.sprite_masks_x[idx] = mask;
+                }
+            }
+            if (project.sprite_dynamic_masks_x[idx].empty() &&
+                i < static_cast<int>(m_serumData.nsprites) &&
+                m_serumData.dynaspritemasks_extra.hasData(static_cast<uint32_t>(i))) {
+                const uint8_t* data = m_serumData.dynaspritemasks_extra[static_cast<uint32_t>(i)];
+                if (data) {
+                    cv::Mat mask(MAX_SPRITE_HEIGHT, MAX_SPRITE_WIDTH, CV_8UC1, cv::Scalar(255));
+                    std::memcpy(mask.data, data,
+                                static_cast<std::size_t>(MAX_SPRITE_WIDTH) * MAX_SPRITE_HEIGHT);
+                    project.sprite_dynamic_masks_x[idx] = mask;
+                }
+            }
+            if (project.sprite_dynamic_colors_x[idx].empty() &&
+                i < static_cast<int>(m_serumData.nsprites) &&
+                m_serumData.dynasprite4cols_extra.hasData(static_cast<uint32_t>(i)) &&
+                colorsPerSprite > 0) {
+                const uint16_t* data = m_serumData.dynasprite4cols_extra[static_cast<uint32_t>(i)];
+                if (data) {
+                    project.sprite_dynamic_colors_x[idx].assign(data, data + colorsPerSprite);
+                }
+            }
+        }
+    }
     project.sprite_extra_flags = m_spriteExtraFlags;
     project.sprite_shape_modes = m_spriteShapeModes;
     project.sprite_det_areas = m_spriteDetAreas;
@@ -4840,9 +5123,41 @@ LegacyProject MainWindow::buildLegacyProject(const QString& baseName) const
     project.frame_shape_comp_modes = m_frameShapeCompModes;
     project.frame_dynamic_mask_maps = m_frameDynamicMaskMaps;
     project.frame_dynamic_mask_maps_x = m_frameDynamicMaskMapsX;
-    project.frame_dynamic_colors = m_frameDynamicColors;
-    project.frame_rotations = m_frameRotations;
-    project.frame_rotations_x = m_frameRotationsX;
+    if (!m_serumDataLoaded) {
+        project.frame_dynamic_colors = m_frameDynamicColors;
+        project.frame_rotations = m_frameRotations;
+        project.frame_rotations_x = m_frameRotationsX;
+    } else {
+        project.frame_dynamic_colors.assign(static_cast<std::size_t>(frameCount), {});
+        const int stride = serumDynamicStride();
+        const std::size_t size =
+            static_cast<std::size_t>(MAX_DYNA_SETS_PER_FRAMEN) * static_cast<std::size_t>(stride);
+        for (int i = 0; i < frameCount; ++i) {
+            const std::size_t idx = static_cast<std::size_t>(i);
+            if (idx < m_frameDynamicColors.size() && !m_frameDynamicColors[idx].empty()) {
+                project.frame_dynamic_colors[idx] = m_frameDynamicColors[idx];
+                continue;
+            }
+            const uint16_t* data = frameDynamicColorsData(i, false, nullptr);
+            if (data) {
+                project.frame_dynamic_colors[idx].assign(data, data + size);
+            } else {
+                project.frame_dynamic_colors[idx].assign(size, 0);
+            }
+        }
+        const std::size_t blockSize = rotationBlockSize();
+        project.frame_rotations.assign(static_cast<std::size_t>(frameCount) * blockSize, 0);
+        project.frame_rotations_x.assign(static_cast<std::size_t>(frameCount) * blockSize, 0);
+        for (int i = 0; i < frameCount; ++i) {
+            const std::size_t offset = static_cast<std::size_t>(i) * blockSize;
+            if (const uint16_t* data = rotationBlockForRead(i, false)) {
+                std::copy_n(data, blockSize, project.frame_rotations.begin() + offset);
+            }
+            if (const uint16_t* dataHd = rotationBlockForRead(i, true)) {
+                std::copy_n(dataHd, blockSize, project.frame_rotations_x.begin() + offset);
+            }
+        }
+    }
     project.frames_x = m_frameExtraFrames;
     project.frame_extra_flags.assign(static_cast<std::size_t>(frameCount), 0);
     for (int i = 0; i < frameCount; ++i) {
@@ -4853,15 +5168,43 @@ LegacyProject MainWindow::buildLegacyProject(const QString& baseName) const
             project.frame_extra_flags[idx] = m_frameExtraFlags[idx];
         }
     }
-    project.background_frames.reserve(static_cast<std::size_t>(m_backgroundStore ? m_backgroundStore->count() : 0));
+    const int backgroundCount = m_backgroundStore ? m_backgroundStore->count() : 0;
+    project.background_frames.resize(static_cast<std::size_t>(backgroundCount));
     if (m_backgroundStore) {
-        for (int i = 0; i < m_backgroundStore->count(); ++i) {
+        for (int i = 0; i < backgroundCount; ++i) {
             if (const cv::Mat* bg = m_backgroundStore->at(i)) {
-                project.background_frames.push_back(bg->clone());
+                if (!bg->empty()) {
+                    project.background_frames[static_cast<std::size_t>(i)] = bg->clone();
+                    continue;
+                }
             }
+            project.background_frames[static_cast<std::size_t>(i)] =
+                cv::Mat(baseSize, CV_8UC3, cv::Scalar(0, 0, 0));
         }
     }
     project.background_frames_x = m_backgroundFramesX;
+    if (m_serumDataLoaded) {
+        const std::size_t bgCountSize = static_cast<std::size_t>(backgroundCount);
+        if (project.background_frames_x.size() < bgCountSize) {
+            project.background_frames_x.resize(bgCountSize);
+        }
+        for (int i = 0; i < backgroundCount; ++i) {
+            const std::size_t idx = static_cast<std::size_t>(i);
+            if (!project.background_frames_x[idx].empty()) {
+                continue;
+            }
+            if (i < static_cast<int>(m_serumData.nbackgrounds) &&
+                m_serumData.backgroundframes_v2_extra.hasData(static_cast<uint32_t>(i))) {
+                const uint16_t* data = m_serumData.backgroundframes_v2_extra[static_cast<uint32_t>(i)];
+                if (data && m_serumData.fwidth_extra > 0 && m_serumData.fheight_extra > 0) {
+                    project.background_frames_x[idx] = ConvertRgb565ToBgrMat(
+                        data,
+                        static_cast<int>(m_serumData.fwidth_extra),
+                        static_cast<int>(m_serumData.fheight_extra));
+                }
+            }
+        }
+    }
     project.background_extra_flags = m_backgroundExtraFlags;
     project.background_ids = m_frameBackgroundIds;
     project.background_masks = m_frameBackgroundMasks;
@@ -4941,6 +5284,9 @@ void MainWindow::refreshFramePreviewSelection()
 
 void MainWindow::updatePreviewSelectionStyles()
 {
+    if (m_isLoadingProject) {
+        return;
+    }
     if (!m_framePreviewList) {
         return;
     }
@@ -4959,6 +5305,9 @@ void MainWindow::updatePreviewSelectionStyles()
 
 void MainWindow::schedulePreviewSelectionUpdate()
 {
+    if (m_isLoadingProject) {
+        return;
+    }
     if (!m_previewSelectionTimer) {
         updatePreviewSelectionStyles();
         if (m_previewSelectedOnly) {
@@ -5187,16 +5536,19 @@ std::vector<int> MainWindow::buildPreviewFrameIndices() const
         case PreviewFilterKind::DynamicMask: {
             const int referenceIndex = m_framesList ? m_framesList->currentRow() : -1;
             if (referenceIndex < 0 || referenceIndex >= static_cast<int>(m_frameDynamicMaskMaps.size())) {
-                break;
+                if (!(m_serumDataLoaded && referenceIndex >= 0 &&
+                      referenceIndex < static_cast<int>(m_serumData.nframes))) {
+                    break;
+                }
             }
-            const auto signatureForMap = [](const cv::Mat& map) -> uint32_t {
-                if (map.empty()) {
+            const auto signatureForData = [](const uint8_t* data, int width, int height) -> uint32_t {
+                if (!data || width <= 0 || height <= 0) {
                     return 0;
                 }
                 uint32_t signature = 0;
-                for (int y = 0; y < map.rows; ++y) {
-                    const uint8_t* row = map.ptr<uint8_t>(y);
-                    for (int x = 0; x < map.cols; ++x) {
+                for (int y = 0; y < height; ++y) {
+                    const uint8_t* row = data + static_cast<std::size_t>(y) * width;
+                    for (int x = 0; x < width; ++x) {
                         const uint8_t value = row[x];
                         if (value < MAX_DYNA_SETS_PER_FRAMEN) {
                             signature |= (1u << value);
@@ -5205,11 +5557,33 @@ std::vector<int> MainWindow::buildPreviewFrameIndices() const
                 }
                 return signature;
             };
-            const uint32_t referenceSignature =
-                signatureForMap(m_frameDynamicMaskMaps[static_cast<std::size_t>(referenceIndex)]);
-            for (int i = 0; i < count && i < static_cast<int>(m_frameDynamicMaskMaps.size()); ++i) {
-                const uint32_t signature =
-                    signatureForMap(m_frameDynamicMaskMaps[static_cast<std::size_t>(i)]);
+            const uint32_t referenceSignature = [&]() -> uint32_t {
+                if (m_serumDataLoaded && referenceIndex >= 0 &&
+                    referenceIndex < static_cast<int>(m_serumData.nframes) &&
+                    m_serumData.dynamasks.hasData(static_cast<uint32_t>(referenceIndex))) {
+                    return signatureForData(m_serumData.dynamasks[static_cast<uint32_t>(referenceIndex)],
+                                            static_cast<int>(m_serumData.fwidth),
+                                            static_cast<int>(m_serumData.fheight));
+                }
+                if (referenceIndex >= 0 && referenceIndex < static_cast<int>(m_frameDynamicMaskMaps.size())) {
+                    return signatureForData(m_frameDynamicMaskMaps[static_cast<std::size_t>(referenceIndex)].data,
+                                            m_frameDynamicMaskMaps[static_cast<std::size_t>(referenceIndex)].cols,
+                                            m_frameDynamicMaskMaps[static_cast<std::size_t>(referenceIndex)].rows);
+                }
+                return 0;
+            }();
+            for (int i = 0; i < count; ++i) {
+                uint32_t signature = 0;
+                if (m_serumDataLoaded && i >= 0 && i < static_cast<int>(m_serumData.nframes) &&
+                    m_serumData.dynamasks.hasData(static_cast<uint32_t>(i))) {
+                    signature = signatureForData(m_serumData.dynamasks[static_cast<uint32_t>(i)],
+                                                 static_cast<int>(m_serumData.fwidth),
+                                                 static_cast<int>(m_serumData.fheight));
+                } else if (i >= 0 && i < static_cast<int>(m_frameDynamicMaskMaps.size())) {
+                    signature = signatureForData(m_frameDynamicMaskMaps[static_cast<std::size_t>(i)].data,
+                                                 m_frameDynamicMaskMaps[static_cast<std::size_t>(i)].cols,
+                                                 m_frameDynamicMaskMaps[static_cast<std::size_t>(i)].rows);
+                }
                 if (signature == referenceSignature) {
                     indices.push_back(i);
                 }
@@ -5281,6 +5655,9 @@ std::vector<int> MainWindow::buildPreviewFrameIndices() const
 
 void MainWindow::refreshAllPreviews()
 {
+    if (m_isLoadingProject) {
+        return;
+    }
     if (m_maskList) {
         updateMaskPreviewIcons();
     }
@@ -5301,6 +5678,9 @@ void MainWindow::refreshAllPreviews()
 
 void MainWindow::refreshFramePreviews()
 {
+    if (m_isLoadingProject) {
+        return;
+    }
     int scrollValue = 0;
     if (m_framePreviewList && m_framePreviewList->horizontalScrollBar()) {
         scrollValue = m_framePreviewList->horizontalScrollBar()->value();
@@ -5315,8 +5695,19 @@ void MainWindow::refreshFramePreviews()
     QSignalBlocker blocker(m_framePreviewList);
     m_framePreviewList->clear();
 
+    if (!m_framesList || m_framesList->count() == 0) {
+        auto* item = new QListWidgetItem("No frames");
+        item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
+        m_framePreviewList->addItem(item);
+        return;
+    }
+
     const int count = m_frameStore->count();
-    if (count <= 0 || (count == 1 && m_framesList->item(0)->text().startsWith("No frames"))) {
+    const QListWidgetItem* firstItem = (m_framesList && m_framesList->count() > 0)
+        ? m_framesList->item(0)
+        : nullptr;
+    if (count <= 0 ||
+        (count == 1 && firstItem && firstItem->text().startsWith("No frames"))) {
         auto* item = new QListWidgetItem("No frames");
         item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
         m_framePreviewList->addItem(item);
@@ -5332,17 +5723,15 @@ void MainWindow::refreshFramePreviews()
     }
 
     for (int i : indices) {
-        const cv::Mat* image = m_frameStore->at(i);
-        if (!image || image->empty()) {
-            continue;
-        }
-
         cv::Mat reference = buildOriginalPreviewForIndex(i);
         cv::Mat hdFrame;
         if (i >= 0 && i < static_cast<int>(m_frameExtraFrames.size())) {
             hdFrame = m_frameExtraFrames[static_cast<std::size_t>(i)];
         }
         cv::Mat composed = renderFrameWithSerum(i, false);
+        if (composed.empty()) {
+            continue;
+        }
         cv::Mat hdComposed;
         if (!hdFrame.empty()) {
             hdComposed = renderFrameWithSerum(i, true);
@@ -5388,6 +5777,9 @@ void MainWindow::refreshFramePreviews()
 
 void MainWindow::updateFramePreviewAt(int index)
 {
+    if (m_isLoadingProject) {
+        return;
+    }
     const int row = previewRowForFrame(index);
     if (row < 0 || row >= m_framePreviewList->count()) {
         return;
@@ -5443,23 +5835,45 @@ cv::Mat MainWindow::buildPreviewFrame(int index,
     cv::Mat original = buildOriginalFrame(reference);
     if (m_previewMaskOverlayEnabled && m_maskMode != MaskMode::None && !original.empty()) {
         if (m_maskMode == MaskMode::Comparison) {
-            if (index >= 0 && index < static_cast<int>(m_frameCompMaskIds.size())) {
-                const uint8_t maskId = m_frameCompMaskIds[static_cast<std::size_t>(index)];
-                if (maskId != 255 && maskId < m_compMasks.size()) {
-                    const cv::Mat& mask = m_compMasks[static_cast<std::size_t>(maskId)];
-                    if (MaskHasContent(mask)) {
-                        original = buildMaskPreview(original, mask, cv::Vec3b(200, 0, 200));
-                    }
+            uint8_t maskId = 255;
+            const uint32_t frameId = static_cast<uint32_t>(index);
+            if (m_serumDataLoaded && index >= 0 && index < static_cast<int>(m_serumData.nframes) &&
+                m_serumData.compmaskID.hasData(frameId)) {
+                const uint8_t* maskPtr = m_serumData.compmaskID[frameId];
+                if (maskPtr) {
+                    maskId = maskPtr[0];
+                }
+            } else if (index >= 0 && index < static_cast<int>(m_frameCompMaskIds.size())) {
+                maskId = m_frameCompMaskIds[static_cast<std::size_t>(index)];
+            }
+            if (maskId != 255) {
+                cv::Mat mask;
+                if (m_serumDataLoaded && m_serumData.compmasks.hasData(maskId)) {
+                    mask = cv::Mat(static_cast<int>(m_serumData.fheight),
+                                   static_cast<int>(m_serumData.fwidth),
+                                   CV_8UC1,
+                                   const_cast<uint8_t*>(m_serumData.compmasks[maskId]));
+                } else if (maskId < m_compMasks.size()) {
+                    mask = m_compMasks[static_cast<std::size_t>(maskId)];
+                }
+                if (MaskHasContent(mask)) {
+                    original = buildMaskPreview(original, mask, cv::Vec3b(200, 0, 200));
                 }
             }
         } else if (m_maskMode == MaskMode::Dynamic) {
             const int setId = currentFrameDynamicMaskId();
-            const cv::Mat* map = nullptr;
-            if (index >= 0 && index < static_cast<int>(m_frameDynamicMaskMaps.size())) {
-                map = &m_frameDynamicMaskMaps[static_cast<std::size_t>(index)];
+            cv::Mat map;
+            if (m_serumDataLoaded && index >= 0 && index < static_cast<int>(m_serumData.nframes) &&
+                m_serumData.dynamasks.hasData(static_cast<uint32_t>(index))) {
+                map = cv::Mat(static_cast<int>(m_serumData.fheight),
+                              static_cast<int>(m_serumData.fwidth),
+                              CV_8UC1,
+                              const_cast<uint8_t*>(m_serumData.dynamasks[static_cast<uint32_t>(index)]));
+            } else if (index >= 0 && index < static_cast<int>(m_frameDynamicMaskMaps.size())) {
+                map = m_frameDynamicMaskMaps[static_cast<std::size_t>(index)];
             }
-            if (setId >= 0 && map && !map->empty()) {
-                cv::Mat mask = buildDynamicMaskFromMap(*map, setId);
+            if (setId >= 0 && !map.empty()) {
+                cv::Mat mask = buildDynamicMaskFromMap(map, setId);
                 if (MaskHasContent(mask)) {
                     original = buildMaskPreview(original, mask, cv::Vec3b(0, 200, 255));
                 }
@@ -5484,16 +5898,8 @@ cv::Mat MainWindow::applyRotationPreview(const cv::Mat& colorized,
     if (colorized.empty() || frameIndex < 0) {
         return EnsureBgr(colorized);
     }
-    const std::vector<uint16_t>& rotations = useHd
-        ? (!m_frameRotationsX.empty() ? m_frameRotationsX : m_frameRotations)
-        : m_frameRotations;
-    if (rotations.empty()) {
-        return EnsureBgr(colorized);
-    }
-    const std::size_t blockSize = static_cast<std::size_t>(MAX_COLOR_ROTATIONN) *
-        MAX_LENGTH_COLOR_ROTATION;
-    const std::size_t offset = static_cast<std::size_t>(frameIndex) * blockSize;
-    if (offset + blockSize > rotations.size()) {
+    const uint16_t* rotationsData = rotationBlockForRead(frameIndex, useHd);
+    if (!rotationsData) {
         return EnsureBgr(colorized);
     }
 
@@ -5511,9 +5917,9 @@ cv::Mat MainWindow::applyRotationPreview(const cv::Mat& colorized,
         ? static_cast<uint32_t>(m_previewRotationClock.elapsed())
         : 0;
     SerumEditorRotationState state{};
-    SerumEditor_InitRotationState(rotations.data() + offset, &state, elapsed);
+    SerumEditor_InitRotationState(rotationsData, &state, elapsed);
     std::vector<uint16_t> rotated(base565.size(), 0);
-    SerumEditor_ApplyRotationsMasked(rotations.data() + offset, base565.data(),
+    SerumEditor_ApplyRotationsMasked(rotationsData, base565.data(),
                                      rotated.data(), rotationsInFrame.data(),
                                      static_cast<uint32_t>(width),
                                      static_cast<uint32_t>(height), &state,
@@ -5550,18 +5956,13 @@ void MainWindow::updateCanvasRotationFrame()
         return;
     }
     const bool useHd = m_useHdFrame && hasHdFrame(frameIndex);
-    const std::vector<uint16_t>& rotations = useHd && !m_frameRotationsX.empty()
-        ? m_frameRotationsX
-        : m_frameRotations;
-    const std::size_t blockSize = static_cast<std::size_t>(MAX_COLOR_ROTATIONN) *
-        MAX_LENGTH_COLOR_ROTATION;
-    const std::size_t offset = static_cast<std::size_t>(frameIndex) * blockSize;
-    if (rotations.empty() || offset + blockSize > rotations.size()) {
+    const uint16_t* rotationsData = rotationBlockForRead(frameIndex, useHd);
+    if (!rotationsData) {
         setCanvasRotationEnabled(false);
         return;
     }
     if (frameIndex != m_rotationFrameIndex || useHd != m_rotationUseHd) {
-        SerumEditor_InitRotationState(rotations.data() + offset, &m_rotationState,
+        SerumEditor_InitRotationState(rotationsData, &m_rotationState,
                                       static_cast<uint32_t>(m_rotationClock.elapsed()));
         m_rotationFrameIndex = frameIndex;
         m_rotationUseHd = useHd;
@@ -5581,7 +5982,7 @@ void MainWindow::updateCanvasRotationFrame()
     std::vector<uint16_t> rotated(base565.size(), 0);
     const uint32_t nowMs = static_cast<uint32_t>(m_rotationClock.elapsed());
     const uint32_t nextDelay = SerumEditor_ApplyRotationsMasked(
-        rotations.data() + offset, base565.data(), rotated.data(),
+        rotationsData, base565.data(), rotated.data(),
         rotationsInFrame.data(), static_cast<uint32_t>(width),
         static_cast<uint32_t>(height), &m_rotationState, nowMs);
     const cv::Mat rotatedMat = ConvertRgb565ToBgrMat(rotated.data(), width, height);
@@ -5616,6 +6017,9 @@ void MainWindow::resetCanvasRotationState()
 
 void MainWindow::schedulePreviewRotationUpdate()
 {
+    if (m_isLoadingProject) {
+        return;
+    }
     if (!m_previewRotateEnabled || !m_previewRotationTimer) {
         return;
     }
@@ -5624,17 +6028,10 @@ void MainWindow::schedulePreviewRotationUpdate()
         m_previewRotationTimer->stop();
         return;
     }
-    const auto minDelayForFrame = [](const std::vector<uint16_t>& rotations, int frameIndex) -> uint32_t {
-        if (rotations.empty()) {
+    const auto minDelayForData = [](const uint16_t* data) -> uint32_t {
+        if (!data) {
             return 0;
         }
-        const std::size_t blockSize = static_cast<std::size_t>(MAX_COLOR_ROTATIONN) *
-            MAX_LENGTH_COLOR_ROTATION;
-        const std::size_t offset = static_cast<std::size_t>(frameIndex) * blockSize;
-        if (offset + blockSize > rotations.size()) {
-            return 0;
-        }
-        const uint16_t* data = rotations.data() + offset;
         uint32_t best = 0;
         for (int rot = 0; rot < MAX_COLOR_ROTATIONN; ++rot) {
             const std::size_t base = static_cast<std::size_t>(rot) * MAX_LENGTH_COLOR_ROTATION;
@@ -5649,20 +6046,16 @@ void MainWindow::schedulePreviewRotationUpdate()
         }
         return best;
     };
-
     uint32_t nextDelay = 0;
     for (int frameIndex : indices) {
         if (frameIndex < 0) {
             continue;
         }
-        uint32_t delay = minDelayForFrame(m_frameRotations, frameIndex);
-        if (delay == 0 && !m_frameRotationsX.empty()) {
-            delay = minDelayForFrame(m_frameRotationsX, frameIndex);
-        } else if (!m_frameRotationsX.empty()) {
-            const uint32_t hdDelay = minDelayForFrame(m_frameRotationsX, frameIndex);
-            if (hdDelay > 0) {
-                delay = (delay == 0) ? hdDelay : std::min(delay, hdDelay);
-            }
+        uint32_t delay = 0;
+        delay = minDelayForData(rotationBlockForRead(frameIndex, false));
+        const uint32_t hdDelay = minDelayForData(rotationBlockForRead(frameIndex, true));
+        if (hdDelay > 0) {
+            delay = (delay == 0) ? hdDelay : std::min(delay, hdDelay);
         }
         if (delay > 0) {
             if (nextDelay == 0 || delay < nextDelay) {
@@ -5890,6 +6283,8 @@ cv::Mat MainWindow::buildSpriteCoverageMask(int index, bool useHd) const
     if (index < 0 || !m_spriteStore) {
         return cv::Mat();
     }
+    const bool useSerumData = m_serumDataLoaded &&
+        index >= 0 && index < static_cast<int>(m_serumData.nframes);
     const cv::Mat* frame = nullptr;
     if (useHd && index >= 0 && index < static_cast<int>(m_frameExtraFrames.size()) &&
         !m_frameExtraFrames[static_cast<std::size_t>(index)].empty()) {
@@ -5900,7 +6295,10 @@ cv::Mat MainWindow::buildSpriteCoverageMask(int index, bool useHd) const
     if (!frame || frame->empty()) {
         return cv::Mat();
     }
-    const std::size_t spriteCount = m_spriteOriginals.size();
+    std::size_t spriteCount = m_spriteOriginals.size();
+    if (useSerumData) {
+        spriteCount = std::max(spriteCount, static_cast<std::size_t>(m_serumData.nsprites));
+    }
     if (spriteCount == 0) {
         return cv::Mat();
     }
@@ -5929,19 +6327,20 @@ cv::Mat MainWindow::buildSpriteCoverageMask(int index, bool useHd) const
         if (spriteId == 255 || spriteId >= spriteCount) {
             continue;
         }
-        if (useHd) {
-            const bool hasExtra = spriteId < m_spriteColoredX.size() &&
-                !m_spriteColoredX[static_cast<std::size_t>(spriteId)].empty();
-            if (!hasExtra) {
-                continue;
-            }
+        if (useHd && !hasHdSprite(static_cast<int>(spriteId))) {
+            continue;
         }
         SerumEditorSpriteView& view = spriteViews[spriteId];
         if (view.original) {
             continue;
         }
         const std::size_t spriteIndex = static_cast<std::size_t>(spriteId);
-        view.original = m_spriteOriginals[spriteIndex].data;
+        const cv::Mat* spriteOriginal = const_cast<MainWindow*>(this)->ensureSpriteOriginalLocal(
+            static_cast<int>(spriteId));
+        if (!spriteOriginal || spriteOriginal->empty()) {
+            continue;
+        }
+        view.original = spriteOriginal->data;
         if (spriteIndex < m_spriteMasksX.size()) {
             view.mask_extra = m_spriteMasksX[spriteIndex].data;
         }
@@ -6135,6 +6534,24 @@ bool MainWindow::renderFrameWithSerumRaw(int index,
     const cv::Mat* frameImage = nullptr;
     cv::Mat hdFrame;
     const bool hasOverride = !overrideColorized.empty();
+    const bool useSerumData = m_serumDataLoaded && !hasOverride &&
+        index >= 0 && index < static_cast<int>(m_serumData.nframes);
+    const uint16_t* serumFrame = nullptr;
+    const uint16_t* serumFrameExtra = nullptr;
+    if (useSerumData) {
+        if (useHd) {
+            const uint8_t* extraFlag = m_serumData.isextraframe[static_cast<uint32_t>(index)];
+            if (extraFlag && extraFlag[0] != 0) {
+                serumFrame = m_serumData.cframes_v2_extra[static_cast<uint32_t>(index)];
+            }
+        } else {
+            serumFrame = m_serumData.cframes_v2[static_cast<uint32_t>(index)];
+            const uint8_t* extraFlag = m_serumData.isextraframe[static_cast<uint32_t>(index)];
+            if (extraFlag && extraFlag[0] != 0) {
+                serumFrameExtra = m_serumData.cframes_v2_extra[static_cast<uint32_t>(index)];
+            }
+        }
+    }
     if (hasOverride) {
         frameImage = &overrideColorized;
     } else if (useHd && index >= 0 && index < static_cast<int>(m_frameExtraFrames.size())) {
@@ -6143,10 +6560,11 @@ bool MainWindow::renderFrameWithSerumRaw(int index,
             frameImage = &hdFrame;
         }
     }
-    if (!frameImage) {
+    if (!frameImage && !serumFrame) {
         frameImage = m_frameStore->at(index);
     }
-    if (!frameImage || frameImage->empty()) {
+    const bool useLocalColorized = hasOverride || (frameImage && !frameImage->empty());
+    if (!useLocalColorized && !serumFrame) {
         return false;
     }
 
@@ -6175,11 +6593,19 @@ bool MainWindow::renderFrameWithSerumRaw(int index,
 
     const int baseWidth = reference.cols;
     const int baseHeight = reference.rows;
-    outWidth = frameImage->cols;
-    outHeight = frameImage->rows;
+    if (serumFrame && !useLocalColorized) {
+        outWidth = useHd ? static_cast<int>(m_serumData.fwidth_extra) : static_cast<int>(m_serumData.fwidth);
+        outHeight = useHd ? static_cast<int>(m_serumData.fheight_extra) : static_cast<int>(m_serumData.fheight);
+    } else {
+        outWidth = frameImage ? frameImage->cols : 0;
+        outHeight = frameImage ? frameImage->rows : 0;
+    }
 
-    std::vector<uint16_t> frame565 = ConvertBgrMatToRgb565(*frameImage);
+    std::vector<uint16_t> frame565;
     std::vector<uint16_t> frame565Extra;
+    if (useLocalColorized && frameImage) {
+        frame565 = ConvertBgrMatToRgb565(*frameImage);
+    }
     if (!useHd && !hasOverride) {
         const cv::Mat* extra = (index >= 0 && index < static_cast<int>(m_frameExtraFrames.size()))
             ? &m_frameExtraFrames[static_cast<std::size_t>(index)]
@@ -6191,20 +6617,72 @@ bool MainWindow::renderFrameWithSerumRaw(int index,
 
     SerumEditorFrameView frameView;
     frameView.original = reference.data;
-    frameView.colorized = useHd ? nullptr : frame565.data();
-    frameView.colorized_extra = useHd ? frame565.data() : (frame565Extra.empty() ? nullptr : frame565Extra.data());
+    if (useLocalColorized) {
+        frameView.colorized = useHd ? nullptr : frame565.data();
+        frameView.colorized_extra = useHd
+            ? frame565.data()
+            : (frame565Extra.empty() ? nullptr : frame565Extra.data());
+    } else {
+        frameView.colorized = useHd ? nullptr : serumFrame;
+        frameView.colorized_extra = useHd ? serumFrame : (serumFrameExtra ? serumFrameExtra : nullptr);
+    }
 
-    if (index >= 0 && index < static_cast<int>(m_frameDynamicMaskMaps.size())) {
-        frameView.dynamask = m_frameDynamicMaskMaps[static_cast<std::size_t>(index)].data;
+    const uint32_t frameId = static_cast<uint32_t>(index);
+    const cv::Mat* localDynamicMap = (index >= 0 && index < static_cast<int>(m_frameDynamicMaskMaps.size()))
+        ? &m_frameDynamicMaskMaps[static_cast<std::size_t>(index)]
+        : nullptr;
+    const cv::Mat* localDynamicMapExtra = (index >= 0 && index < static_cast<int>(m_frameDynamicMaskMapsX.size()))
+        ? &m_frameDynamicMaskMapsX[static_cast<std::size_t>(index)]
+        : nullptr;
+    const bool hasLocalDynamicMap = localDynamicMap && !localDynamicMap->empty();
+    const bool hasLocalDynamicMapExtra = localDynamicMapExtra && !localDynamicMapExtra->empty();
+    const bool hasLocalDynamicColors = index >= 0 &&
+        index < static_cast<int>(m_frameDynamicColors.size()) &&
+        !m_frameDynamicColors[static_cast<std::size_t>(index)].empty();
+    const uint8_t* serumDynamask = nullptr;
+    const uint8_t* serumDynamaskExtra = nullptr;
+    const uint16_t* serumDynaCols = nullptr;
+    const uint16_t* serumDynaColsExtra = nullptr;
+    if (useSerumData) {
+        if (!hasLocalDynamicMap && m_serumData.dynamasks.hasData(frameId)) {
+            serumDynamask = m_serumData.dynamasks[frameId];
+        }
+        if (!hasLocalDynamicMapExtra && m_serumData.dynamasks_extra.hasData(frameId)) {
+            serumDynamaskExtra = m_serumData.dynamasks_extra[frameId];
+        }
+        if (!hasLocalDynamicColors && m_serumData.dyna4cols_v2.hasData(frameId)) {
+            serumDynaCols = m_serumData.dyna4cols_v2[frameId];
+        }
+        if (!hasLocalDynamicColors && m_serumData.dyna4cols_v2_extra.hasData(frameId)) {
+            serumDynaColsExtra = m_serumData.dyna4cols_v2_extra[frameId];
+        }
     }
-    if (index >= 0 && index < static_cast<int>(m_frameDynamicMaskMapsX.size())) {
-        frameView.dynamask_extra = m_frameDynamicMaskMapsX[static_cast<std::size_t>(index)].data;
+    if (serumDynamask) {
+        frameView.dynamask = serumDynamask;
+    } else if (localDynamicMap) {
+        frameView.dynamask = localDynamicMap->data;
     }
-    if (index >= 0 && index < static_cast<int>(m_frameDynamicColors.size())) {
+    if (serumDynamaskExtra) {
+        frameView.dynamask_extra = serumDynamaskExtra;
+    } else if (localDynamicMapExtra) {
+        frameView.dynamask_extra = localDynamicMapExtra->data;
+    }
+    if (serumDynaCols) {
+        frameView.dyna4cols = serumDynaCols;
+    }
+    if (serumDynaColsExtra) {
+        frameView.dyna4cols_extra = serumDynaColsExtra;
+    }
+    if (useHd && serumDynaCols && !serumDynaColsExtra) {
+        frameView.dyna4cols_extra = serumDynaCols;
+    }
+    if (!serumDynaCols && index >= 0 && index < static_cast<int>(m_frameDynamicColors.size())) {
         const std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(index)];
         if (!colors.empty()) {
             frameView.dyna4cols = colors.data();
-            frameView.dyna4cols_extra = colors.data();
+            if (!serumDynaColsExtra) {
+                frameView.dyna4cols_extra = colors.data();
+            }
         }
     }
     cv::Mat scaledDynamicMask;
@@ -6218,35 +6696,80 @@ bool MainWindow::renderFrameWithSerumRaw(int index,
         if ((!hdMap || hdMap->empty()) && sdMap && !sdMap->empty()) {
             cv::resize(*sdMap, scaledDynamicMask, cv::Size(outWidth, outHeight), 0.0, 0.0, cv::INTER_NEAREST);
             frameView.dynamask_extra = scaledDynamicMask.data;
+        } else if ((!hdMap || hdMap->empty()) && (!sdMap || sdMap->empty()) &&
+                   serumDynamask && m_serumData.fwidth > 0 && m_serumData.fheight > 0) {
+            cv::Mat serumMap(static_cast<int>(m_serumData.fheight),
+                             static_cast<int>(m_serumData.fwidth),
+                             CV_8UC1,
+                             const_cast<uint8_t*>(serumDynamask));
+            cv::resize(serumMap, scaledDynamicMask, cv::Size(outWidth, outHeight),
+                       0.0, 0.0, cv::INTER_NEAREST);
+            frameView.dynamask_extra = scaledDynamicMask.data;
         }
     }
 
     uint16_t backgroundId = 0xffff;
-    if (m_showBackgroundLayer && index >= 0 && index < static_cast<int>(m_frameBackgroundIds.size())) {
-        backgroundId = m_frameBackgroundIds[static_cast<std::size_t>(index)];
+    if (m_showBackgroundLayer) {
+        if (index >= 0 && index < static_cast<int>(m_frameBackgroundIds.size())) {
+            backgroundId = m_frameBackgroundIds[static_cast<std::size_t>(index)];
+        } else if (useSerumData && m_serumData.backgroundIDs.hasData(frameId)) {
+            const uint16_t* bg = m_serumData.backgroundIDs[frameId];
+            backgroundId = bg ? bg[0] : 0xffff;
+        }
     }
     frameView.background_id = backgroundId;
-    if (index >= 0 && index < static_cast<int>(m_frameBackgroundMasks.size())) {
-        frameView.background_mask = m_frameBackgroundMasks[static_cast<std::size_t>(index)].data;
+    const cv::Mat* localBgMask = (index >= 0 && index < static_cast<int>(m_frameBackgroundMasks.size()))
+        ? &m_frameBackgroundMasks[static_cast<std::size_t>(index)]
+        : nullptr;
+    const cv::Mat* localBgMaskExtra = (index >= 0 && index < static_cast<int>(m_frameBackgroundMasksX.size()))
+        ? &m_frameBackgroundMasksX[static_cast<std::size_t>(index)]
+        : nullptr;
+    const bool hasLocalBgMask = localBgMask && !localBgMask->empty();
+    const bool hasLocalBgMaskExtra = localBgMaskExtra && !localBgMaskExtra->empty();
+    const uint8_t* serumBgMask = nullptr;
+    const uint8_t* serumBgMaskExtra = nullptr;
+    if (useSerumData && backgroundId != 0xffff) {
+        if (!hasLocalBgMask && m_serumData.backgroundmask.hasData(frameId)) {
+            serumBgMask = m_serumData.backgroundmask[frameId];
+        }
+        if (!hasLocalBgMaskExtra && m_serumData.backgroundmask_extra.hasData(frameId)) {
+            serumBgMaskExtra = m_serumData.backgroundmask_extra[frameId];
+        }
     }
-    if (index >= 0 && index < static_cast<int>(m_frameBackgroundMasksX.size())) {
-        frameView.background_mask_extra = m_frameBackgroundMasksX[static_cast<std::size_t>(index)].data;
+    if (serumBgMask) {
+        frameView.background_mask = serumBgMask;
+    } else if (localBgMask) {
+        frameView.background_mask = localBgMask->data;
+    }
+    if (serumBgMaskExtra) {
+        frameView.background_mask_extra = serumBgMaskExtra;
+    } else if (localBgMaskExtra) {
+        frameView.background_mask_extra = localBgMaskExtra->data;
     }
 
     std::vector<uint16_t> background565;
     std::vector<uint16_t> background565Extra;
-    if (backgroundId != 0xffff && m_backgroundStore && backgroundId < m_backgroundStore->count()) {
-        const cv::Mat* background = m_backgroundStore->at(static_cast<int>(backgroundId));
-        if (background && !background->empty()) {
-            background565 = ConvertBgrMatToRgb565(*background);
-            frameView.background_frame = background565.data();
+    if (backgroundId != 0xffff) {
+        if (m_backgroundStore && backgroundId < m_backgroundStore->count()) {
+            const cv::Mat* background = m_backgroundStore->at(static_cast<int>(backgroundId));
+            if (background && !background->empty()) {
+                background565 = ConvertBgrMatToRgb565(*background);
+                frameView.background_frame = background565.data();
+            }
+        } else if (useSerumData &&
+                   backgroundId < m_serumData.nbackgrounds &&
+                   m_serumData.backgroundframes_v2.hasData(backgroundId)) {
+            frameView.background_frame = m_serumData.backgroundframes_v2[backgroundId];
         }
-    }
-    if (backgroundId != 0xffff &&
-        backgroundId < m_backgroundFramesX.size() &&
-        !m_backgroundFramesX[static_cast<std::size_t>(backgroundId)].empty()) {
-        background565Extra = ConvertBgrMatToRgb565(m_backgroundFramesX[static_cast<std::size_t>(backgroundId)]);
-        frameView.background_frame_extra = background565Extra.data();
+        if (backgroundId < m_backgroundFramesX.size() &&
+            !m_backgroundFramesX[static_cast<std::size_t>(backgroundId)].empty()) {
+            background565Extra = ConvertBgrMatToRgb565(m_backgroundFramesX[static_cast<std::size_t>(backgroundId)]);
+            frameView.background_frame_extra = background565Extra.data();
+        } else if (useSerumData &&
+                   backgroundId < m_serumData.nbackgrounds &&
+                   m_serumData.backgroundframes_v2_extra.hasData(backgroundId)) {
+            frameView.background_frame_extra = m_serumData.backgroundframes_v2_extra[backgroundId];
+        }
     }
     cv::Mat scaledBackgroundMask;
     cv::Mat scaledBackgroundFrame;
@@ -6257,15 +6780,36 @@ bool MainWindow::renderFrameWithSerumRaw(int index,
         const cv::Mat* sdMask = (index >= 0 && index < static_cast<int>(m_frameBackgroundMasks.size()))
             ? &m_frameBackgroundMasks[static_cast<std::size_t>(index)]
             : nullptr;
-        if ((!hdMask || hdMask->empty()) && sdMask && !sdMask->empty()) {
-            cv::resize(*sdMask, scaledBackgroundMask, cv::Size(outWidth, outHeight), 0.0, 0.0, cv::INTER_NEAREST);
-            frameView.background_mask_extra = scaledBackgroundMask.data;
+        if (!frameView.background_mask_extra) {
+            cv::Mat maskSource;
+            if (sdMask && !sdMask->empty()) {
+                maskSource = *sdMask;
+            } else if (serumBgMask) {
+                maskSource = cv::Mat(static_cast<int>(m_serumData.fheight),
+                                     static_cast<int>(m_serumData.fwidth),
+                                     CV_8UC1,
+                                     const_cast<uint8_t*>(serumBgMask));
+            }
+            if (!maskSource.empty()) {
+                cv::resize(maskSource, scaledBackgroundMask, cv::Size(outWidth, outHeight),
+                           0.0, 0.0, cv::INTER_NEAREST);
+                frameView.background_mask_extra = scaledBackgroundMask.data;
+            }
         }
-        if (!frameView.background_frame_extra && m_backgroundStore &&
-            backgroundId < m_backgroundStore->count()) {
-            const cv::Mat* sdBackground = m_backgroundStore->at(static_cast<int>(backgroundId));
-            if (sdBackground && !sdBackground->empty()) {
-                cv::resize(*sdBackground, scaledBackgroundFrame, cv::Size(outWidth, outHeight), 0.0, 0.0, cv::INTER_NEAREST);
+        if (!frameView.background_frame_extra) {
+            cv::Mat backgroundSource;
+            if (m_backgroundStore && backgroundId < m_backgroundStore->count()) {
+                const cv::Mat* sdBackground = m_backgroundStore->at(static_cast<int>(backgroundId));
+                if (sdBackground && !sdBackground->empty()) {
+                    backgroundSource = *sdBackground;
+                }
+            } else if (frameView.background_frame) {
+                backgroundSource = ConvertRgb565ToBgrMat(frameView.background_frame,
+                                                         static_cast<int>(m_serumData.fwidth),
+                                                         static_cast<int>(m_serumData.fheight));
+            }
+            if (!backgroundSource.empty()) {
+                cv::resize(backgroundSource, scaledBackgroundFrame, cv::Size(outWidth, outHeight), 0.0, 0.0, cv::INTER_NEAREST);
                 background565Extra = ConvertBgrMatToRgb565(scaledBackgroundFrame);
                 frameView.background_frame_extra = background565Extra.data();
             }
@@ -6275,20 +6819,36 @@ bool MainWindow::renderFrameWithSerumRaw(int index,
     const uint8_t* frameSprites = nullptr;
     const uint16_t* frameSpriteBBoxes = nullptr;
     const std::size_t spriteBase = static_cast<std::size_t>(index) * MAX_SPRITES_PER_FRAME;
-    if (spriteBase + MAX_SPRITES_PER_FRAME <= m_frameSpriteAssignments.size()) {
+    const bool hasLocalFrameSprites = spriteBase + MAX_SPRITES_PER_FRAME <= m_frameSpriteAssignments.size();
+    if (hasLocalFrameSprites) {
         frameSprites = m_frameSpriteAssignments.data() + spriteBase;
+    } else if (useSerumData && m_serumData.framesprites.hasData(frameId)) {
+        frameSprites = m_serumData.framesprites[frameId];
     }
     const std::size_t spriteBbBase = static_cast<std::size_t>(index) * MAX_SPRITES_PER_FRAME * 4;
-    if (spriteBbBase + MAX_SPRITES_PER_FRAME * 4 <= m_frameSpriteBBoxes.size()) {
+    const bool hasLocalFrameSpriteBBoxes = spriteBbBase + MAX_SPRITES_PER_FRAME * 4 <= m_frameSpriteBBoxes.size();
+    if (hasLocalFrameSpriteBBoxes) {
         frameSpriteBBoxes = m_frameSpriteBBoxes.data() + spriteBbBase;
+    } else if (useSerumData && m_serumData.framespriteBB.hasData(frameId)) {
+        frameSpriteBBoxes = m_serumData.framespriteBB[frameId];
     }
     frameView.frame_sprites = frameSprites;
     frameView.frame_sprite_bboxes = frameSpriteBBoxes;
 
-    const std::size_t spriteCount = m_spriteOriginals.size();
+    std::size_t spriteCount = m_spriteOriginals.size();
+    if (useSerumData) {
+        spriteCount = std::max(spriteCount, static_cast<std::size_t>(m_serumData.nsprites));
+    }
     std::vector<SerumEditorSpriteView> spriteViews(spriteCount);
     std::vector<std::vector<uint16_t>> sprite565(spriteCount);
     std::vector<std::vector<uint16_t>> sprite565Extra(spriteCount);
+    const QSize spriteBaseSize = serumSpriteBaseSize();
+    const int spriteSrcWidth = spriteBaseSize.width();
+    const int spriteSrcHeight = spriteBaseSize.height();
+    const bool spriteNeedsPadding =
+        spriteSrcWidth != MAX_SPRITE_WIDTH || spriteSrcHeight != MAX_SPRITE_HEIGHT;
+    const int spriteCopyWidth = std::min(spriteSrcWidth, MAX_SPRITE_WIDTH);
+    const int spriteCopyHeight = std::min(spriteSrcHeight, MAX_SPRITE_HEIGHT);
     if (frameSprites && spriteCount > 0) {
         for (int slot = 0; slot < MAX_SPRITES_PER_FRAME; ++slot) {
             const uint8_t spriteId = frameSprites[slot];
@@ -6300,13 +6860,26 @@ bool MainWindow::renderFrameWithSerumRaw(int index,
                 continue;
             }
             const std::size_t spriteIndex = static_cast<std::size_t>(spriteId);
-            if (spriteIndex < m_spriteOriginals.size()) {
+            const uint32_t spriteId32 = static_cast<uint32_t>(spriteId);
+            const uint8_t* serumOriginal = useSerumData ? serumSpriteOriginalData(spriteId32) : nullptr;
+            if (spriteIndex < m_spriteOriginals.size() &&
+                !m_spriteOriginals[spriteIndex].empty()) {
                 view.original = m_spriteOriginals[spriteIndex].data;
+            } else if (serumOriginal) {
+                view.original = serumOriginal;
             }
             if (spriteIndex < m_spriteColored.size()) {
                 const cv::Mat& colored = m_spriteColored[spriteIndex];
                 if (!colored.empty()) {
                     sprite565[spriteIndex] = ConvertBgrMatToRgb565(colored);
+                    view.colored = sprite565[spriteIndex].data();
+                }
+            }
+            if (!view.colored && useSerumData && m_serumData.spritecolored.elementCount() > 0) {
+                const uint16_t* data = m_serumData.spritecolored[spriteId32];
+                const std::size_t count = m_serumData.spritecolored.elementCount();
+                if (data && count > 0) {
+                    sprite565[spriteIndex].assign(data, data + count);
                     view.colored = sprite565[spriteIndex].data();
                 }
             }
@@ -6317,14 +6890,36 @@ bool MainWindow::renderFrameWithSerumRaw(int index,
                     view.colored_extra = sprite565Extra[spriteIndex].data();
                 }
             }
-            if (spriteIndex < m_spriteMasksX.size()) {
-                view.mask_extra = m_spriteMasksX[spriteIndex].data;
+            if (!view.colored_extra && useSerumData &&
+                m_serumData.spritecolored_extra.elementCount() > 0) {
+                const uint16_t* data = m_serumData.spritecolored_extra[spriteId32];
+                const std::size_t count = m_serumData.spritecolored_extra.elementCount();
+                if (data && count > 0) {
+                    sprite565Extra[spriteIndex].assign(data, data + count);
+                    view.colored_extra = sprite565Extra[spriteIndex].data();
+                }
             }
-            if (spriteIndex < m_spriteDynamicMasks.size()) {
+            if (spriteIndex < m_spriteMasksX.size() &&
+                !m_spriteMasksX[spriteIndex].empty()) {
+                view.mask_extra = m_spriteMasksX[spriteIndex].data;
+            } else if (useSerumData && m_serumData.spritemask_extra.hasData(spriteId32)) {
+                view.mask_extra = m_serumData.spritemask_extra[spriteId32];
+            }
+            if (spriteIndex < m_spriteDynamicMasks.size() &&
+                !m_spriteDynamicMasks[spriteIndex].empty()) {
                 view.dynasprite_mask = m_spriteDynamicMasks[spriteIndex].data;
             }
-            if (spriteIndex < m_spriteDynamicMasksX.size()) {
+            if (!view.dynasprite_mask && useSerumData &&
+                m_serumData.dynaspritemasks.hasData(spriteId32)) {
+                view.dynasprite_mask = m_serumData.dynaspritemasks[spriteId32];
+            }
+            if (spriteIndex < m_spriteDynamicMasksX.size() &&
+                !m_spriteDynamicMasksX[spriteIndex].empty()) {
                 view.dynasprite_mask_extra = m_spriteDynamicMasksX[spriteIndex].data;
+            }
+            if (!view.dynasprite_mask_extra && useSerumData &&
+                m_serumData.dynaspritemasks_extra.hasData(spriteId32)) {
+                view.dynasprite_mask_extra = m_serumData.dynaspritemasks_extra[spriteId32];
             }
             if (spriteIndex < m_spriteDynamicColors.size()) {
                 const auto& dynCols = m_spriteDynamicColors[spriteIndex];
@@ -6332,11 +6927,19 @@ bool MainWindow::renderFrameWithSerumRaw(int index,
                     view.dynasprite_cols = dynCols.data();
                 }
             }
+            if (!view.dynasprite_cols && useSerumData &&
+                m_serumData.dynasprite4cols.hasData(spriteId32)) {
+                view.dynasprite_cols = m_serumData.dynasprite4cols[spriteId32];
+            }
             if (spriteIndex < m_spriteDynamicColorsX.size()) {
                 const auto& dynCols = m_spriteDynamicColorsX[spriteIndex];
                 if (!dynCols.empty()) {
                     view.dynasprite_cols_extra = dynCols.data();
                 }
+            }
+            if (!view.dynasprite_cols_extra && useSerumData &&
+                m_serumData.dynasprite4cols_extra.hasData(spriteId32)) {
+                view.dynasprite_cols_extra = m_serumData.dynasprite4cols_extra[spriteId32];
             }
             if (spriteIndex < m_spriteShapeModes.size()) {
                 view.shape_mode = m_spriteShapeModes[spriteIndex];
@@ -6351,6 +6954,55 @@ bool MainWindow::renderFrameWithSerumRaw(int index,
             }
             if (detDwordOffset + MAX_SPRITE_DETECT_AREAS <= m_spriteDetDwordPos.size()) {
                 view.det_dword_pos = m_spriteDetDwordPos.data() + detDwordOffset;
+            }
+            if (useSerumData) {
+                if (!view.original && serumOriginal) {
+                    view.original = serumOriginal;
+                }
+                if (!view.colored && m_serumData.spritecolored.elementCount() > 0) {
+                    const uint16_t* data = m_serumData.spritecolored[spriteId32];
+                    const std::size_t count = m_serumData.spritecolored.elementCount();
+                    if (data && count > 0) {
+                        sprite565[spriteIndex].assign(data, data + count);
+                        view.colored = sprite565[spriteIndex].data();
+                    }
+                }
+                if (!view.colored_extra && m_serumData.spritecolored_extra.elementCount() > 0) {
+                    const uint16_t* data = m_serumData.spritecolored_extra[spriteId32];
+                    const std::size_t count = m_serumData.spritecolored_extra.elementCount();
+                    if (data && count > 0) {
+                        sprite565Extra[spriteIndex].assign(data, data + count);
+                        view.colored_extra = sprite565Extra[spriteIndex].data();
+                    }
+                }
+                if (!view.mask_extra && m_serumData.spritemask_extra.hasData(spriteId32)) {
+                    view.mask_extra = m_serumData.spritemask_extra[spriteId32];
+                }
+                if (!view.dynasprite_mask && m_serumData.dynaspritemasks.hasData(spriteId32)) {
+                    view.dynasprite_mask = m_serumData.dynaspritemasks[spriteId32];
+                }
+                if (!view.dynasprite_mask_extra && m_serumData.dynaspritemasks_extra.hasData(spriteId32)) {
+                    view.dynasprite_mask_extra = m_serumData.dynaspritemasks_extra[spriteId32];
+                }
+                if (!view.dynasprite_cols && m_serumData.dynasprite4cols.hasData(spriteId32)) {
+                    view.dynasprite_cols = m_serumData.dynasprite4cols[spriteId32];
+                }
+                if (!view.dynasprite_cols_extra && m_serumData.dynasprite4cols_extra.hasData(spriteId32)) {
+                    view.dynasprite_cols_extra = m_serumData.dynasprite4cols_extra[spriteId32];
+                }
+                if (view.shape_mode == 0 && m_serumData.sprshapemode.hasData(spriteId32)) {
+                    const uint8_t* mode = m_serumData.sprshapemode[spriteId32];
+                    view.shape_mode = mode ? mode[0] : 0;
+                }
+                if (!view.det_areas && m_serumData.spritedetareas.hasData(spriteId32)) {
+                    view.det_areas = m_serumData.spritedetareas[spriteId32];
+                }
+                if (!view.det_dwords && m_serumData.spritedetdwords.hasData(spriteId32)) {
+                    view.det_dwords = m_serumData.spritedetdwords[spriteId32];
+                }
+                if (!view.det_dword_pos && m_serumData.spritedetdwordpos.hasData(spriteId32)) {
+                    view.det_dword_pos = m_serumData.spritedetdwordpos[spriteId32];
+                }
             }
         }
     }
@@ -6371,16 +7023,7 @@ bool MainWindow::renderFrameWithSerumRaw(int index,
 
     out565.assign(static_cast<std::size_t>(outWidth) * outHeight, 0);
 
-    const std::vector<uint16_t>& rotations = useHd && !m_frameRotationsX.empty()
-        ? m_frameRotationsX
-        : m_frameRotations;
-    const std::size_t blockSize =
-        static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
-    const std::size_t offset = static_cast<std::size_t>(index) * blockSize;
-    const uint16_t* rotationsData =
-        (!rotations.empty() && offset + blockSize <= rotations.size())
-            ? rotations.data() + offset
-            : nullptr;
+    const uint16_t* rotationsData = rotationBlockForRead(index, useHd);
     if (rotationsInFrame) {
         rotationsInFrame->assign(static_cast<std::size_t>(outWidth) * outHeight * 2, 0xffff);
     }
@@ -6411,6 +7054,24 @@ cv::Mat MainWindow::renderFrameWithSerum(int index, bool useHd, const cv::Mat& o
     const cv::Mat* frameImage = nullptr;
     cv::Mat hdFrame;
     const bool hasOverride = !overrideColorized.empty();
+    const bool useSerumData = m_serumDataLoaded && !hasOverride &&
+        index >= 0 && index < static_cast<int>(m_serumData.nframes);
+    const uint16_t* serumFrame = nullptr;
+    const uint16_t* serumFrameExtra = nullptr;
+    if (useSerumData) {
+        if (useHd) {
+            const uint8_t* extraFlag = m_serumData.isextraframe[static_cast<uint32_t>(index)];
+            if (extraFlag && extraFlag[0] != 0) {
+                serumFrame = m_serumData.cframes_v2_extra[static_cast<uint32_t>(index)];
+            }
+        } else {
+            serumFrame = m_serumData.cframes_v2[static_cast<uint32_t>(index)];
+            const uint8_t* extraFlag = m_serumData.isextraframe[static_cast<uint32_t>(index)];
+            if (extraFlag && extraFlag[0] != 0) {
+                serumFrameExtra = m_serumData.cframes_v2_extra[static_cast<uint32_t>(index)];
+            }
+        }
+    }
     if (hasOverride) {
         frameImage = &overrideColorized;
     } else if (useHd && index >= 0 && index < static_cast<int>(m_frameExtraFrames.size())) {
@@ -6419,10 +7080,11 @@ cv::Mat MainWindow::renderFrameWithSerum(int index, bool useHd, const cv::Mat& o
             frameImage = &hdFrame;
         }
     }
-    if (!frameImage) {
+    if (!frameImage && !serumFrame) {
         frameImage = m_frameStore->at(index);
     }
-    if (!frameImage || frameImage->empty()) {
+    const bool useLocalColorized = hasOverride || (frameImage && !frameImage->empty());
+    if (!useLocalColorized && !serumFrame) {
         return cv::Mat();
     }
 
@@ -6451,11 +7113,18 @@ cv::Mat MainWindow::renderFrameWithSerum(int index, bool useHd, const cv::Mat& o
 
     const int baseWidth = reference.cols;
     const int baseHeight = reference.rows;
-    const int outWidth = frameImage->cols;
-    const int outHeight = frameImage->rows;
+    const int outWidth = (serumFrame && !useLocalColorized)
+        ? (useHd ? static_cast<int>(m_serumData.fwidth_extra) : static_cast<int>(m_serumData.fwidth))
+        : (frameImage ? frameImage->cols : 0);
+    const int outHeight = (serumFrame && !useLocalColorized)
+        ? (useHd ? static_cast<int>(m_serumData.fheight_extra) : static_cast<int>(m_serumData.fheight))
+        : (frameImage ? frameImage->rows : 0);
 
-    std::vector<uint16_t> frame565 = ConvertBgrMatToRgb565(*frameImage);
+    std::vector<uint16_t> frame565;
     std::vector<uint16_t> frame565Extra;
+    if (useLocalColorized && frameImage) {
+        frame565 = ConvertBgrMatToRgb565(*frameImage);
+    }
     if (!useHd && !hasOverride) {
         const cv::Mat* extra = (index >= 0 && index < static_cast<int>(m_frameExtraFrames.size()))
             ? &m_frameExtraFrames[static_cast<std::size_t>(index)]
@@ -6467,20 +7136,72 @@ cv::Mat MainWindow::renderFrameWithSerum(int index, bool useHd, const cv::Mat& o
 
     SerumEditorFrameView frameView;
     frameView.original = reference.data;
-    frameView.colorized = useHd ? nullptr : frame565.data();
-    frameView.colorized_extra = useHd ? frame565.data() : (frame565Extra.empty() ? nullptr : frame565Extra.data());
+    if (useLocalColorized) {
+        frameView.colorized = useHd ? nullptr : frame565.data();
+        frameView.colorized_extra = useHd
+            ? frame565.data()
+            : (frame565Extra.empty() ? nullptr : frame565Extra.data());
+    } else {
+        frameView.colorized = useHd ? nullptr : serumFrame;
+        frameView.colorized_extra = useHd ? serumFrame : (serumFrameExtra ? serumFrameExtra : nullptr);
+    }
 
-    if (index >= 0 && index < static_cast<int>(m_frameDynamicMaskMaps.size())) {
-        frameView.dynamask = m_frameDynamicMaskMaps[static_cast<std::size_t>(index)].data;
+    const uint32_t frameId = static_cast<uint32_t>(index);
+    const cv::Mat* localDynamicMap = (index >= 0 && index < static_cast<int>(m_frameDynamicMaskMaps.size()))
+        ? &m_frameDynamicMaskMaps[static_cast<std::size_t>(index)]
+        : nullptr;
+    const cv::Mat* localDynamicMapExtra = (index >= 0 && index < static_cast<int>(m_frameDynamicMaskMapsX.size()))
+        ? &m_frameDynamicMaskMapsX[static_cast<std::size_t>(index)]
+        : nullptr;
+    const bool hasLocalDynamicMap = localDynamicMap && !localDynamicMap->empty();
+    const bool hasLocalDynamicMapExtra = localDynamicMapExtra && !localDynamicMapExtra->empty();
+    const bool hasLocalDynamicColors = index >= 0 &&
+        index < static_cast<int>(m_frameDynamicColors.size()) &&
+        !m_frameDynamicColors[static_cast<std::size_t>(index)].empty();
+    const uint8_t* serumDynamask = nullptr;
+    const uint8_t* serumDynamaskExtra = nullptr;
+    const uint16_t* serumDynaCols = nullptr;
+    const uint16_t* serumDynaColsExtra = nullptr;
+    if (useSerumData) {
+        if (!hasLocalDynamicMap && m_serumData.dynamasks.hasData(frameId)) {
+            serumDynamask = m_serumData.dynamasks[frameId];
+        }
+        if (!hasLocalDynamicMapExtra && m_serumData.dynamasks_extra.hasData(frameId)) {
+            serumDynamaskExtra = m_serumData.dynamasks_extra[frameId];
+        }
+        if (!hasLocalDynamicColors && m_serumData.dyna4cols_v2.hasData(frameId)) {
+            serumDynaCols = m_serumData.dyna4cols_v2[frameId];
+        }
+        if (!hasLocalDynamicColors && m_serumData.dyna4cols_v2_extra.hasData(frameId)) {
+            serumDynaColsExtra = m_serumData.dyna4cols_v2_extra[frameId];
+        }
     }
-    if (index >= 0 && index < static_cast<int>(m_frameDynamicMaskMapsX.size())) {
-        frameView.dynamask_extra = m_frameDynamicMaskMapsX[static_cast<std::size_t>(index)].data;
+    if (serumDynamask) {
+        frameView.dynamask = serumDynamask;
+    } else if (localDynamicMap) {
+        frameView.dynamask = localDynamicMap->data;
     }
-    if (index >= 0 && index < static_cast<int>(m_frameDynamicColors.size())) {
+    if (serumDynamaskExtra) {
+        frameView.dynamask_extra = serumDynamaskExtra;
+    } else if (localDynamicMapExtra) {
+        frameView.dynamask_extra = localDynamicMapExtra->data;
+    }
+    if (serumDynaCols) {
+        frameView.dyna4cols = serumDynaCols;
+    }
+    if (serumDynaColsExtra) {
+        frameView.dyna4cols_extra = serumDynaColsExtra;
+    }
+    if (useHd && serumDynaCols && !serumDynaColsExtra) {
+        frameView.dyna4cols_extra = serumDynaCols;
+    }
+    if (!serumDynaCols && index >= 0 && index < static_cast<int>(m_frameDynamicColors.size())) {
         const std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(index)];
         if (!colors.empty()) {
             frameView.dyna4cols = colors.data();
-            frameView.dyna4cols_extra = colors.data();
+            if (!serumDynaColsExtra) {
+                frameView.dyna4cols_extra = colors.data();
+            }
         }
     }
     cv::Mat scaledDynamicMask;
@@ -6494,35 +7215,80 @@ cv::Mat MainWindow::renderFrameWithSerum(int index, bool useHd, const cv::Mat& o
         if ((!hdMap || hdMap->empty()) && sdMap && !sdMap->empty()) {
             cv::resize(*sdMap, scaledDynamicMask, cv::Size(outWidth, outHeight), 0.0, 0.0, cv::INTER_NEAREST);
             frameView.dynamask_extra = scaledDynamicMask.data;
+        } else if ((!hdMap || hdMap->empty()) && (!sdMap || sdMap->empty()) &&
+                   serumDynamask && m_serumData.fwidth > 0 && m_serumData.fheight > 0) {
+            cv::Mat serumMap(static_cast<int>(m_serumData.fheight),
+                             static_cast<int>(m_serumData.fwidth),
+                             CV_8UC1,
+                             const_cast<uint8_t*>(serumDynamask));
+            cv::resize(serumMap, scaledDynamicMask, cv::Size(outWidth, outHeight),
+                       0.0, 0.0, cv::INTER_NEAREST);
+            frameView.dynamask_extra = scaledDynamicMask.data;
         }
     }
 
     uint16_t backgroundId = 0xffff;
-    if (m_showBackgroundLayer && index >= 0 && index < static_cast<int>(m_frameBackgroundIds.size())) {
-        backgroundId = m_frameBackgroundIds[static_cast<std::size_t>(index)];
+    if (m_showBackgroundLayer) {
+        if (index >= 0 && index < static_cast<int>(m_frameBackgroundIds.size())) {
+            backgroundId = m_frameBackgroundIds[static_cast<std::size_t>(index)];
+        } else if (useSerumData && m_serumData.backgroundIDs.hasData(frameId)) {
+            const uint16_t* bg = m_serumData.backgroundIDs[frameId];
+            backgroundId = bg ? bg[0] : 0xffff;
+        }
     }
     frameView.background_id = backgroundId;
-    if (index >= 0 && index < static_cast<int>(m_frameBackgroundMasks.size())) {
-        frameView.background_mask = m_frameBackgroundMasks[static_cast<std::size_t>(index)].data;
+    const cv::Mat* localBgMask = (index >= 0 && index < static_cast<int>(m_frameBackgroundMasks.size()))
+        ? &m_frameBackgroundMasks[static_cast<std::size_t>(index)]
+        : nullptr;
+    const cv::Mat* localBgMaskExtra = (index >= 0 && index < static_cast<int>(m_frameBackgroundMasksX.size()))
+        ? &m_frameBackgroundMasksX[static_cast<std::size_t>(index)]
+        : nullptr;
+    const bool hasLocalBgMask = localBgMask && !localBgMask->empty();
+    const bool hasLocalBgMaskExtra = localBgMaskExtra && !localBgMaskExtra->empty();
+    const uint8_t* serumBgMask = nullptr;
+    const uint8_t* serumBgMaskExtra = nullptr;
+    if (useSerumData && backgroundId != 0xffff) {
+        if (!hasLocalBgMask && m_serumData.backgroundmask.hasData(frameId)) {
+            serumBgMask = m_serumData.backgroundmask[frameId];
+        }
+        if (!hasLocalBgMaskExtra && m_serumData.backgroundmask_extra.hasData(frameId)) {
+            serumBgMaskExtra = m_serumData.backgroundmask_extra[frameId];
+        }
     }
-    if (index >= 0 && index < static_cast<int>(m_frameBackgroundMasksX.size())) {
-        frameView.background_mask_extra = m_frameBackgroundMasksX[static_cast<std::size_t>(index)].data;
+    if (serumBgMask) {
+        frameView.background_mask = serumBgMask;
+    } else if (localBgMask) {
+        frameView.background_mask = localBgMask->data;
+    }
+    if (serumBgMaskExtra) {
+        frameView.background_mask_extra = serumBgMaskExtra;
+    } else if (localBgMaskExtra) {
+        frameView.background_mask_extra = localBgMaskExtra->data;
     }
 
     std::vector<uint16_t> background565;
     std::vector<uint16_t> background565Extra;
-    if (backgroundId != 0xffff && m_backgroundStore && backgroundId < m_backgroundStore->count()) {
-        const cv::Mat* background = m_backgroundStore->at(static_cast<int>(backgroundId));
-        if (background && !background->empty()) {
-            background565 = ConvertBgrMatToRgb565(*background);
-            frameView.background_frame = background565.data();
+    if (backgroundId != 0xffff) {
+        if (useSerumData &&
+            backgroundId < m_serumData.nbackgrounds &&
+            m_serumData.backgroundframes_v2.hasData(backgroundId)) {
+            frameView.background_frame = m_serumData.backgroundframes_v2[backgroundId];
+        } else if (m_backgroundStore && backgroundId < m_backgroundStore->count()) {
+            const cv::Mat* background = m_backgroundStore->at(static_cast<int>(backgroundId));
+            if (background && !background->empty()) {
+                background565 = ConvertBgrMatToRgb565(*background);
+                frameView.background_frame = background565.data();
+            }
         }
-    }
-    if (backgroundId != 0xffff &&
-        backgroundId < m_backgroundFramesX.size() &&
-        !m_backgroundFramesX[static_cast<std::size_t>(backgroundId)].empty()) {
-        background565Extra = ConvertBgrMatToRgb565(m_backgroundFramesX[static_cast<std::size_t>(backgroundId)]);
-        frameView.background_frame_extra = background565Extra.data();
+        if (useSerumData &&
+            backgroundId < m_serumData.nbackgrounds &&
+            m_serumData.backgroundframes_v2_extra.hasData(backgroundId)) {
+            frameView.background_frame_extra = m_serumData.backgroundframes_v2_extra[backgroundId];
+        } else if (backgroundId < m_backgroundFramesX.size() &&
+                   !m_backgroundFramesX[static_cast<std::size_t>(backgroundId)].empty()) {
+            background565Extra = ConvertBgrMatToRgb565(m_backgroundFramesX[static_cast<std::size_t>(backgroundId)]);
+            frameView.background_frame_extra = background565Extra.data();
+        }
     }
     cv::Mat scaledBackgroundMask;
     cv::Mat scaledBackgroundFrame;
@@ -6533,15 +7299,36 @@ cv::Mat MainWindow::renderFrameWithSerum(int index, bool useHd, const cv::Mat& o
         const cv::Mat* sdMask = (index >= 0 && index < static_cast<int>(m_frameBackgroundMasks.size()))
             ? &m_frameBackgroundMasks[static_cast<std::size_t>(index)]
             : nullptr;
-        if ((!hdMask || hdMask->empty()) && sdMask && !sdMask->empty()) {
-            cv::resize(*sdMask, scaledBackgroundMask, cv::Size(outWidth, outHeight), 0.0, 0.0, cv::INTER_NEAREST);
-            frameView.background_mask_extra = scaledBackgroundMask.data;
+        if (!frameView.background_mask_extra) {
+            cv::Mat maskSource;
+            if (sdMask && !sdMask->empty()) {
+                maskSource = *sdMask;
+            } else if (serumBgMask) {
+                maskSource = cv::Mat(static_cast<int>(m_serumData.fheight),
+                                     static_cast<int>(m_serumData.fwidth),
+                                     CV_8UC1,
+                                     const_cast<uint8_t*>(serumBgMask));
+            }
+            if (!maskSource.empty()) {
+                cv::resize(maskSource, scaledBackgroundMask, cv::Size(outWidth, outHeight),
+                           0.0, 0.0, cv::INTER_NEAREST);
+                frameView.background_mask_extra = scaledBackgroundMask.data;
+            }
         }
-        if (!frameView.background_frame_extra && m_backgroundStore &&
-            backgroundId < m_backgroundStore->count()) {
-            const cv::Mat* sdBackground = m_backgroundStore->at(static_cast<int>(backgroundId));
-            if (sdBackground && !sdBackground->empty()) {
-                cv::resize(*sdBackground, scaledBackgroundFrame, cv::Size(outWidth, outHeight), 0.0, 0.0, cv::INTER_NEAREST);
+        if (!frameView.background_frame_extra) {
+            cv::Mat backgroundSource;
+            if (m_backgroundStore && backgroundId < m_backgroundStore->count()) {
+                const cv::Mat* sdBackground = m_backgroundStore->at(static_cast<int>(backgroundId));
+                if (sdBackground && !sdBackground->empty()) {
+                    backgroundSource = *sdBackground;
+                }
+            } else if (frameView.background_frame) {
+                backgroundSource = ConvertRgb565ToBgrMat(frameView.background_frame,
+                                                         static_cast<int>(m_serumData.fwidth),
+                                                         static_cast<int>(m_serumData.fheight));
+            }
+            if (!backgroundSource.empty()) {
+                cv::resize(backgroundSource, scaledBackgroundFrame, cv::Size(outWidth, outHeight), 0.0, 0.0, cv::INTER_NEAREST);
                 background565Extra = ConvertBgrMatToRgb565(scaledBackgroundFrame);
                 frameView.background_frame_extra = background565Extra.data();
             }
@@ -6551,20 +7338,36 @@ cv::Mat MainWindow::renderFrameWithSerum(int index, bool useHd, const cv::Mat& o
     const uint8_t* frameSprites = nullptr;
     const uint16_t* frameSpriteBBoxes = nullptr;
     const std::size_t spriteBase = static_cast<std::size_t>(index) * MAX_SPRITES_PER_FRAME;
-    if (spriteBase + MAX_SPRITES_PER_FRAME <= m_frameSpriteAssignments.size()) {
+    const bool hasLocalFrameSprites = spriteBase + MAX_SPRITES_PER_FRAME <= m_frameSpriteAssignments.size();
+    if (hasLocalFrameSprites) {
         frameSprites = m_frameSpriteAssignments.data() + spriteBase;
+    } else if (useSerumData && m_serumData.framesprites.hasData(frameId)) {
+        frameSprites = m_serumData.framesprites[frameId];
     }
     const std::size_t spriteBbBase = static_cast<std::size_t>(index) * MAX_SPRITES_PER_FRAME * 4;
-    if (spriteBbBase + MAX_SPRITES_PER_FRAME * 4 <= m_frameSpriteBBoxes.size()) {
+    const bool hasLocalFrameSpriteBBoxes = spriteBbBase + MAX_SPRITES_PER_FRAME * 4 <= m_frameSpriteBBoxes.size();
+    if (hasLocalFrameSpriteBBoxes) {
         frameSpriteBBoxes = m_frameSpriteBBoxes.data() + spriteBbBase;
+    } else if (useSerumData && m_serumData.framespriteBB.hasData(frameId)) {
+        frameSpriteBBoxes = m_serumData.framespriteBB[frameId];
     }
     frameView.frame_sprites = frameSprites;
     frameView.frame_sprite_bboxes = frameSpriteBBoxes;
 
-    const std::size_t spriteCount = m_spriteOriginals.size();
+    std::size_t spriteCount = m_spriteOriginals.size();
+    if (useSerumData) {
+        spriteCount = std::max(spriteCount, static_cast<std::size_t>(m_serumData.nsprites));
+    }
     std::vector<SerumEditorSpriteView> spriteViews(spriteCount);
     std::vector<std::vector<uint16_t>> sprite565(spriteCount);
     std::vector<std::vector<uint16_t>> sprite565Extra(spriteCount);
+    const QSize spriteBaseSize = serumSpriteBaseSize();
+    const int spriteSrcWidth = spriteBaseSize.width();
+    const int spriteSrcHeight = spriteBaseSize.height();
+    const bool spriteNeedsPadding =
+        spriteSrcWidth != MAX_SPRITE_WIDTH || spriteSrcHeight != MAX_SPRITE_HEIGHT;
+    const int spriteCopyWidth = std::min(spriteSrcWidth, MAX_SPRITE_WIDTH);
+    const int spriteCopyHeight = std::min(spriteSrcHeight, MAX_SPRITE_HEIGHT);
     if (frameSprites && spriteCount > 0) {
         for (int slot = 0; slot < MAX_SPRITES_PER_FRAME; ++slot) {
             const uint8_t spriteId = frameSprites[slot];
@@ -6576,8 +7379,20 @@ cv::Mat MainWindow::renderFrameWithSerum(int index, bool useHd, const cv::Mat& o
                 continue;
             }
             const std::size_t spriteIndex = static_cast<std::size_t>(spriteId);
-            if (spriteIndex < m_spriteOriginals.size()) {
+            const uint32_t spriteId32 = static_cast<uint32_t>(spriteId);
+            const uint8_t* serumOriginal = useSerumData ? serumSpriteOriginalData(spriteId32) : nullptr;
+            if (spriteIndex < m_spriteOriginals.size() &&
+                !m_spriteOriginals[spriteIndex].empty()) {
                 view.original = m_spriteOriginals[spriteIndex].data;
+            } else if (spriteNeedsPadding && useSerumData) {
+                if (cv::Mat* padded = const_cast<MainWindow*>(this)->ensureSpriteOriginalLocal(static_cast<int>(spriteId))) {
+                    if (!padded->empty()) {
+                        view.original = padded->data;
+                    }
+                }
+            }
+            if (!view.original && serumOriginal) {
+                view.original = serumOriginal;
             }
             if (spriteIndex < m_spriteColored.size()) {
                 const cv::Mat& colored = m_spriteColored[spriteIndex];
@@ -6593,13 +7408,22 @@ cv::Mat MainWindow::renderFrameWithSerum(int index, bool useHd, const cv::Mat& o
                     view.colored_extra = sprite565Extra[spriteIndex].data();
                 }
             }
-            if (spriteIndex < m_spriteMasksX.size()) {
+            if (spriteIndex < m_spriteMasksX.size() &&
+                !m_spriteMasksX[spriteIndex].empty()) {
                 view.mask_extra = m_spriteMasksX[spriteIndex].data;
             }
-            if (spriteIndex < m_spriteDynamicMasks.size()) {
+            if (spriteIndex < m_spriteDynamicMasks.size() &&
+                !m_spriteDynamicMasks[spriteIndex].empty()) {
                 view.dynasprite_mask = m_spriteDynamicMasks[spriteIndex].data;
+            } else if (spriteNeedsPadding && useSerumData) {
+                if (cv::Mat* padded = const_cast<MainWindow*>(this)->ensureSpriteDynamicMaskLocal(static_cast<int>(spriteId))) {
+                    if (!padded->empty()) {
+                        view.dynasprite_mask = padded->data;
+                    }
+                }
             }
-            if (spriteIndex < m_spriteDynamicMasksX.size()) {
+            if (spriteIndex < m_spriteDynamicMasksX.size() &&
+                !m_spriteDynamicMasksX[spriteIndex].empty()) {
                 view.dynasprite_mask_extra = m_spriteDynamicMasksX[spriteIndex].data;
             }
             if (spriteIndex < m_spriteDynamicColors.size()) {
@@ -6628,6 +7452,66 @@ cv::Mat MainWindow::renderFrameWithSerum(int index, bool useHd, const cv::Mat& o
             if (detDwordOffset + MAX_SPRITE_DETECT_AREAS <= m_spriteDetDwordPos.size()) {
                 view.det_dword_pos = m_spriteDetDwordPos.data() + detDwordOffset;
             }
+            if (useSerumData) {
+                if (!view.colored && m_serumData.spritecolored.elementCount() > 0) {
+                    const uint16_t* data = m_serumData.spritecolored[spriteId32];
+                    if (data && spriteNeedsPadding && spriteCopyWidth > 0 && spriteCopyHeight > 0) {
+                        sprite565[spriteIndex].assign(
+                            static_cast<std::size_t>(MAX_SPRITE_WIDTH) * MAX_SPRITE_HEIGHT,
+                            static_cast<uint16_t>(0));
+                        for (int y = 0; y < spriteCopyHeight; ++y) {
+                            const std::size_t srcOffset = static_cast<std::size_t>(y) * spriteSrcWidth;
+                            const std::size_t dstOffset = static_cast<std::size_t>(y) * MAX_SPRITE_WIDTH;
+                            for (int x = 0; x < spriteCopyWidth; ++x) {
+                                sprite565[spriteIndex][dstOffset + static_cast<std::size_t>(x)] =
+                                    data[srcOffset + static_cast<std::size_t>(x)];
+                            }
+                        }
+                    } else {
+                        const std::size_t count = m_serumData.spritecolored.elementCount();
+                        sprite565[spriteIndex].assign(data, data + count);
+                    }
+                    if (!sprite565[spriteIndex].empty()) {
+                        view.colored = sprite565[spriteIndex].data();
+                    }
+                }
+                if (!view.colored_extra && m_serumData.spritecolored_extra.hasData(spriteId32)) {
+                    const uint16_t* data = m_serumData.spritecolored_extra[spriteId32];
+                    const std::size_t count = m_serumData.spritecolored_extra.elementCount();
+                    if (data && count > 0) {
+                        sprite565Extra[spriteIndex].assign(data, data + count);
+                        view.colored_extra = sprite565Extra[spriteIndex].data();
+                    }
+                }
+                if (!view.mask_extra && m_serumData.spritemask_extra.hasData(spriteId32)) {
+                    view.mask_extra = m_serumData.spritemask_extra[spriteId32];
+                }
+                if (!view.dynasprite_mask && m_serumData.dynaspritemasks.hasData(spriteId32)) {
+                    view.dynasprite_mask = m_serumData.dynaspritemasks[spriteId32];
+                }
+                if (!view.dynasprite_mask_extra && m_serumData.dynaspritemasks_extra.hasData(spriteId32)) {
+                    view.dynasprite_mask_extra = m_serumData.dynaspritemasks_extra[spriteId32];
+                }
+                if (!view.dynasprite_cols && m_serumData.dynasprite4cols.hasData(spriteId32)) {
+                    view.dynasprite_cols = m_serumData.dynasprite4cols[spriteId32];
+                }
+                if (!view.dynasprite_cols_extra && m_serumData.dynasprite4cols_extra.hasData(spriteId32)) {
+                    view.dynasprite_cols_extra = m_serumData.dynasprite4cols_extra[spriteId32];
+                }
+                if (view.shape_mode == 0 && m_serumData.sprshapemode.hasData(spriteId32)) {
+                    const uint8_t* mode = m_serumData.sprshapemode[spriteId32];
+                    view.shape_mode = mode ? mode[0] : 0;
+                }
+                if (!view.det_areas && m_serumData.spritedetareas.hasData(spriteId32)) {
+                    view.det_areas = m_serumData.spritedetareas[spriteId32];
+                }
+                if (!view.det_dwords && m_serumData.spritedetdwords.hasData(spriteId32)) {
+                    view.det_dwords = m_serumData.spritedetdwords[spriteId32];
+                }
+                if (!view.det_dword_pos && m_serumData.spritedetdwordpos.hasData(spriteId32)) {
+                    view.det_dword_pos = m_serumData.spritedetdwordpos[spriteId32];
+                }
+            }
         }
     }
 
@@ -6646,7 +7530,13 @@ cv::Mat MainWindow::renderFrameWithSerum(int index, bool useHd, const cv::Mat& o
 
     std::vector<uint16_t> out565(static_cast<std::size_t>(outWidth) * outHeight);
     if (!SerumEditor_RenderFrame(&dataView, &frameView, matches, matchCount, useHd, out565.data())) {
-        return EnsureBgr(*frameImage);
+        if (useLocalColorized && frameImage) {
+            return EnsureBgr(*frameImage);
+        }
+        if (serumFrame) {
+            return ConvertRgb565ToBgrMat(serumFrame, outWidth, outHeight);
+        }
+        return cv::Mat();
     }
     cv::Mat output = ConvertRgb565ToBgrMat(out565.data(), outWidth, outHeight);
     if (m_showBackgroundLayer && backgroundId != 0xffff) {
@@ -6657,7 +7547,14 @@ cv::Mat MainWindow::renderFrameWithSerum(int index, bool useHd, const cv::Mat& o
             if (refView.size() != output.size()) {
                 cv::resize(refView, refView, output.size(), 0.0, 0.0, cv::INTER_NEAREST);
             }
-            cv::Mat colorized = EnsureBgr(hasOverride ? overrideColorized : *frameImage);
+            cv::Mat colorized;
+            if (hasOverride) {
+                colorized = EnsureBgr(overrideColorized);
+            } else if (frameImage && !frameImage->empty()) {
+                colorized = EnsureBgr(*frameImage);
+            } else if (serumFrame) {
+                colorized = ConvertRgb565ToBgrMat(serumFrame, outWidth, outHeight);
+            }
             if (colorized.size() != output.size()) {
                 cv::resize(colorized, colorized, output.size(), 0.0, 0.0, cv::INTER_NEAREST);
             }
@@ -6688,8 +7585,8 @@ cv::Mat MainWindow::applyDynamicColors(int index, const cv::Mat& frame, bool use
     if (output.empty() || index < 0 || index >= static_cast<int>(m_frameDynamicColors.size())) {
         return output;
     }
-    const std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(index)];
-    const int stride = dynamicColorsPerSet(colors);
+    int stride = 0;
+    const uint16_t* colors = frameDynamicColorsData(index, useHd, &stride);
     if (stride <= 0) {
         return output;
     }
@@ -6737,7 +7634,9 @@ cv::Mat MainWindow::applyDynamicColors(int index, const cv::Mat& frame, bool use
             slot = std::clamp(slot, 0, stride - 1);
             const std::size_t offset = static_cast<std::size_t>(setId) * stride +
                 static_cast<std::size_t>(slot);
-            if (offset < colors.size()) {
+            const std::size_t size =
+                static_cast<std::size_t>(MAX_DYNA_SETS_PER_FRAMEN) * static_cast<std::size_t>(stride);
+            if (colors && offset < size) {
                 row[x] = Rgb565ToBgr(colors[offset]);
             }
         }
@@ -6775,10 +7674,8 @@ cv::Mat MainWindow::applySpritesToFrame(int index,
         }
         const int spriteIndex = static_cast<int>(spriteId);
         const cv::Mat* spriteImage = nullptr;
-        if (useHd && spriteIndex >= 0 &&
-            spriteIndex < static_cast<int>(m_spriteColoredX.size()) &&
-            !m_spriteColoredX[static_cast<std::size_t>(spriteIndex)].empty()) {
-            spriteImage = &m_spriteColoredX[static_cast<std::size_t>(spriteIndex)];
+        if (useHd && spriteIndex >= 0) {
+            spriteImage = const_cast<MainWindow*>(this)->ensureHdSpriteLocal(spriteIndex);
         } else if (spriteIndex >= 0 && spriteIndex < m_spriteStore->count()) {
             spriteImage = m_spriteStore->at(spriteIndex);
         }
@@ -6790,14 +7687,10 @@ cv::Mat MainWindow::applySpritesToFrame(int index,
             : applySpriteDynamicColors(spriteIndex, *spriteImage);
 
         const cv::Mat* spriteMask = nullptr;
-        if (useHd && spriteIndex >= 0 &&
-            spriteIndex < static_cast<int>(m_spriteMasksX.size()) &&
-            !m_spriteMasksX[static_cast<std::size_t>(spriteIndex)].empty()) {
-            spriteMask = &m_spriteMasksX[static_cast<std::size_t>(spriteIndex)];
-        } else if (spriteIndex >= 0 &&
-                   spriteIndex < static_cast<int>(m_spriteOriginals.size()) &&
-                   !m_spriteOriginals[static_cast<std::size_t>(spriteIndex)].empty()) {
-            spriteMask = &m_spriteOriginals[static_cast<std::size_t>(spriteIndex)];
+        if (useHd && spriteIndex >= 0) {
+            spriteMask = const_cast<MainWindow*>(this)->ensureHdSpriteMaskLocal(spriteIndex);
+        } else if (spriteIndex >= 0) {
+            spriteMask = const_cast<MainWindow*>(this)->ensureSpriteOriginalLocal(spriteIndex);
         }
         if (!spriteMask || spriteMask->empty()) {
             continue;
@@ -6879,35 +7772,47 @@ cv::Mat MainWindow::applySpriteDynamicColors(int index, const cv::Mat& sprite) c
         index >= static_cast<int>(m_spriteOriginals.size())) {
         return output;
     }
-    const std::vector<uint16_t>& colors = (m_useHdSprite &&
-                                           index < static_cast<int>(m_spriteDynamicColorsX.size()) &&
-                                           !m_spriteDynamicColorsX[static_cast<std::size_t>(index)].empty())
-        ? m_spriteDynamicColorsX[static_cast<std::size_t>(index)]
-        : m_spriteDynamicColors[static_cast<std::size_t>(index)];
-    const int stride = dynamicColorsPerSet(colors);
+    const std::vector<uint16_t>* colors = nullptr;
+    if (m_useHdSprite) {
+        if (index < static_cast<int>(m_spriteDynamicColorsX.size()) &&
+            !m_spriteDynamicColorsX[static_cast<std::size_t>(index)].empty()) {
+            colors = &m_spriteDynamicColorsX[static_cast<std::size_t>(index)];
+        } else {
+            colors = const_cast<MainWindow*>(this)->ensureHdSpriteDynamicColorsLocal(index);
+        }
+    } else {
+        colors = const_cast<MainWindow*>(this)->ensureSpriteDynamicColorsLocal(index);
+    }
+    const int stride = colors ? spriteDynamicColorsPerSet(*colors) : 0;
     if (stride <= 0) {
         return output;
     }
-    const cv::Mat& map = (m_useHdSprite &&
-                          index < static_cast<int>(m_spriteDynamicMasksX.size()) &&
-                          !m_spriteDynamicMasksX[static_cast<std::size_t>(index)].empty())
-        ? m_spriteDynamicMasksX[static_cast<std::size_t>(index)]
-        : m_spriteDynamicMasks[static_cast<std::size_t>(index)];
-    const cv::Mat& original = m_spriteOriginals[static_cast<std::size_t>(index)];
-    if (map.empty() || original.empty()) {
+    const cv::Mat* map = nullptr;
+    if (m_useHdSprite) {
+        if (index < static_cast<int>(m_spriteDynamicMasksX.size()) &&
+            !m_spriteDynamicMasksX[static_cast<std::size_t>(index)].empty()) {
+            map = &m_spriteDynamicMasksX[static_cast<std::size_t>(index)];
+        } else {
+            map = const_cast<MainWindow*>(this)->ensureHdSpriteDynamicMaskLocal(index);
+        }
+    } else {
+        map = const_cast<MainWindow*>(this)->ensureSpriteDynamicMaskLocal(index);
+    }
+    const cv::Mat* original = const_cast<MainWindow*>(this)->ensureSpriteOriginalLocal(index);
+    if (!map || map->empty() || !original || original->empty() || !colors) {
         return output;
     }
     cv::Mat mapScaled;
-    if (map.size() != output.size()) {
-        cv::resize(map, mapScaled, output.size(), 0.0, 0.0, cv::INTER_NEAREST);
+    if (map->size() != output.size()) {
+        cv::resize(*map, mapScaled, output.size(), 0.0, 0.0, cv::INTER_NEAREST);
     } else {
-        mapScaled = map;
+        mapScaled = *map;
     }
     cv::Mat originalScaled;
-    if (original.size() != output.size()) {
-        cv::resize(original, originalScaled, output.size(), 0.0, 0.0, cv::INTER_NEAREST);
+    if (original->size() != output.size()) {
+        cv::resize(*original, originalScaled, output.size(), 0.0, 0.0, cv::INTER_NEAREST);
     } else {
-        originalScaled = original;
+        originalScaled = *original;
     }
     int levels = m_noColors > 0 ? static_cast<int>(m_noColors) : 64;
     levels = std::max(1, levels);
@@ -6932,8 +7837,8 @@ cv::Mat MainWindow::applySpriteDynamicColors(int index, const cv::Mat& sprite) c
             slot = std::clamp(slot, 0, stride - 1);
             const std::size_t offset = static_cast<std::size_t>(setId) * stride +
                 static_cast<std::size_t>(slot);
-            if (offset < colors.size()) {
-                row[x] = Rgb565ToBgr(colors[offset]);
+            if (offset < colors->size()) {
+                row[x] = Rgb565ToBgr((*colors)[offset]);
             }
         }
     }
@@ -6945,10 +7850,10 @@ const cv::Mat* MainWindow::activeSpriteImage(int index) const
     if (!m_spriteStore || index < 0) {
         return nullptr;
     }
-    if (m_useHdSprite &&
-        index < static_cast<int>(m_spriteColoredX.size()) &&
-        !m_spriteColoredX[static_cast<std::size_t>(index)].empty()) {
-        return &m_spriteColoredX[static_cast<std::size_t>(index)];
+    if (m_useHdSprite) {
+        if (auto* hd = const_cast<MainWindow*>(this)->ensureHdSpriteLocal(index)) {
+            return hd;
+        }
     }
     return m_spriteStore->at(index);
 }
@@ -6958,12 +7863,19 @@ cv::Mat* MainWindow::activeSpriteImageMutable(int index)
     if (!m_spriteStore || index < 0) {
         return nullptr;
     }
-    if (m_useHdSprite &&
-        index < static_cast<int>(m_spriteColoredX.size()) &&
-        !m_spriteColoredX[static_cast<std::size_t>(index)].empty()) {
-        return &m_spriteColoredX[static_cast<std::size_t>(index)];
+    if (m_useHdSprite) {
+        if (auto* hd = ensureHdSpriteLocal(index)) {
+            return hd;
+        }
     }
-    return m_spriteStore->atMutable(index);
+    cv::Mat* sprite = m_spriteStore->atMutable(index);
+    if (sprite && m_serumDataLoaded) {
+        if (index >= static_cast<int>(m_spriteColored.size())) {
+            m_spriteColored.resize(static_cast<std::size_t>(index + 1));
+        }
+        m_spriteColored[static_cast<std::size_t>(index)] = *sprite;
+    }
+    return sprite;
 }
 
 const cv::Mat* MainWindow::spriteOriginalForDisplay(int index) const
@@ -6975,7 +7887,7 @@ const cv::Mat* MainWindow::spriteOriginalForDisplay(int index) const
         !m_spriteOriginals[static_cast<std::size_t>(index)].empty()) {
         return &m_spriteOriginals[static_cast<std::size_t>(index)];
     }
-    return nullptr;
+    return const_cast<MainWindow*>(this)->ensureSpriteOriginalLocal(index);
 }
 
 QRect MainWindow::spriteDisplayRect(int index, const cv::Mat& image) const
@@ -6988,9 +7900,8 @@ QRect MainWindow::spriteDisplayRect(int index, const cv::Mat& image) const
         return QRect(0, 0, image.cols, image.rows);
     }
     if (m_useHdSprite) {
-        const bool hasHdMask = index >= 0 &&
-            index < static_cast<int>(m_spriteMasksX.size()) &&
-            !m_spriteMasksX[static_cast<std::size_t>(index)].empty();
+        const cv::Mat* hdMask = const_cast<MainWindow*>(this)->ensureHdSpriteMaskLocal(index);
+        const bool hasHdMask = hdMask && !hdMask->empty();
         if (!hasHdMask) {
             rect = QRect(rect.x() * 2,
                          rect.y() * 2,
@@ -7072,9 +7983,12 @@ QRect MainWindow::spriteDisplayContentRect(int index) const
         return QRect();
     }
     if (m_useHdSprite &&
-        index < static_cast<int>(m_spriteMasksX.size()) &&
-        !m_spriteMasksX[static_cast<std::size_t>(index)].empty()) {
-        return ContentRectFromMask(m_spriteMasksX[static_cast<std::size_t>(index)], 255);
+        index < static_cast<int>(m_spriteMasksX.size())) {
+        if (const cv::Mat* mask = const_cast<MainWindow*>(this)->ensureHdSpriteMaskLocal(index)) {
+            if (!mask->empty()) {
+                return ContentRectFromMask(*mask, 255);
+            }
+        }
     }
     return spriteContentRect(index);
 }
@@ -7094,7 +8008,7 @@ cv::Mat MainWindow::applyBackgroundComposite(int index, const cv::Mat& frame, bo
     const cv::Mat* bg = nullptr;
     if (useHd) {
         if (bgId < m_backgroundFramesX.size()) {
-            bg = &m_backgroundFramesX[bgId];
+            bg = const_cast<MainWindow*>(this)->ensureHdBackgroundLocal(static_cast<int>(bgId));
         }
         if ((!bg || bg->empty()) && m_backgroundStore && bgId < m_backgroundStore->count()) {
             bg = m_backgroundStore->at(static_cast<int>(bgId));
@@ -7308,11 +8222,8 @@ void MainWindow::updateSpriteCanvasImage(int index)
     cv::Mat display = base;
     if (m_spriteDynamicMaskMode) {
         const cv::Mat* map = nullptr;
-        if (m_useHdSprite &&
-            index >= 0 &&
-            index < static_cast<int>(m_spriteDynamicMasksX.size()) &&
-            !m_spriteDynamicMasksX[static_cast<std::size_t>(index)].empty()) {
-            map = &m_spriteDynamicMasksX[static_cast<std::size_t>(index)];
+        if (m_useHdSprite && index >= 0) {
+            map = ensureHdSpriteDynamicMaskLocal(index);
         } else if (index >= 0 && index < static_cast<int>(m_spriteDynamicMasks.size())) {
             map = &m_spriteDynamicMasks[static_cast<std::size_t>(index)];
         }
@@ -7327,8 +8238,14 @@ void MainWindow::updateSpriteCanvasImage(int index)
     cv::Mat originalRef;
     if (const cv::Mat* originalSource = spriteOriginalForDisplay(index)) {
         if (contentRect.isValid() && !contentRect.isEmpty()) {
-            originalRef = (*originalSource)(
-                cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height())).clone();
+            const QRect bounds(0, 0, originalSource->cols, originalSource->rows);
+            const QRect clipped = contentRect.intersected(bounds);
+            if (!clipped.isEmpty()) {
+                originalRef = (*originalSource)(cv::Rect(clipped.x(),
+                                                        clipped.y(),
+                                                        clipped.width(),
+                                                        clipped.height())).clone();
+            }
         } else {
             originalRef = originalSource->clone();
         }
@@ -7400,7 +8317,329 @@ bool MainWindow::hasHdBackground(int index) const
     if (index < 0 || index >= static_cast<int>(m_backgroundFramesX.size())) {
         return false;
     }
-    return !IsAllBlackFrame(m_backgroundFramesX[static_cast<std::size_t>(index)]);
+    if (!m_backgroundFramesX[static_cast<std::size_t>(index)].empty()) {
+        return !IsAllBlackFrame(m_backgroundFramesX[static_cast<std::size_t>(index)]);
+    }
+    if (m_serumDataLoaded && index < static_cast<int>(m_serumData.nbackgrounds) &&
+        m_serumData.backgroundframes_v2_extra.hasData(static_cast<uint32_t>(index))) {
+        const uint16_t* data = m_serumData.backgroundframes_v2_extra[static_cast<uint32_t>(index)];
+        if (!data || m_serumData.fwidth_extra == 0 || m_serumData.fheight_extra == 0) {
+            return false;
+        }
+        const std::size_t count =
+            static_cast<std::size_t>(m_serumData.fwidth_extra) * m_serumData.fheight_extra;
+        for (std::size_t i = 0; i < count; ++i) {
+            if (data[i] != 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+cv::Mat* MainWindow::ensureHdBackgroundLocal(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_backgroundFramesX.size())) {
+        return nullptr;
+    }
+    cv::Mat& frame = m_backgroundFramesX[static_cast<std::size_t>(index)];
+    if (!frame.empty()) {
+        return &frame;
+    }
+    if (m_serumDataLoaded && index < static_cast<int>(m_serumData.nbackgrounds) &&
+        m_serumData.backgroundframes_v2_extra.hasData(static_cast<uint32_t>(index))) {
+        const uint16_t* data = m_serumData.backgroundframes_v2_extra[static_cast<uint32_t>(index)];
+        if (data && m_serumData.fwidth_extra > 0 && m_serumData.fheight_extra > 0) {
+            frame = ConvertRgb565ToBgrMat(data,
+                                          static_cast<int>(m_serumData.fwidth_extra),
+                                          static_cast<int>(m_serumData.fheight_extra));
+        }
+    }
+    return frame.empty() ? nullptr : &frame;
+}
+
+bool MainWindow::hasHdSprite(int index) const
+{
+    if (index < 0) {
+        return false;
+    }
+    if (index < static_cast<int>(m_spriteColoredX.size()) &&
+        !m_spriteColoredX[static_cast<std::size_t>(index)].empty()) {
+        return true;
+    }
+    if (index < static_cast<int>(m_spriteExtraFlags.size()) &&
+        m_spriteExtraFlags[static_cast<std::size_t>(index)] != 0) {
+        return true;
+    }
+    if (m_serumDataLoaded && index < static_cast<int>(m_serumData.nsprites) &&
+        m_serumData.isextrasprite.hasData(static_cast<uint32_t>(index))) {
+        const uint8_t* flag = m_serumData.isextrasprite[static_cast<uint32_t>(index)];
+        return flag && flag[0] != 0;
+    }
+    if (m_serumDataLoaded && index < static_cast<int>(m_serumData.nsprites) &&
+        m_serumData.spritecolored_extra.hasData(static_cast<uint32_t>(index))) {
+        return true;
+    }
+    return false;
+}
+
+cv::Mat* MainWindow::ensureHdSpriteLocal(int index)
+{
+    if (index < 0) {
+        return nullptr;
+    }
+    if (index >= static_cast<int>(m_spriteColoredX.size())) {
+        m_spriteColoredX.resize(static_cast<std::size_t>(index + 1));
+    }
+    cv::Mat& sprite = m_spriteColoredX[static_cast<std::size_t>(index)];
+    if (!sprite.empty()) {
+        return &sprite;
+    }
+    if (m_serumDataLoaded && index < static_cast<int>(m_serumData.nsprites) &&
+        m_serumData.spritecolored_extra.hasData(static_cast<uint32_t>(index))) {
+        const uint16_t* data = m_serumData.spritecolored_extra[static_cast<uint32_t>(index)];
+        if (data) {
+            sprite = ConvertRgb565ToBgrMat(data, MAX_SPRITE_WIDTH, MAX_SPRITE_HEIGHT);
+        }
+    }
+    return sprite.empty() ? nullptr : &sprite;
+}
+
+cv::Mat* MainWindow::ensureHdSpriteMaskLocal(int index)
+{
+    if (index < 0) {
+        return nullptr;
+    }
+    if (index >= static_cast<int>(m_spriteMasksX.size())) {
+        m_spriteMasksX.resize(static_cast<std::size_t>(index + 1));
+    }
+    cv::Mat& mask = m_spriteMasksX[static_cast<std::size_t>(index)];
+    if (!mask.empty()) {
+        return &mask;
+    }
+    if (m_serumDataLoaded && index < static_cast<int>(m_serumData.nsprites) &&
+        m_serumData.spritemask_extra.hasData(static_cast<uint32_t>(index))) {
+        const uint8_t* data = m_serumData.spritemask_extra[static_cast<uint32_t>(index)];
+        if (data) {
+            mask = cv::Mat(MAX_SPRITE_HEIGHT, MAX_SPRITE_WIDTH, CV_8UC1, cv::Scalar(255));
+            std::memcpy(mask.data, data, static_cast<std::size_t>(MAX_SPRITE_WIDTH) * MAX_SPRITE_HEIGHT);
+        }
+    }
+    return mask.empty() ? nullptr : &mask;
+}
+
+cv::Mat* MainWindow::ensureHdSpriteDynamicMaskLocal(int index)
+{
+    if (index < 0) {
+        return nullptr;
+    }
+    if (index >= static_cast<int>(m_spriteDynamicMasksX.size())) {
+        m_spriteDynamicMasksX.resize(static_cast<std::size_t>(index + 1));
+    }
+    cv::Mat& mask = m_spriteDynamicMasksX[static_cast<std::size_t>(index)];
+    if (!mask.empty()) {
+        return &mask;
+    }
+    if (m_serumDataLoaded && index < static_cast<int>(m_serumData.nsprites) &&
+        m_serumData.dynaspritemasks_extra.hasData(static_cast<uint32_t>(index))) {
+        const uint8_t* data = m_serumData.dynaspritemasks_extra[static_cast<uint32_t>(index)];
+        if (data) {
+            mask = cv::Mat(MAX_SPRITE_HEIGHT, MAX_SPRITE_WIDTH, CV_8UC1, cv::Scalar(255));
+            std::memcpy(mask.data, data, static_cast<std::size_t>(MAX_SPRITE_WIDTH) * MAX_SPRITE_HEIGHT);
+        }
+    }
+    return mask.empty() ? nullptr : &mask;
+}
+
+std::vector<uint16_t>* MainWindow::ensureHdSpriteDynamicColorsLocal(int index)
+{
+    if (index < 0) {
+        return nullptr;
+    }
+    if (index >= static_cast<int>(m_spriteDynamicColorsX.size())) {
+        m_spriteDynamicColorsX.resize(static_cast<std::size_t>(index + 1));
+    }
+    std::vector<uint16_t>& colors = m_spriteDynamicColorsX[static_cast<std::size_t>(index)];
+    if (!colors.empty()) {
+        return &colors;
+    }
+    if (m_serumDataLoaded && index < static_cast<int>(m_serumData.nsprites) &&
+        m_serumData.dynasprite4cols_extra.hasData(static_cast<uint32_t>(index))) {
+        const uint16_t* data = m_serumData.dynasprite4cols_extra[static_cast<uint32_t>(index)];
+        if (data) {
+            const int stride = serumDynamicStride();
+            const std::size_t count =
+                static_cast<std::size_t>(MAX_DYNA_SETS_PER_SPRITE) * static_cast<std::size_t>(stride);
+            colors.assign(data, data + count);
+        }
+    }
+    return colors.empty() ? nullptr : &colors;
+}
+
+QSize MainWindow::serumSpriteBaseSize() const
+{
+    if (!m_serumDataLoaded) {
+        return QSize(MAX_SPRITE_WIDTH, MAX_SPRITE_HEIGHT);
+    }
+    const std::size_t baseCount = m_serumData.spriteoriginal.elementCount() > 0
+        ? m_serumData.spriteoriginal.elementCount()
+        : m_serumData.spritecolored.elementCount();
+    const std::size_t sdCount = static_cast<std::size_t>(m_serumData.fwidth) * m_serumData.fheight;
+    if (sdCount > 0 && baseCount == sdCount) {
+        return QSize(static_cast<int>(m_serumData.fwidth),
+                     static_cast<int>(m_serumData.fheight));
+    }
+    const std::size_t maxCount =
+        static_cast<std::size_t>(MAX_SPRITE_WIDTH) * MAX_SPRITE_HEIGHT;
+    if (baseCount == maxCount) {
+        return QSize(MAX_SPRITE_WIDTH, MAX_SPRITE_HEIGHT);
+    }
+    if (baseCount > 0 && (baseCount % MAX_SPRITE_WIDTH) == 0) {
+        return QSize(MAX_SPRITE_WIDTH,
+                     static_cast<int>(baseCount / MAX_SPRITE_WIDTH));
+    }
+    return QSize(MAX_SPRITE_WIDTH, MAX_SPRITE_HEIGHT);
+}
+
+const uint8_t* MainWindow::serumSpriteOriginalData(uint32_t spriteId) const
+{
+    if (!m_serumDataLoaded || spriteId >= m_serumData.nsprites) {
+        return nullptr;
+    }
+    const std::size_t spriteCount = m_serumData.spriteoriginal.elementCount();
+    const std::size_t legacyCount = m_serumData.spritedescriptionso.elementCount();
+    const uint8_t* spriteOriginal =
+        (spriteCount > 0) ? m_serumData.spriteoriginal[spriteId] : nullptr;
+    const uint8_t* legacyOriginal =
+        (legacyCount > 0) ? m_serumData.spritedescriptionso[spriteId] : nullptr;
+    if (spriteOriginal && legacyOriginal && spriteCount > 0 && legacyCount > 0) {
+        const bool serumHasOpaque = SpriteHasNonTransparentPixel(spriteOriginal, spriteCount);
+        const bool legacyHasOpaque = SpriteHasNonTransparentPixel(legacyOriginal, legacyCount);
+        if (!serumHasOpaque && legacyHasOpaque) {
+            return legacyOriginal;
+        }
+    }
+    if (spriteOriginal) {
+        return spriteOriginal;
+    }
+    if (legacyOriginal) {
+        return legacyOriginal;
+    }
+    return nullptr;
+}
+
+cv::Mat* MainWindow::ensureSpriteOriginalLocal(int index)
+{
+    if (index < 0) {
+        return nullptr;
+    }
+    if (index >= static_cast<int>(m_spriteOriginals.size())) {
+        m_spriteOriginals.resize(static_cast<std::size_t>(index + 1));
+    }
+    cv::Mat& original = m_spriteOriginals[static_cast<std::size_t>(index)];
+    if (!original.empty()) {
+        return &original;
+    }
+    if (m_serumDataLoaded && index < static_cast<int>(m_serumData.nsprites)) {
+        const uint32_t spriteId = static_cast<uint32_t>(index);
+        const uint8_t* data = serumSpriteOriginalData(spriteId);
+        if (data) {
+            const QSize sourceSize = serumSpriteBaseSize();
+            const int srcWidth = sourceSize.width();
+            const int srcHeight = sourceSize.height();
+            original = cv::Mat(MAX_SPRITE_HEIGHT,
+                               MAX_SPRITE_WIDTH,
+                               CV_8UC1,
+                               cv::Scalar(255));
+            if (srcWidth == MAX_SPRITE_WIDTH && srcHeight == MAX_SPRITE_HEIGHT) {
+                std::memcpy(original.data,
+                            data,
+                            static_cast<std::size_t>(MAX_SPRITE_WIDTH) * MAX_SPRITE_HEIGHT);
+            } else if (srcWidth > 0 && srcHeight > 0) {
+                for (int y = 0; y < std::min(srcHeight, MAX_SPRITE_HEIGHT); ++y) {
+                    std::memcpy(original.ptr<uint8_t>(y),
+                                data + static_cast<std::size_t>(y) * srcWidth,
+                                static_cast<std::size_t>(std::min(srcWidth, MAX_SPRITE_WIDTH)));
+                }
+            }
+        }
+    }
+    return original.empty() ? nullptr : &original;
+}
+
+cv::Mat* MainWindow::ensureSpriteDynamicMaskLocal(int index)
+{
+    if (index < 0) {
+        return nullptr;
+    }
+    if (index >= static_cast<int>(m_spriteDynamicMasks.size())) {
+        m_spriteDynamicMasks.resize(static_cast<std::size_t>(index + 1));
+    }
+    cv::Mat& mask = m_spriteDynamicMasks[static_cast<std::size_t>(index)];
+    if (!mask.empty()) {
+        return &mask;
+    }
+    if (m_serumDataLoaded && index < static_cast<int>(m_serumData.nsprites) &&
+        m_serumData.dynaspritemasks.elementCount() > 0) {
+        const uint8_t* data = m_serumData.dynaspritemasks[static_cast<uint32_t>(index)];
+        if (data) {
+            const QSize sourceSize = serumSpriteBaseSize();
+            const int srcWidth = sourceSize.width();
+            const int srcHeight = sourceSize.height();
+            mask = cv::Mat(MAX_SPRITE_HEIGHT,
+                           MAX_SPRITE_WIDTH,
+                           CV_8UC1,
+                           cv::Scalar(255));
+            if (srcWidth == MAX_SPRITE_WIDTH && srcHeight == MAX_SPRITE_HEIGHT) {
+                std::memcpy(mask.data,
+                            data,
+                            static_cast<std::size_t>(MAX_SPRITE_WIDTH) * MAX_SPRITE_HEIGHT);
+            } else if (srcWidth > 0 && srcHeight > 0) {
+                for (int y = 0; y < std::min(srcHeight, MAX_SPRITE_HEIGHT); ++y) {
+                    std::memcpy(mask.ptr<uint8_t>(y),
+                                data + static_cast<std::size_t>(y) * srcWidth,
+                                static_cast<std::size_t>(std::min(srcWidth, MAX_SPRITE_WIDTH)));
+                }
+            }
+        }
+    }
+    return mask.empty() ? nullptr : &mask;
+}
+
+std::vector<uint16_t>* MainWindow::ensureSpriteDynamicColorsLocal(int index)
+{
+    if (index < 0) {
+        return nullptr;
+    }
+    if (index >= static_cast<int>(m_spriteDynamicColors.size())) {
+        m_spriteDynamicColors.resize(static_cast<std::size_t>(index + 1));
+    }
+    std::vector<uint16_t>& colors = m_spriteDynamicColors[static_cast<std::size_t>(index)];
+    if (!colors.empty()) {
+        return &colors;
+    }
+    if (m_serumDataLoaded && index < static_cast<int>(m_serumData.nsprites) &&
+        m_serumData.dynasprite4cols.hasData(static_cast<uint32_t>(index))) {
+        const uint16_t* data = m_serumData.dynasprite4cols[static_cast<uint32_t>(index)];
+        if (data) {
+            const int stride = serumDynamicStride();
+            const std::size_t count =
+                static_cast<std::size_t>(MAX_DYNA_SETS_PER_SPRITE) * static_cast<std::size_t>(stride);
+            colors.assign(data, data + count);
+        }
+    }
+    return colors.empty() ? nullptr : &colors;
+}
+
+int MainWindow::spriteDynamicColorsPerSet(const std::vector<uint16_t>& colors) const
+{
+    if (colors.empty()) {
+        return 0;
+    }
+    if (colors.size() % MAX_DYNA_SETS_PER_SPRITE == 0) {
+        return static_cast<int>(colors.size() / MAX_DYNA_SETS_PER_SPRITE);
+    }
+    return 16;
 }
 
 void MainWindow::updateHdControlsForContext()
@@ -7418,9 +8657,7 @@ void MainWindow::updateHdControlsForContext()
         m_hdDeleteButton->setEnabled(bgIndex >= 0 && hasHdBackground(bgIndex));
     } else if (inSprites) {
         const int spriteIndex = m_spritesList ? m_spritesList->currentRow() : -1;
-        const bool hasHd = spriteIndex >= 0 &&
-            spriteIndex < static_cast<int>(m_spriteColoredX.size()) &&
-            !m_spriteColoredX[static_cast<std::size_t>(spriteIndex)].empty();
+        const bool hasHd = hasHdSprite(spriteIndex);
         m_hdSourceCombo->setEnabled(false);
         m_hdScaleCombo->setEnabled(spriteIndex >= 0);
         m_hdCreateButton->setEnabled(spriteIndex >= 0 && !hasHd);
@@ -7533,9 +8770,16 @@ void MainWindow::ensureMaskDataSize()
         return;
     }
 
-    const cv::Mat* firstFrame = (frameCount > 0) ? m_frameStore->at(0) : nullptr;
-    const int width = firstFrame ? firstFrame->cols : 0;
-    const int height = firstFrame ? firstFrame->rows : 0;
+    int width = 0;
+    int height = 0;
+    if (m_serumDataLoaded && m_serumData.fwidth > 0 && m_serumData.fheight > 0) {
+        width = static_cast<int>(m_serumData.fwidth);
+        height = static_cast<int>(m_serumData.fheight);
+    } else {
+        const cv::Mat* firstFrame = (frameCount > 0) ? m_frameStore->at(0) : nullptr;
+        width = firstFrame ? firstFrame->cols : 0;
+        height = firstFrame ? firstFrame->rows : 0;
+    }
 
     if (m_compMasks.size() != MAX_MASKS) {
         m_compMasks.resize(MAX_MASKS);
@@ -7557,14 +8801,20 @@ void MainWindow::ensureMaskDataSize()
         m_frameDynamicMaskMapsX.resize(static_cast<std::size_t>(frameCount));
     }
     m_frameShapeCompModes.resize(static_cast<std::size_t>(frameCount), 0);
-    if (m_frameSpriteAssignments.size() != static_cast<std::size_t>(frameCount) * MAX_SPRITES_PER_FRAME) {
-        m_frameSpriteAssignments.resize(static_cast<std::size_t>(frameCount) * MAX_SPRITES_PER_FRAME, 255);
+    const std::size_t frameCountSize = static_cast<std::size_t>(frameCount);
+    const std::size_t totalSpriteSlots = frameCountSize * MAX_SPRITES_PER_FRAME;
+    if (frameCountSize != 0 && totalSpriteSlots / MAX_SPRITES_PER_FRAME != frameCountSize) {
+        return;
     }
-    if (m_frameSpriteZoneFlags.size() != static_cast<std::size_t>(frameCount) * MAX_SPRITES_PER_FRAME) {
-        m_frameSpriteZoneFlags.resize(static_cast<std::size_t>(frameCount) * MAX_SPRITES_PER_FRAME, 0);
+    if (m_frameSpriteAssignments.size() != totalSpriteSlots) {
+        m_frameSpriteAssignments.resize(totalSpriteSlots, 255);
     }
-    if (m_frameSpriteBBoxes.size() != static_cast<std::size_t>(frameCount) * MAX_SPRITES_PER_FRAME * 4) {
-        m_frameSpriteBBoxes.resize(static_cast<std::size_t>(frameCount) * MAX_SPRITES_PER_FRAME * 4, 0);
+    if (m_frameSpriteZoneFlags.size() != totalSpriteSlots) {
+        m_frameSpriteZoneFlags.resize(totalSpriteSlots, 0);
+    }
+    const std::size_t totalSpriteBBoxes = totalSpriteSlots * 4;
+    if (m_frameSpriteBBoxes.size() != totalSpriteBBoxes) {
+        m_frameSpriteBBoxes.resize(totalSpriteBBoxes, 0);
     }
 
     cv::Size hdSize;
@@ -7576,10 +8826,12 @@ void MainWindow::ensureMaskDataSize()
     }
 
     for (int i = 0; i < frameCount; ++i) {
-        if (const cv::Mat* frame = m_frameStore->at(i)) {
-            cv::Mat& ref = m_frameRefs[static_cast<std::size_t>(i)];
-            if (ref.empty() || ref.rows != frame->rows || ref.cols != frame->cols) {
-                ref = buildReferenceFrame(*frame);
+        if (!m_serumDataLoaded) {
+            if (const cv::Mat* frame = m_frameStore->at(i)) {
+                cv::Mat& ref = m_frameRefs[static_cast<std::size_t>(i)];
+                if (ref.empty() || ref.rows != frame->rows || ref.cols != frame->cols) {
+                    ref = buildReferenceFrame(*frame);
+                }
             }
         }
         if (width > 0 && height > 0) {
@@ -7595,7 +8847,9 @@ void MainWindow::ensureMaskDataSize()
                     continue;
                 }
                 if (m_frameSpriteAssignments[slotIndex] != 255) {
-                    m_frameSpriteZoneFlags[slotIndex] = 1;
+                    if (slotIndex < m_frameSpriteZoneFlags.size()) {
+                        m_frameSpriteZoneFlags[slotIndex] = 1;
+                    }
                 }
                 if (m_frameSpriteAssignments[slotIndex] != 255 &&
                     m_frameSpriteBBoxes[bboxIndex + 2] == 0 &&
@@ -7610,7 +8864,9 @@ void MainWindow::ensureMaskDataSize()
         if (width > 0 && height > 0) {
             cv::Mat& map = m_frameDynamicMaskMaps[static_cast<std::size_t>(i)];
             if (map.empty()) {
-                map = cv::Mat(height, width, CV_8UC1, cv::Scalar(255));
+                if (!m_serumDataLoaded) {
+                    map = cv::Mat(height, width, CV_8UC1, cv::Scalar(255));
+                }
             } else if (map.cols != width || map.rows != height) {
                 cv::Mat resized;
                 cv::resize(map, resized, cv::Size(width, height), 0.0, 0.0, cv::INTER_NEAREST);
@@ -7620,11 +8876,13 @@ void MainWindow::ensureMaskDataSize()
         if (hdSize.width > 0 && hdSize.height > 0) {
             cv::Mat& mapX = m_frameDynamicMaskMapsX[static_cast<std::size_t>(i)];
             if (mapX.empty()) {
-                const cv::Mat& map = m_frameDynamicMaskMaps[static_cast<std::size_t>(i)];
-                if (!map.empty()) {
-                    cv::resize(map, mapX, hdSize, 0.0, 0.0, cv::INTER_NEAREST);
-                } else {
-                    mapX = cv::Mat(hdSize.height, hdSize.width, CV_8UC1, cv::Scalar(255));
+                if (!m_serumDataLoaded) {
+                    const cv::Mat& map = m_frameDynamicMaskMaps[static_cast<std::size_t>(i)];
+                    if (!map.empty()) {
+                        cv::resize(map, mapX, hdSize, 0.0, 0.0, cv::INTER_NEAREST);
+                    } else {
+                        mapX = cv::Mat(hdSize.height, hdSize.width, CV_8UC1, cv::Scalar(255));
+                    }
                 }
             } else if (mapX.cols != hdSize.width || mapX.rows != hdSize.height) {
                 cv::Mat resized;
@@ -7632,23 +8890,29 @@ void MainWindow::ensureMaskDataSize()
                 mapX = resized;
             }
         }
-        std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(i)];
-        if (colors.empty()) {
-            colors.resize(MAX_DYNA_SETS_PER_FRAMEN * 64, 0);
-            for (int set = 0; set < MAX_DYNA_SETS_PER_FRAMEN; ++set) {
-                const cv::Vec3b base = MaskColorForIndex(set);
-                for (int c = 0; c < 64; ++c) {
-                    const double t = static_cast<double>(c) / 63.0;
-                    cv::Vec3b value(static_cast<uint8_t>(base[0] * t),
-                                    static_cast<uint8_t>(base[1] * t),
-                                    static_cast<uint8_t>(base[2] * t));
-                    colors[set * 64 + c] = BgrToRgb565(value);
+        if (!m_serumDataLoaded) {
+            std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(i)];
+            if (colors.empty()) {
+                colors.resize(MAX_DYNA_SETS_PER_FRAMEN * 64, 0);
+                for (int set = 0; set < MAX_DYNA_SETS_PER_FRAMEN; ++set) {
+                    const cv::Vec3b base = MaskColorForIndex(set);
+                    for (int c = 0; c < 64; ++c) {
+                        const double t = static_cast<double>(c) / 63.0;
+                        cv::Vec3b value(static_cast<uint8_t>(base[0] * t),
+                                        static_cast<uint8_t>(base[1] * t),
+                                        static_cast<uint8_t>(base[2] * t));
+                        colors[set * 64 + c] = BgrToRgb565(value);
+                    }
                 }
             }
         }
     }
 
-    const bool hasFrames = frameCount > 0 && m_framesList && !(frameCount == 1 && m_framesList->item(0)->text().startsWith("No frames"));
+    const QListWidgetItem* firstFrameItem = (m_framesList && m_framesList->count() > 0)
+        ? m_framesList->item(0)
+        : nullptr;
+    const bool hasFrames = frameCount > 0 && m_framesList &&
+        !(frameCount == 1 && firstFrameItem && firstFrameItem->text().startsWith("No frames"));
     m_frameMaskAssign->setEnabled(hasFrames);
     m_frameDynamicMaskAssign->setEnabled(hasFrames);
     if (m_frameDynamicCopyButton) {
@@ -7721,7 +8985,9 @@ void MainWindow::ensureSpriteDataSize()
 
     for (int i = 0; i < spriteCount; ++i) {
         cv::Mat& original = m_spriteOriginals[static_cast<std::size_t>(i)];
-        if (original.empty() || original.size() != spriteSize) {
+        if (m_serumDataLoaded && original.empty()) {
+            // Keep empty to read from SerumData unless the user edits.
+        } else if (original.empty() || original.size() != spriteSize) {
             original = cv::Mat(spriteSize, CV_8UC1, cv::Scalar(0));
         }
         cv::Mat& map = m_spriteDynamicMasks[static_cast<std::size_t>(i)];
@@ -7744,8 +9010,11 @@ void MainWindow::ensureSpriteDataSize()
         }
     }
 
+    const QListWidgetItem* firstSpriteItem = (m_spritesList && m_spritesList->count() > 0)
+        ? m_spritesList->item(0)
+        : nullptr;
     const bool hasSprites = spriteCount > 0 && m_spritesList &&
-        !(spriteCount == 1 && m_spritesList->item(0)->text().startsWith("No sprites"));
+        !(spriteCount == 1 && firstSpriteItem && firstSpriteItem->text().startsWith("No sprites"));
     if (m_spriteDynamicSetCombo) {
         m_spriteDynamicSetCombo->setEnabled(hasSprites);
         const int clamped = std::clamp(m_spriteDynamicSetIndex, 0, MAX_DYNA_SETS_PER_SPRITE - 1);
@@ -7773,7 +9042,11 @@ void MainWindow::ensureBackgroundDataSize()
     if (frameCount < 0) {
         return;
     }
-    const bool hasFrames = frameCount > 0 && m_framesList && !(frameCount == 1 && m_framesList->item(0)->text().startsWith("No frames"));
+    const QListWidgetItem* firstFrameItem = (m_framesList && m_framesList->count() > 0)
+        ? m_framesList->item(0)
+        : nullptr;
+    const bool hasFrames = frameCount > 0 && m_framesList &&
+        !(frameCount == 1 && firstFrameItem && firstFrameItem->text().startsWith("No frames"));
     if (m_frameBackgroundIds.size() != static_cast<std::size_t>(frameCount)) {
         m_frameBackgroundIds.resize(static_cast<std::size_t>(frameCount), 0xffff);
     }
@@ -7798,16 +9071,31 @@ void MainWindow::ensureBackgroundDataSize()
 
     for (int i = 0; i < frameCount; ++i) {
         cv::Mat& mask = m_frameBackgroundMasks[static_cast<std::size_t>(i)];
-        if (width > 0 && height > 0 && (mask.empty() || mask.cols != width || mask.rows != height)) {
-            mask = cv::Mat(height, width, CV_8UC1, cv::Scalar(0));
+        if (width > 0 && height > 0) {
+            if (mask.empty()) {
+                if (!m_serumDataLoaded) {
+                    mask = cv::Mat(height, width, CV_8UC1, cv::Scalar(0));
+                }
+            } else if (mask.cols != width || mask.rows != height) {
+                cv::Mat resized;
+                cv::resize(mask, resized, cv::Size(width, height), 0.0, 0.0, cv::INTER_NEAREST);
+                mask = resized;
+            }
         }
         cv::Mat& maskX = m_frameBackgroundMasksX[static_cast<std::size_t>(i)];
-        if (hdSize.width > 0 && hdSize.height > 0 &&
-            (maskX.empty() || maskX.cols != hdSize.width || maskX.rows != hdSize.height)) {
-            if (!mask.empty()) {
-                cv::resize(mask, maskX, hdSize, 0.0, 0.0, cv::INTER_NEAREST);
-            } else {
-                maskX = cv::Mat(hdSize.height, hdSize.width, CV_8UC1, cv::Scalar(0));
+        if (hdSize.width > 0 && hdSize.height > 0) {
+            if (maskX.empty()) {
+                if (!m_serumDataLoaded) {
+                    if (!mask.empty()) {
+                        cv::resize(mask, maskX, hdSize, 0.0, 0.0, cv::INTER_NEAREST);
+                    } else {
+                        maskX = cv::Mat(hdSize.height, hdSize.width, CV_8UC1, cv::Scalar(0));
+                    }
+                }
+            } else if (maskX.cols != hdSize.width || maskX.rows != hdSize.height) {
+                cv::Mat resized;
+                cv::resize(maskX, resized, hdSize, 0.0, 0.0, cv::INTER_NEAREST);
+                maskX = resized;
             }
         }
     }
@@ -7882,6 +9170,12 @@ void MainWindow::updateMaskPreviewForFrame(int index)
     }
     ensureMaskDataSize();
     ensureBackgroundDataSize();
+    if (m_serumDataLoaded && index >= 0 && index < static_cast<int>(m_frameDynamicMaskMaps.size())) {
+        if (m_frameDynamicMaskMaps[static_cast<std::size_t>(index)].empty() &&
+            m_serumData.dynamasks.hasData(static_cast<uint32_t>(index))) {
+            activeDynamicMaskMap(index);
+        }
+    }
     if (m_spriteZoneMode) {
         updateSpriteZoneOverlay(index);
         return;
@@ -7954,8 +9248,18 @@ void MainWindow::updateMaskPreviewForFrame(int index)
             }
         } else if (m_maskMode == MaskMode::Comparison) {
             const int maskId = currentFrameMaskId();
-            if (maskId >= 0 && maskId < static_cast<int>(m_compMasks.size())) {
-                const cv::Mat& mask = m_compMasks[static_cast<std::size_t>(maskId)];
+            cv::Mat mask;
+            if (maskId >= 0) {
+                if (m_serumDataLoaded && m_serumData.compmasks.hasData(static_cast<uint32_t>(maskId))) {
+                    mask = cv::Mat(static_cast<int>(m_serumData.fheight),
+                                   static_cast<int>(m_serumData.fwidth),
+                                   CV_8UC1,
+                                   const_cast<uint8_t*>(m_serumData.compmasks[static_cast<uint32_t>(maskId)]));
+                } else if (maskId < static_cast<int>(m_compMasks.size())) {
+                    mask = m_compMasks[static_cast<std::size_t>(maskId)];
+                }
+            }
+            if (!mask.empty()) {
                 bottomPreview = buildMaskPreview(original, mask, cv::Vec3b(200, 0, 200));
                 hasBottomMask = true;
                 bottomOutlineColor = QColor(200, 0, 200);
@@ -7988,8 +9292,17 @@ void MainWindow::updateMaskPreviewForFrame(int index)
                 mask = &dynamicMask;
             }
         } else if (m_maskMode == MaskMode::Comparison) {
-            if (currentFrameMaskId() >= 0) {
-                mask = &m_compMasks[static_cast<std::size_t>(currentFrameMaskId())];
+            const int maskId = currentFrameMaskId();
+            if (maskId >= 0) {
+                if (m_serumDataLoaded && m_serumData.compmasks.hasData(static_cast<uint32_t>(maskId))) {
+                    dynamicMask = cv::Mat(static_cast<int>(m_serumData.fheight),
+                                          static_cast<int>(m_serumData.fwidth),
+                                          CV_8UC1,
+                                          const_cast<uint8_t*>(m_serumData.compmasks[static_cast<uint32_t>(maskId)]));
+                    mask = &dynamicMask;
+                } else if (maskId < static_cast<int>(m_compMasks.size())) {
+                    mask = &m_compMasks[static_cast<std::size_t>(maskId)];
+                }
             }
         }
         if (mask && !mask->empty()) {
@@ -8464,7 +9777,10 @@ void MainWindow::updateMaskPreviewIcons()
     const int gap = 2;
     const int width = kPreviewIconWidth;
     int height = kPreviewIconHeight;
-    if (!m_compMasks.empty()) {
+    if (m_serumDataLoaded && m_serumData.fwidth > 0) {
+        height = std::max(1, static_cast<int>(
+            std::lround(static_cast<double>(width) * m_serumData.fheight / m_serumData.fwidth)));
+    } else if (!m_compMasks.empty()) {
         const cv::Mat& first = m_compMasks.front();
         if (!first.empty() && first.cols > 0) {
             height = std::max(1, static_cast<int>(
@@ -8481,8 +9797,16 @@ void MainWindow::updateMaskPreviewIcons()
     m_maskList->setIconSize(QSize(width, height));
     m_maskList->setGridSize(QSize(width + padding * 2,
                                   height + textHeight + padding * 2 + gap));
-    for (int i = 0; i < m_maskList->count() && i < static_cast<int>(m_compMasks.size()); ++i) {
-        const cv::Mat& mask = m_compMasks[static_cast<std::size_t>(i)];
+    for (int i = 0; i < m_maskList->count() && i < MAX_MASKS; ++i) {
+        cv::Mat mask;
+        if (m_serumDataLoaded && m_serumData.compmasks.hasData(static_cast<uint32_t>(i))) {
+            mask = cv::Mat(static_cast<int>(m_serumData.fheight),
+                           static_cast<int>(m_serumData.fwidth),
+                           CV_8UC1,
+                           const_cast<uint8_t*>(m_serumData.compmasks[static_cast<uint32_t>(i)]));
+        } else if (i < static_cast<int>(m_compMasks.size())) {
+            mask = m_compMasks[static_cast<std::size_t>(i)];
+        }
         cv::Mat iconMat = buildMaskIconImage(mask, color);
         if (iconMat.empty()) {
             if (QListWidgetItem* item = m_maskList->item(i)) {
@@ -8515,17 +9839,47 @@ void MainWindow::updateDynamicMaskPreviewIcons()
         return;
     }
     const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
-    const cv::Mat* map = (frameIndex >= 0 && frameIndex < static_cast<int>(m_frameDynamicMaskMaps.size()))
+    cv::Mat map;
+    std::vector<uint16_t> serumColors;
+    const std::vector<uint16_t>* colors = nullptr;
+    const cv::Mat* localMap = (frameIndex >= 0 && frameIndex < static_cast<int>(m_frameDynamicMaskMaps.size()))
         ? &m_frameDynamicMaskMaps[static_cast<std::size_t>(frameIndex)]
         : nullptr;
-    const std::vector<uint16_t>* colors = (frameIndex >= 0 && frameIndex < static_cast<int>(m_frameDynamicColors.size()))
+    const std::vector<uint16_t>* localColors = (frameIndex >= 0 && frameIndex < static_cast<int>(m_frameDynamicColors.size()))
         ? &m_frameDynamicColors[static_cast<std::size_t>(frameIndex)]
         : nullptr;
+    if (localMap && !localMap->empty()) {
+        map = *localMap;
+        if (localColors && !localColors->empty()) {
+            colors = localColors;
+        }
+    }
+    if (map.empty() && m_serumDataLoaded && frameIndex >= 0 &&
+        frameIndex < static_cast<int>(m_serumData.nframes) &&
+        m_serumData.dynamasks.hasData(static_cast<uint32_t>(frameIndex))) {
+        map = cv::Mat(static_cast<int>(m_serumData.fheight),
+                      static_cast<int>(m_serumData.fwidth),
+                      CV_8UC1,
+                      const_cast<uint8_t*>(m_serumData.dynamasks[static_cast<uint32_t>(frameIndex)]));
+    }
+    if (!colors) {
+        if (localColors && !localColors->empty()) {
+            colors = localColors;
+        } else if (m_serumDataLoaded && frameIndex >= 0 &&
+                   frameIndex < static_cast<int>(m_serumData.nframes) &&
+                   m_serumData.dyna4cols_v2.hasData(static_cast<uint32_t>(frameIndex))) {
+            const std::size_t size = static_cast<std::size_t>(MAX_DYNA_SETS_PER_FRAMEN) *
+                std::max<uint32_t>(1, m_serumData.nocolors);
+            const uint16_t* ptr = m_serumData.dyna4cols_v2[static_cast<uint32_t>(frameIndex)];
+            serumColors.assign(ptr, ptr + size);
+            colors = &serumColors;
+        }
+    }
     const int colorsPerSet = colors ? dynamicColorsPerSet(*colors) : 0;
     int previewHeight = kPreviewIconHeight;
-    if (map && !map->empty() && map->cols > 0) {
+    if (!map.empty() && map.cols > 0) {
         previewHeight = std::max(1, static_cast<int>(
-            std::lround(static_cast<double>(kPreviewIconWidth) * map->rows / map->cols)));
+            std::lround(static_cast<double>(kPreviewIconWidth) * map.rows / map.cols)));
     } else {
         previewHeight = std::max(1, kPreviewIconWidth / 4);
     }
@@ -8537,8 +9891,8 @@ void MainWindow::updateDynamicMaskPreviewIcons()
     const cv::Vec3b color(0, 200, 255);
     for (int i = 0; i < m_dynamicMaskList->count() && i < MAX_DYNA_SETS_PER_FRAMEN; ++i) {
         cv::Mat iconMat;
-        if (map && !map->empty()) {
-            cv::Mat mask = buildDynamicMaskFromMap(*map, i);
+        if (!map.empty()) {
+            cv::Mat mask = buildDynamicMaskFromMap(map, i);
             if (MaskHasContent(mask)) {
                 iconMat = buildMaskIconImage(mask, color);
             }
@@ -8742,7 +10096,18 @@ void MainWindow::applyDynamicMaskListOrder()
 int MainWindow::currentFrameMaskId() const
 {
     const int row = m_framesList ? m_framesList->currentRow() : -1;
-    if (row < 0 || row >= static_cast<int>(m_frameCompMaskIds.size())) {
+    if (row < 0) {
+        return -1;
+    }
+    if (m_serumDataLoaded && row < static_cast<int>(m_serumData.nframes) &&
+        m_serumData.compmaskID.hasData(static_cast<uint32_t>(row))) {
+        const uint8_t* value = m_serumData.compmaskID[static_cast<uint32_t>(row)];
+        if (!value) {
+            return -1;
+        }
+        return value[0] == 255 ? -1 : static_cast<int>(value[0]);
+    }
+    if (row >= static_cast<int>(m_frameCompMaskIds.size())) {
         return -1;
     }
     const uint8_t value = m_frameCompMaskIds[static_cast<std::size_t>(row)];
@@ -8771,6 +10136,9 @@ void MainWindow::setCurrentFrameMaskId(int id)
     }
     const uint8_t value = (id < 0) ? 255 : static_cast<uint8_t>(id);
     m_frameCompMaskIds[static_cast<std::size_t>(row)] = value;
+    if (m_serumDataLoaded && row < static_cast<int>(m_serumData.nframes)) {
+        m_serumData.compmaskID.set(static_cast<uint32_t>(row), &value, 1);
+    }
 }
 
 void MainWindow::setCurrentFrameDynamicMaskId(int id)
@@ -8789,10 +10157,25 @@ void MainWindow::setCurrentFrameDynamicMaskId(int id)
 cv::Mat* MainWindow::activeComparisonMask()
 {
     const int id = m_maskList ? m_maskList->currentRow() : -1;
-    if (id < 0 || id >= static_cast<int>(m_compMasks.size())) {
+    if (id < 0 || id >= MAX_MASKS) {
         return nullptr;
     }
-    return &m_compMasks[static_cast<std::size_t>(id)];
+    if (m_compMasks.size() != MAX_MASKS) {
+        m_compMasks.resize(MAX_MASKS);
+    }
+    cv::Mat& mask = m_compMasks[static_cast<std::size_t>(id)];
+    if (mask.empty() && m_serumDataLoaded && m_serumData.compmasks.hasData(static_cast<uint32_t>(id))) {
+        const int width = static_cast<int>(m_serumData.fwidth);
+        const int height = static_cast<int>(m_serumData.fheight);
+        if (width > 0 && height > 0) {
+            mask = cv::Mat(height, width, CV_8UC1, cv::Scalar(0));
+            const uint8_t* src = m_serumData.compmasks[static_cast<uint32_t>(id)];
+            if (src) {
+                std::memcpy(mask.data, src, static_cast<std::size_t>(width) * height);
+            }
+        }
+    }
+    return &mask;
 }
 
 cv::Mat* MainWindow::activeDynamicMaskMap(int frameIndex)
@@ -8800,7 +10183,20 @@ cv::Mat* MainWindow::activeDynamicMaskMap(int frameIndex)
     if (frameIndex < 0 || frameIndex >= static_cast<int>(m_frameDynamicMaskMaps.size())) {
         return nullptr;
     }
-    return &m_frameDynamicMaskMaps[static_cast<std::size_t>(frameIndex)];
+    cv::Mat& map = m_frameDynamicMaskMaps[static_cast<std::size_t>(frameIndex)];
+    if (map.empty() && m_serumDataLoaded && frameIndex < static_cast<int>(m_serumData.nframes) &&
+        m_serumData.dynamasks.hasData(static_cast<uint32_t>(frameIndex))) {
+        const int width = static_cast<int>(m_serumData.fwidth);
+        const int height = static_cast<int>(m_serumData.fheight);
+        if (width > 0 && height > 0) {
+            map = cv::Mat(height, width, CV_8UC1, cv::Scalar(255));
+            const uint8_t* src = m_serumData.dynamasks[static_cast<uint32_t>(frameIndex)];
+            if (src) {
+                std::memcpy(map.data, src, static_cast<std::size_t>(width) * height);
+            }
+        }
+    }
+    return &map;
 }
 
 cv::Mat* MainWindow::activeSpriteDynamicMask(int spriteIndex)
@@ -8808,10 +10204,13 @@ cv::Mat* MainWindow::activeSpriteDynamicMask(int spriteIndex)
     if (spriteIndex < 0 || spriteIndex >= static_cast<int>(m_spriteDynamicMasks.size())) {
         return nullptr;
     }
-    if (m_useHdSprite &&
-        spriteIndex < static_cast<int>(m_spriteDynamicMasksX.size()) &&
-        !m_spriteDynamicMasksX[static_cast<std::size_t>(spriteIndex)].empty()) {
-        return &m_spriteDynamicMasksX[static_cast<std::size_t>(spriteIndex)];
+    if (m_useHdSprite) {
+        if (auto* mask = ensureHdSpriteDynamicMaskLocal(spriteIndex)) {
+            return mask;
+        }
+    }
+    if (auto* mask = ensureSpriteDynamicMaskLocal(spriteIndex)) {
+        return mask;
     }
     return &m_spriteDynamicMasks[static_cast<std::size_t>(spriteIndex)];
 }
@@ -8822,10 +10221,36 @@ cv::Mat* MainWindow::activeBackgroundMask(int index)
         return nullptr;
     }
     if (m_useHdFrame && index < static_cast<int>(m_frameBackgroundMasksX.size())) {
-        return &m_frameBackgroundMasksX[static_cast<std::size_t>(index)];
+        cv::Mat& mask = m_frameBackgroundMasksX[static_cast<std::size_t>(index)];
+        if (mask.empty() && m_serumDataLoaded && index < static_cast<int>(m_serumData.nframes) &&
+            m_serumData.backgroundmask_extra.hasData(static_cast<uint32_t>(index))) {
+            const int width = static_cast<int>(m_serumData.fwidth_extra);
+            const int height = static_cast<int>(m_serumData.fheight_extra);
+            if (width > 0 && height > 0) {
+                mask = cv::Mat(height, width, CV_8UC1, cv::Scalar(0));
+                const uint8_t* src = m_serumData.backgroundmask_extra[static_cast<uint32_t>(index)];
+                if (src) {
+                    std::memcpy(mask.data, src, static_cast<std::size_t>(width) * height);
+                }
+            }
+        }
+        return &mask;
     }
     if (index < static_cast<int>(m_frameBackgroundMasks.size())) {
-        return &m_frameBackgroundMasks[static_cast<std::size_t>(index)];
+        cv::Mat& mask = m_frameBackgroundMasks[static_cast<std::size_t>(index)];
+        if (mask.empty() && m_serumDataLoaded && index < static_cast<int>(m_serumData.nframes) &&
+            m_serumData.backgroundmask.hasData(static_cast<uint32_t>(index))) {
+            const int width = static_cast<int>(m_serumData.fwidth);
+            const int height = static_cast<int>(m_serumData.fheight);
+            if (width > 0 && height > 0) {
+                mask = cv::Mat(height, width, CV_8UC1, cv::Scalar(0));
+                const uint8_t* src = m_serumData.backgroundmask[static_cast<uint32_t>(index)];
+                if (src) {
+                    std::memcpy(mask.data, src, static_cast<std::size_t>(width) * height);
+                }
+            }
+        }
+        return &mask;
     }
     return nullptr;
 }
@@ -10133,7 +11558,38 @@ bool MainWindow::hasHdFrame(int index) const
     if (index < 0 || index >= static_cast<int>(m_frameExtraFrames.size())) {
         return false;
     }
-    return !m_frameExtraFrames[static_cast<std::size_t>(index)].empty();
+    if (!m_frameExtraFrames[static_cast<std::size_t>(index)].empty()) {
+        return true;
+    }
+    if (m_serumDataLoaded && index < static_cast<int>(m_serumData.nframes)) {
+        const uint8_t* extraFlag = m_serumData.isextraframe[static_cast<uint32_t>(index)];
+        return extraFlag && extraFlag[0] != 0;
+    }
+    return false;
+}
+
+cv::Mat* MainWindow::ensureHdFrameLocal(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_frameExtraFrames.size())) {
+        return nullptr;
+    }
+    cv::Mat& frame = m_frameExtraFrames[static_cast<std::size_t>(index)];
+    if (!frame.empty()) {
+        return &frame;
+    }
+    if (m_serumDataLoaded && index < static_cast<int>(m_serumData.nframes)) {
+        const uint8_t* extraFlag = m_serumData.isextraframe[static_cast<uint32_t>(index)];
+        if (extraFlag && extraFlag[0] != 0 &&
+            m_serumData.cframes_v2_extra.hasData(static_cast<uint32_t>(index))) {
+            const uint16_t* data = m_serumData.cframes_v2_extra[static_cast<uint32_t>(index)];
+            if (data && m_serumData.fwidth_extra > 0 && m_serumData.fheight_extra > 0) {
+                frame = ConvertRgb565ToBgrMat(data,
+                                              static_cast<int>(m_serumData.fwidth_extra),
+                                              static_cast<int>(m_serumData.fheight_extra));
+            }
+        }
+    }
+    return frame.empty() ? nullptr : &frame;
 }
 
 cv::Mat* MainWindow::activeFrameImage(int index, bool forEdit)
@@ -10142,12 +11598,13 @@ cv::Mat* MainWindow::activeFrameImage(int index, bool forEdit)
         return nullptr;
     }
     if (m_useHdFrame && hasHdFrame(index)) {
-        return &m_frameExtraFrames[static_cast<std::size_t>(index)];
+        return ensureHdFrameLocal(index);
     }
     if (forEdit) {
         return m_frameStore->atMutable(index);
     }
-    return m_frameStore->atMutable(index);
+    const cv::Mat* image = m_frameStore->at(index);
+    return image ? const_cast<cv::Mat*>(image) : nullptr;
 }
 
 cv::Mat* MainWindow::activeBackgroundImage(int index, bool forEdit)
@@ -10156,7 +11613,7 @@ cv::Mat* MainWindow::activeBackgroundImage(int index, bool forEdit)
         return nullptr;
     }
     if (m_useHdBackground && hasHdBackground(index)) {
-        return &m_backgroundFramesX[static_cast<std::size_t>(index)];
+        return ensureHdBackgroundLocal(index);
     }
     if (!m_backgroundStore) {
         return nullptr;
@@ -10164,7 +11621,8 @@ cv::Mat* MainWindow::activeBackgroundImage(int index, bool forEdit)
     if (forEdit) {
         return m_backgroundStore->atMutable(index);
     }
-    return m_backgroundStore->atMutable(index);
+    const cv::Mat* image = m_backgroundStore->at(index);
+    return image ? const_cast<cv::Mat*>(image) : nullptr;
 }
 
 void MainWindow::refreshRecentMenu()
@@ -10338,6 +11796,7 @@ void MainWindow::applyPaletteColorChanges(const std::vector<QColor>& before,
                 }
             }
         }
+        commitFrameFromStore(frameIndex, m_useHdFrame);
         updateFramePreviewAt(frameIndex);
     }
     const int current = m_framesList ? m_framesList->currentRow() : -1;
@@ -10498,7 +11957,12 @@ void MainWindow::pushDynamicUndoSnapshot(int frameIndex, int setIndex)
         setIndex < 0 || setIndex >= MAX_DYNA_SETS_PER_FRAMEN) {
         return;
     }
-    const std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(frameIndex)];
+    const bool useHd = m_useHdFrame && hasHdFrame(frameIndex);
+    std::vector<uint16_t>* colorsPtr = ensureFrameDynamicColorsLocal(frameIndex, useHd);
+    if (!colorsPtr) {
+        return;
+    }
+    const std::vector<uint16_t>& colors = *colorsPtr;
     const int stride = dynamicColorsPerSet(colors);
     if (stride <= 0) {
         return;
@@ -10526,29 +11990,25 @@ void MainWindow::pushRotationUndoSnapshot(int frameIndex, int setIndex, bool use
     if (setIndex < 0 || setIndex >= MAX_COLOR_ROTATIONN) {
         return;
     }
-    std::vector<uint16_t>& rotations = useHd ? m_frameRotationsX : m_frameRotations;
-    const std::size_t rotationSize = rotations.size();
-    const std::size_t blockSize =
-        static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
-    if (rotationSize == 0) {
+    if (frameIndex < 0) {
         return;
     }
-    const std::size_t frameCount = rotationSize / blockSize;
-    if (frameIndex < 0 || static_cast<std::size_t>(frameIndex) >= frameCount) {
-        return;
+    const uint16_t* rotations = rotationBlockForRead(frameIndex, useHd);
+    if (!rotations) {
+        rotations = nullptr;
     }
-    const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize +
-        static_cast<std::size_t>(setIndex) * MAX_LENGTH_COLOR_ROTATION;
-    if (base + MAX_LENGTH_COLOR_ROTATION > rotations.size()) {
-        return;
-    }
+    const std::size_t base = rotationSetOffset(setIndex);
     PaletteUndoState state;
     state.kind = PaletteUndoState::Kind::Rotation;
     state.frame_index = frameIndex;
     state.set_index = setIndex;
     state.use_hd = useHd;
     state.values.resize(MAX_LENGTH_COLOR_ROTATION);
-    std::copy_n(rotations.begin() + base, MAX_LENGTH_COLOR_ROTATION, state.values.begin());
+    if (rotations && base + MAX_LENGTH_COLOR_ROTATION <= rotationBlockSize()) {
+        std::copy_n(rotations + base, MAX_LENGTH_COLOR_ROTATION, state.values.begin());
+    } else {
+        std::fill(state.values.begin(), state.values.end(), 0);
+    }
     m_paletteUndo.push_back(state);
     if (m_paletteUndo.size() > m_maxUndoDepth) {
         m_paletteUndo.erase(m_paletteUndo.begin());
@@ -10589,12 +12049,15 @@ bool MainWindow::undoPaletteEdit()
         if (previous.frame_index >= 0 &&
             previous.frame_index < static_cast<int>(m_frameDynamicColors.size()) &&
             previous.set_index >= 0 && previous.set_index < MAX_DYNA_SETS_PER_FRAMEN) {
-            const std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(previous.frame_index)];
-            const int stride = dynamicColorsPerSet(colors);
+            const bool useHd = m_useHdFrame && hasHdFrame(previous.frame_index);
+            int stride = 0;
+            const uint16_t* colors = frameDynamicColorsData(previous.frame_index, useHd, &stride);
             const std::size_t offset = static_cast<std::size_t>(previous.set_index) * stride;
-            if (stride > 0 && offset + static_cast<std::size_t>(stride) <= colors.size()) {
+            const std::size_t size =
+                static_cast<std::size_t>(MAX_DYNA_SETS_PER_FRAMEN) * static_cast<std::size_t>(stride);
+            if (stride > 0 && colors && offset + static_cast<std::size_t>(stride) <= size) {
                 current.values.resize(static_cast<std::size_t>(stride));
-                std::copy_n(colors.begin() + offset, stride, current.values.begin());
+                std::copy_n(colors + offset, stride, current.values.begin());
             }
         }
     } else if (previous.kind == PaletteUndoState::Kind::Rotation) {
@@ -10602,14 +12065,12 @@ bool MainWindow::undoPaletteEdit()
         current.frame_index = previous.frame_index;
         current.set_index = previous.set_index;
         current.use_hd = previous.use_hd;
-        std::vector<uint16_t>& rotations = previous.use_hd ? m_frameRotationsX : m_frameRotations;
-        const std::size_t blockSize =
-            static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
-        const std::size_t base = static_cast<std::size_t>(previous.frame_index) * blockSize +
-            static_cast<std::size_t>(previous.set_index) * MAX_LENGTH_COLOR_ROTATION;
-        if (base + MAX_LENGTH_COLOR_ROTATION <= rotations.size()) {
+        const uint16_t* rotations = rotationBlockForRead(previous.frame_index, previous.use_hd);
+        if (rotations) {
+            const std::size_t base = static_cast<std::size_t>(previous.set_index) *
+                MAX_LENGTH_COLOR_ROTATION;
             current.values.resize(MAX_LENGTH_COLOR_ROTATION);
-            std::copy_n(rotations.begin() + base, MAX_LENGTH_COLOR_ROTATION, current.values.begin());
+            std::copy_n(rotations + base, MAX_LENGTH_COLOR_ROTATION, current.values.begin());
         }
     }
     m_paletteRedo.push_back(current);
@@ -10644,11 +12105,14 @@ bool MainWindow::undoPaletteEdit()
             previous.frame_index < static_cast<int>(m_frameDynamicColors.size()) &&
             previous.set_index >= 0 && previous.set_index < MAX_DYNA_SETS_PER_FRAMEN &&
             !previous.values.empty()) {
-            std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(previous.frame_index)];
-            const int stride = dynamicColorsPerSet(colors);
-            const std::size_t offset = static_cast<std::size_t>(previous.set_index) * stride;
-            if (stride > 0 && offset + previous.values.size() <= colors.size()) {
-                std::copy_n(previous.values.begin(), previous.values.size(), colors.begin() + offset);
+            const bool useHd = m_useHdFrame && hasHdFrame(previous.frame_index);
+            std::vector<uint16_t>* colorsPtr = ensureFrameDynamicColorsLocal(previous.frame_index, useHd);
+            if (colorsPtr) {
+                const int stride = dynamicColorsPerSet(*colorsPtr);
+                const std::size_t offset = static_cast<std::size_t>(previous.set_index) * stride;
+                if (stride > 0 && offset + previous.values.size() <= colorsPtr->size()) {
+                    std::copy_n(previous.values.begin(), previous.values.size(), colorsPtr->begin() + offset);
+                }
             }
             refreshDynamicPaletteButtons();
             updateDynamicMaskPreviewIcons();
@@ -10658,14 +12122,13 @@ bool MainWindow::undoPaletteEdit()
             }
         }
     } else if (previous.kind == PaletteUndoState::Kind::Rotation) {
-        std::vector<uint16_t>& rotations = previous.use_hd ? m_frameRotationsX : m_frameRotations;
-        const std::size_t blockSize =
-            static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
-        const std::size_t base = static_cast<std::size_t>(previous.frame_index) * blockSize +
-            static_cast<std::size_t>(previous.set_index) * MAX_LENGTH_COLOR_ROTATION;
-        if (base + MAX_LENGTH_COLOR_ROTATION <= rotations.size() &&
-            previous.values.size() >= MAX_LENGTH_COLOR_ROTATION) {
-            std::copy_n(previous.values.begin(), MAX_LENGTH_COLOR_ROTATION, rotations.begin() + base);
+        std::vector<uint16_t>* rotations = ensureRotationBlockLocal(previous.frame_index, previous.use_hd);
+        if (rotations && previous.values.size() >= MAX_LENGTH_COLOR_ROTATION) {
+            const std::size_t base = static_cast<std::size_t>(previous.set_index) *
+                MAX_LENGTH_COLOR_ROTATION;
+            if (base + MAX_LENGTH_COLOR_ROTATION <= rotations->size()) {
+                std::copy_n(previous.values.begin(), MAX_LENGTH_COLOR_ROTATION, rotations->begin() + base);
+            }
             m_rotationSetIndex = previous.set_index;
             if (m_framesList && previous.frame_index == m_framesList->currentRow()) {
                 refreshRotationEditor();
@@ -10709,12 +12172,15 @@ bool MainWindow::redoPaletteEdit()
         if (next.frame_index >= 0 &&
             next.frame_index < static_cast<int>(m_frameDynamicColors.size()) &&
             next.set_index >= 0 && next.set_index < MAX_DYNA_SETS_PER_FRAMEN) {
-            const std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(next.frame_index)];
-            const int stride = dynamicColorsPerSet(colors);
+            const bool useHd = m_useHdFrame && hasHdFrame(next.frame_index);
+            int stride = 0;
+            const uint16_t* colors = frameDynamicColorsData(next.frame_index, useHd, &stride);
             const std::size_t offset = static_cast<std::size_t>(next.set_index) * stride;
-            if (stride > 0 && offset + static_cast<std::size_t>(stride) <= colors.size()) {
+            const std::size_t size =
+                static_cast<std::size_t>(MAX_DYNA_SETS_PER_FRAMEN) * static_cast<std::size_t>(stride);
+            if (stride > 0 && colors && offset + static_cast<std::size_t>(stride) <= size) {
                 current.values.resize(static_cast<std::size_t>(stride));
-                std::copy_n(colors.begin() + offset, stride, current.values.begin());
+                std::copy_n(colors + offset, stride, current.values.begin());
             }
         }
     } else if (next.kind == PaletteUndoState::Kind::Rotation) {
@@ -10722,14 +12188,12 @@ bool MainWindow::redoPaletteEdit()
         current.frame_index = next.frame_index;
         current.set_index = next.set_index;
         current.use_hd = next.use_hd;
-        std::vector<uint16_t>& rotations = next.use_hd ? m_frameRotationsX : m_frameRotations;
-        const std::size_t blockSize =
-            static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
-        const std::size_t base = static_cast<std::size_t>(next.frame_index) * blockSize +
-            static_cast<std::size_t>(next.set_index) * MAX_LENGTH_COLOR_ROTATION;
-        if (base + MAX_LENGTH_COLOR_ROTATION <= rotations.size()) {
+        const uint16_t* rotations = rotationBlockForRead(next.frame_index, next.use_hd);
+        if (rotations) {
+            const std::size_t base = static_cast<std::size_t>(next.set_index) *
+                MAX_LENGTH_COLOR_ROTATION;
             current.values.resize(MAX_LENGTH_COLOR_ROTATION);
-            std::copy_n(rotations.begin() + base, MAX_LENGTH_COLOR_ROTATION, current.values.begin());
+            std::copy_n(rotations + base, MAX_LENGTH_COLOR_ROTATION, current.values.begin());
         }
     }
     m_paletteUndo.push_back(current);
@@ -10764,11 +12228,14 @@ bool MainWindow::redoPaletteEdit()
             next.frame_index < static_cast<int>(m_frameDynamicColors.size()) &&
             next.set_index >= 0 && next.set_index < MAX_DYNA_SETS_PER_FRAMEN &&
             !next.values.empty()) {
-            std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(next.frame_index)];
-            const int stride = dynamicColorsPerSet(colors);
-            const std::size_t offset = static_cast<std::size_t>(next.set_index) * stride;
-            if (stride > 0 && offset + next.values.size() <= colors.size()) {
-                std::copy_n(next.values.begin(), next.values.size(), colors.begin() + offset);
+            const bool useHd = m_useHdFrame && hasHdFrame(next.frame_index);
+            std::vector<uint16_t>* colorsPtr = ensureFrameDynamicColorsLocal(next.frame_index, useHd);
+            if (colorsPtr) {
+                const int stride = dynamicColorsPerSet(*colorsPtr);
+                const std::size_t offset = static_cast<std::size_t>(next.set_index) * stride;
+                if (stride > 0 && offset + next.values.size() <= colorsPtr->size()) {
+                    std::copy_n(next.values.begin(), next.values.size(), colorsPtr->begin() + offset);
+                }
             }
             refreshDynamicPaletteButtons();
             updateDynamicMaskPreviewIcons();
@@ -10778,14 +12245,13 @@ bool MainWindow::redoPaletteEdit()
             }
         }
     } else if (next.kind == PaletteUndoState::Kind::Rotation) {
-        std::vector<uint16_t>& rotations = next.use_hd ? m_frameRotationsX : m_frameRotations;
-        const std::size_t blockSize =
-            static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
-        const std::size_t base = static_cast<std::size_t>(next.frame_index) * blockSize +
-            static_cast<std::size_t>(next.set_index) * MAX_LENGTH_COLOR_ROTATION;
-        if (base + MAX_LENGTH_COLOR_ROTATION <= rotations.size() &&
-            next.values.size() >= MAX_LENGTH_COLOR_ROTATION) {
-            std::copy_n(next.values.begin(), MAX_LENGTH_COLOR_ROTATION, rotations.begin() + base);
+        std::vector<uint16_t>* rotations = ensureRotationBlockLocal(next.frame_index, next.use_hd);
+        if (rotations && next.values.size() >= MAX_LENGTH_COLOR_ROTATION) {
+            const std::size_t base = static_cast<std::size_t>(next.set_index) *
+                MAX_LENGTH_COLOR_ROTATION;
+            if (base + MAX_LENGTH_COLOR_ROTATION <= rotations->size()) {
+                std::copy_n(next.values.begin(), MAX_LENGTH_COLOR_ROTATION, rotations->begin() + base);
+            }
             m_rotationSetIndex = next.set_index;
             if (m_framesList && next.frame_index == m_framesList->currentRow()) {
                 refreshRotationEditor();
@@ -10826,6 +12292,161 @@ int MainWindow::dynamicColorsPerSet(const std::vector<uint16_t>& colors) const
     return 16;
 }
 
+int MainWindow::serumDynamicStride() const
+{
+    int stride = m_noColors > 0 ? static_cast<int>(m_noColors) : 16;
+    if (m_serumDataLoaded && m_serumData.nocolors > 0) {
+        stride = static_cast<int>(m_serumData.nocolors);
+    }
+    stride = std::clamp(stride, 1, 16);
+    return stride;
+}
+
+const uint16_t* MainWindow::frameDynamicColorsData(int frameIndex, bool useHd, int* strideOut) const
+{
+    if (strideOut) {
+        *strideOut = 0;
+    }
+    if (frameIndex < 0 || frameIndex >= static_cast<int>(m_frameDynamicColors.size())) {
+        return nullptr;
+    }
+    const std::vector<uint16_t>& local = m_frameDynamicColors[static_cast<std::size_t>(frameIndex)];
+    if (!local.empty()) {
+        const int stride = dynamicColorsPerSet(local);
+        if (strideOut) {
+            *strideOut = stride;
+        }
+        return local.data();
+    }
+    if (!m_serumDataLoaded || frameIndex >= static_cast<int>(m_serumData.nframes)) {
+        return nullptr;
+    }
+    const uint32_t frameId = static_cast<uint32_t>(frameIndex);
+    const uint16_t* data = nullptr;
+    if (useHd && m_serumData.dyna4cols_v2_extra.hasData(frameId)) {
+        data = m_serumData.dyna4cols_v2_extra[frameId];
+    }
+    if (!data && m_serumData.dyna4cols_v2.hasData(frameId)) {
+        data = m_serumData.dyna4cols_v2[frameId];
+    }
+    if (!data) {
+        return nullptr;
+    }
+    if (strideOut) {
+        *strideOut = serumDynamicStride();
+    }
+    return data;
+}
+
+std::vector<uint16_t>* MainWindow::ensureFrameDynamicColorsLocal(int frameIndex, bool useHd)
+{
+    if (frameIndex < 0) {
+        return nullptr;
+    }
+    if (m_frameDynamicColors.size() <= static_cast<std::size_t>(frameIndex)) {
+        m_frameDynamicColors.resize(static_cast<std::size_t>(frameIndex) + 1);
+    }
+    std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(frameIndex)];
+    if (!colors.empty()) {
+        return &colors;
+    }
+    const int stride = serumDynamicStride();
+    const std::size_t size = static_cast<std::size_t>(MAX_DYNA_SETS_PER_FRAMEN) *
+        static_cast<std::size_t>(stride);
+    colors.assign(size, 0);
+    if (!m_serumDataLoaded || frameIndex >= static_cast<int>(m_serumData.nframes)) {
+        return &colors;
+    }
+    const uint32_t frameId = static_cast<uint32_t>(frameIndex);
+    const uint16_t* data = nullptr;
+    if (useHd && m_serumData.dyna4cols_v2_extra.hasData(frameId)) {
+        data = m_serumData.dyna4cols_v2_extra[frameId];
+    }
+    if (!data && m_serumData.dyna4cols_v2.hasData(frameId)) {
+        data = m_serumData.dyna4cols_v2[frameId];
+    }
+    if (data) {
+        std::copy_n(data, size, colors.begin());
+    }
+    return &colors;
+}
+
+std::size_t MainWindow::rotationBlockSize() const
+{
+    return static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
+}
+
+std::size_t MainWindow::rotationSetOffset(int setIndex) const
+{
+    return static_cast<std::size_t>(setIndex) * MAX_LENGTH_COLOR_ROTATION;
+}
+
+const uint16_t* MainWindow::rotationBlockForRead(int frameIndex, bool useHd) const
+{
+    if (frameIndex < 0) {
+        return nullptr;
+    }
+    const auto& localMap = useHd ? m_frameRotationsLocalX : m_frameRotationsLocal;
+    auto it = localMap.find(frameIndex);
+    if (it != localMap.end() && !it->second.empty()) {
+        return it->second.data();
+    }
+    if (!m_serumDataLoaded) {
+        const std::vector<uint16_t>& rotations = useHd ? m_frameRotationsX : m_frameRotations;
+        const std::size_t blockSize = rotationBlockSize();
+        const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize;
+        if (base + blockSize <= rotations.size()) {
+            return rotations.data() + base;
+        }
+        return nullptr;
+    }
+    if (frameIndex >= static_cast<int>(m_serumData.nframes)) {
+        return nullptr;
+    }
+    const uint32_t frameId = static_cast<uint32_t>(frameIndex);
+    if (useHd && m_serumData.colorrotations_v2_extra.hasData(frameId)) {
+        return m_serumData.colorrotations_v2_extra[frameId];
+    }
+    if (m_serumData.colorrotations_v2.hasData(frameId)) {
+        return m_serumData.colorrotations_v2[frameId];
+    }
+    return nullptr;
+}
+
+std::vector<uint16_t>* MainWindow::ensureRotationBlockLocal(int frameIndex, bool useHd)
+{
+    if (frameIndex < 0) {
+        return nullptr;
+    }
+    const std::size_t blockSize = rotationBlockSize();
+    if (!m_serumDataLoaded) {
+        std::vector<uint16_t>& rotations = useHd ? m_frameRotationsX : m_frameRotations;
+        const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize;
+        if (base + blockSize > rotations.size()) {
+            rotations.resize(base + blockSize, 0);
+        }
+        return rotations.empty() ? nullptr : &rotations;
+    }
+    const uint16_t* src = rotationBlockForRead(frameIndex, useHd);
+    auto& localMap = useHd ? m_frameRotationsLocalX : m_frameRotationsLocal;
+    auto [it, inserted] = localMap.emplace(frameIndex, std::vector<uint16_t>());
+    std::vector<uint16_t>& rotations = it->second;
+    if (!rotations.empty()) {
+        return &rotations;
+    }
+    rotations.assign(blockSize, 0);
+    if (src) {
+        std::copy_n(src, blockSize, rotations.begin());
+    }
+    return &rotations;
+}
+
+uint16_t* MainWindow::rotationBlockForEdit(int frameIndex, bool useHd)
+{
+    std::vector<uint16_t>* block = ensureRotationBlockLocal(frameIndex, useHd);
+    return block ? block->data() : nullptr;
+}
+
 QColor MainWindow::reducedSlotColor(int setIndex, int slot) const
 {
     if (setIndex < 0 || setIndex >= kReducedPaletteCount || slot < 0 || slot >= 16) {
@@ -10849,13 +12470,16 @@ QColor MainWindow::dynamicSlotColor(int slot) const
     if (frameIndex < 0 || frameIndex >= static_cast<int>(m_frameDynamicColors.size())) {
         return QColor(0, 0, 0);
     }
-    const std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(frameIndex)];
-    const int stride = dynamicColorsPerSet(colors);
+    const bool useHd = m_useHdFrame && hasHdFrame(frameIndex);
+    int stride = 0;
+    const uint16_t* colors = frameDynamicColorsData(frameIndex, useHd, &stride);
     if (stride <= 0 || slot >= stride) {
         return QColor(0, 0, 0);
     }
     const std::size_t offset = static_cast<std::size_t>(m_dynamicSetIndex) * stride + slot;
-    if (offset >= colors.size()) {
+    const std::size_t maxSize =
+        static_cast<std::size_t>(MAX_DYNA_SETS_PER_FRAMEN) * static_cast<std::size_t>(stride);
+    if (!colors || offset >= maxSize) {
         return QColor(0, 0, 0);
     }
     const uint16_t value = colors[offset];
@@ -10887,7 +12511,12 @@ void MainWindow::setDynamicSlotColor(int frameIndex, int setIndex, int slot, con
     if (setIndex < 0 || setIndex >= MAX_DYNA_SETS_PER_FRAMEN || slot < 0 || slot >= 16) {
         return;
     }
-    std::vector<uint16_t>& colors = m_frameDynamicColors[static_cast<std::size_t>(frameIndex)];
+    const bool useHd = m_useHdFrame && hasHdFrame(frameIndex);
+    std::vector<uint16_t>* colorsPtr = ensureFrameDynamicColorsLocal(frameIndex, useHd);
+    if (!colorsPtr) {
+        return;
+    }
+    std::vector<uint16_t>& colors = *colorsPtr;
     const int stride = dynamicColorsPerSet(colors);
     if (stride <= 0 || slot >= stride) {
         return;
@@ -11085,12 +12714,8 @@ void MainWindow::refreshRotationList()
         return;
     }
     const int frameIndex = m_framesList ? m_framesList->currentRow() : -1;
-    const std::size_t blockSize =
-        static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
-    std::vector<uint16_t>* rotations = nullptr;
-    if (frameIndex >= 0) {
-        rotations = (m_useHdFrame && hasHdFrame(frameIndex)) ? &m_frameRotationsX : &m_frameRotations;
-    }
+    const bool useHd = frameIndex >= 0 && m_useHdFrame && hasHdFrame(frameIndex);
+    const uint16_t* rotations = (frameIndex >= 0) ? rotationBlockForRead(frameIndex, useHd) : nullptr;
     QSignalBlocker delayBlocker(m_rotationDelaySpin);
     QSignalBlocker listBlocker(m_rotationList);
     m_rotationList->clear();
@@ -11098,17 +12723,16 @@ void MainWindow::refreshRotationList()
         m_rotationDelaySpin->setValue(0);
         return;
     }
-    const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize +
-        static_cast<std::size_t>(m_rotationSetIndex) * MAX_LENGTH_COLOR_ROTATION;
-    if (base + MAX_LENGTH_COLOR_ROTATION > rotations->size()) {
+    const std::size_t base = rotationSetOffset(m_rotationSetIndex);
+    if (base + MAX_LENGTH_COLOR_ROTATION > rotationBlockSize()) {
         m_rotationDelaySpin->setValue(0);
         return;
     }
-    const uint16_t length = (*rotations)[base];
-    const uint16_t delay = (*rotations)[base + 1];
+    const uint16_t length = rotations[base];
+    const uint16_t delay = rotations[base + 1];
     m_rotationDelaySpin->setValue(delay);
     for (uint16_t i = 0; i < length; ++i) {
-        const uint16_t value = (*rotations)[base + 2 + i];
+        const uint16_t value = rotations[base + 2 + i];
         const cv::Vec3b bgr = Rgb565ToBgr(value);
         QPixmap pixmap(kPaletteSwatchSize, kPaletteSwatchSize);
         pixmap.fill(QColor::fromRgb(bgr[2], bgr[1], bgr[0]));
@@ -11133,13 +12757,10 @@ void MainWindow::updateRotationDelay(int delayMs)
     if (frameIndex < 0) {
         return;
     }
-    const std::size_t blockSize =
-        static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
-    const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize +
-        static_cast<std::size_t>(m_rotationSetIndex) * MAX_LENGTH_COLOR_ROTATION;
     const bool useHd = m_useHdFrame && hasHdFrame(frameIndex);
-    std::vector<uint16_t>& rotations = useHd ? m_frameRotationsX : m_frameRotations;
-    if (base + MAX_LENGTH_COLOR_ROTATION > rotations.size()) {
+    uint16_t* rotations = rotationBlockForEdit(frameIndex, useHd);
+    const std::size_t base = rotationSetOffset(m_rotationSetIndex);
+    if (!rotations || base + MAX_LENGTH_COLOR_ROTATION > rotationBlockSize()) {
         return;
     }
     const uint16_t clamped = static_cast<uint16_t>(std::clamp(delayMs, 0, 60000));
@@ -11160,14 +12781,10 @@ void MainWindow::updateRotationDataFromList()
     if (frameIndex < 0) {
         return;
     }
-    const std::size_t blockSize =
-        static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
-    const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize +
-        static_cast<std::size_t>(m_rotationSetIndex) * MAX_LENGTH_COLOR_ROTATION;
-    std::vector<uint16_t>& rotations = (m_useHdFrame && hasHdFrame(frameIndex))
-        ? m_frameRotationsX
-        : m_frameRotations;
-    if (base + MAX_LENGTH_COLOR_ROTATION > rotations.size()) {
+    const bool useHd = m_useHdFrame && hasHdFrame(frameIndex);
+    uint16_t* rotations = rotationBlockForEdit(frameIndex, useHd);
+    const std::size_t base = rotationSetOffset(m_rotationSetIndex);
+    if (!rotations || base + MAX_LENGTH_COLOR_ROTATION > rotationBlockSize()) {
         return;
     }
     const int count = std::min(m_rotationList->count(), MAX_LENGTH_COLOR_ROTATION - 2);
@@ -11559,7 +13176,9 @@ void MainWindow::refreshBackgroundList()
         const bool hasHd = hasHdBackground(i);
         cv::Mat hd;
         if (hasHd) {
-            hd = m_backgroundFramesX[static_cast<std::size_t>(i)];
+            if (cv::Mat* local = ensureHdBackgroundLocal(i)) {
+                hd = *local;
+            }
         }
         const QColor gap = m_backgroundList->palette().color(QPalette::Window);
         cv::Mat previewMat = BuildBackgroundPreview(*image,
@@ -11904,8 +13523,10 @@ void MainWindow::refreshSpriteZoneSpritesList()
             continue;
         }
         cv::Mat hd;
-        if (spriteIndex >= 0 && spriteIndex < static_cast<int>(m_spriteColoredX.size())) {
-            hd = m_spriteColoredX[static_cast<std::size_t>(spriteIndex)];
+        if (spriteIndex >= 0) {
+            if (const cv::Mat* hdSprite = const_cast<MainWindow*>(this)->ensureHdSpriteLocal(spriteIndex)) {
+                hd = *hdSprite;
+            }
         }
         cv::Mat previewMat = BuildBackgroundPreview(*sprite,
                                                     hd,
@@ -11983,6 +13604,9 @@ void MainWindow::refreshFrameSpriteSlotCombo()
 
 void MainWindow::refreshFrameSpriteLists()
 {
+    if (m_isLoadingProject) {
+        return;
+    }
     const int frameSelection = m_framesList ? m_framesList->currentRow() : -1;
     const int spriteSelection = m_spritesList ? m_spritesList->currentRow() : -1;
     m_framesList->clear();
@@ -12013,13 +13637,18 @@ void MainWindow::refreshFrameSpriteLists()
         }
         updateHdControlsForContext();
     } else {
-        while (m_frameStore->count() < m_state->frames().size()) {
-            m_frameStore->add(MakePlaceholderImage(kDefaultFrameWidth, kDefaultFrameHeight,
-                                                   cv::Scalar(18, 18, 18),
-                                                   cv::Scalar(55, 55, 55)));
-        }
-        while (m_frameStore->count() > m_state->frames().size()) {
-            m_frameStore->removeAt(m_frameStore->count() - 1);
+        if (m_serumDataLoaded) {
+            m_frameStore->setCount(m_state->frames().size());
+            m_serumData.nframes = static_cast<uint32_t>(m_frameStore->count());
+        } else {
+            while (m_frameStore->count() < m_state->frames().size()) {
+                m_frameStore->add(MakePlaceholderImage(kDefaultFrameWidth, kDefaultFrameHeight,
+                                                       cv::Scalar(18, 18, 18),
+                                                       cv::Scalar(55, 55, 55)));
+            }
+            while (m_frameStore->count() > m_state->frames().size()) {
+                m_frameStore->removeAt(m_frameStore->count() - 1);
+            }
         }
         const QColor gap = m_framesList->palette().color(QPalette::Window);
         const QStringList frameNames = m_state->frames();
@@ -12035,9 +13664,11 @@ void MainWindow::refreshFrameSpriteLists()
             }
         }
         for (int i = 0; i < frameNames.size(); ++i) {
-            const cv::Mat* image = m_frameStore->at(i);
-            if (!image || image->empty()) {
-                continue;
+            if (!m_serumDataLoaded) {
+                const cv::Mat* image = m_frameStore->at(i);
+                if (!image || image->empty()) {
+                    continue;
+                }
             }
             cv::Mat composed = renderFrameWithSerum(i, false);
             cv::Mat hdComposed;
@@ -12100,14 +13731,16 @@ void MainWindow::refreshFrameSpriteLists()
     if (m_frameExtraFlags.size() != static_cast<std::size_t>(frameCount)) {
         m_frameExtraFlags.resize(static_cast<std::size_t>(frameCount), 0);
     }
-    const std::size_t rotationBlockSize =
-        static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
-    const std::size_t rotationSize = static_cast<std::size_t>(frameCount) * rotationBlockSize;
-    if (m_frameRotations.size() != rotationSize) {
-        m_frameRotations.resize(rotationSize, 0);
-    }
-    if (m_frameRotationsX.size() != rotationSize) {
-        m_frameRotationsX.resize(rotationSize, 0);
+    if (!m_serumDataLoaded) {
+        const std::size_t rotationBlockSize =
+            static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
+        const std::size_t rotationSize = static_cast<std::size_t>(frameCount) * rotationBlockSize;
+        if (m_frameRotations.size() != rotationSize) {
+            m_frameRotations.resize(rotationSize, 0);
+        }
+        if (m_frameRotationsX.size() != rotationSize) {
+            m_frameRotationsX.resize(rotationSize, 0);
+        }
     }
     }
 
@@ -12149,8 +13782,10 @@ void MainWindow::refreshFrameSpriteLists()
                 continue;
             }
             cv::Mat hd;
-            if (i >= 0 && i < static_cast<int>(m_spriteColoredX.size())) {
-                hd = m_spriteColoredX[static_cast<std::size_t>(i)];
+            if (i >= 0) {
+                if (const cv::Mat* hdSprite = ensureHdSpriteLocal(i)) {
+                    hd = *hdSprite;
+                }
             }
             cv::Mat previewMat = BuildBackgroundPreview(*image,
                                                         hd,
@@ -12486,12 +14121,9 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
             }
             const bool useHd = m_useHdFrame && hasHdFrame(frameIndex);
             pushRotationUndoSnapshot(frameIndex, m_rotationSetIndex, useHd);
-            const std::size_t blockSize =
-                static_cast<std::size_t>(MAX_COLOR_ROTATIONN) * MAX_LENGTH_COLOR_ROTATION;
-            const std::size_t base = static_cast<std::size_t>(frameIndex) * blockSize +
-                static_cast<std::size_t>(m_rotationSetIndex) * MAX_LENGTH_COLOR_ROTATION;
-            std::vector<uint16_t>& rotations = useHd ? m_frameRotationsX : m_frameRotations;
-            if (base + MAX_LENGTH_COLOR_ROTATION > rotations.size()) {
+            uint16_t* rotations = rotationBlockForEdit(frameIndex, useHd);
+            const std::size_t base = rotationSetOffset(m_rotationSetIndex);
+            if (!rotations || base + MAX_LENGTH_COLOR_ROTATION > rotationBlockSize()) {
                 return;
             }
             const uint16_t length = rotations[base];
@@ -12750,6 +14382,9 @@ void MainWindow::showImageForPath(const QString& path)
 
 void MainWindow::showFrameAtIndex(int index)
 {
+    if (m_isLoadingProject) {
+        return;
+    }
     const cv::Mat* image = m_frameStore->at(index);
     if (image && !image->empty()) {
         m_framesCanvas->canvas()->clearPreviewImage();
@@ -12807,9 +14442,10 @@ void MainWindow::showFrameAtIndex(int index)
 
 void MainWindow::showSpriteAtIndex(int index)
 {
-    const bool hasHd = index >= 0 &&
-        index < static_cast<int>(m_spriteColoredX.size()) &&
-        !m_spriteColoredX[static_cast<std::size_t>(index)].empty();
+    if (m_isLoadingProject) {
+        return;
+    }
+    const bool hasHd = hasHdSprite(index);
     if (!hasHd && m_useHdSprite) {
         m_useHdSprite = false;
     }
@@ -12847,6 +14483,9 @@ void MainWindow::showSpriteAtIndex(int index)
 
 void MainWindow::showBackgroundAtIndex(int index)
 {
+    if (m_isLoadingProject) {
+        return;
+    }
     if (!m_backgroundsCanvas) {
         return;
     }
@@ -12907,6 +14546,179 @@ void MainWindow::updateProjectLabelHeight()
     const int height = std::max(bounds.height(), metrics.lineSpacing());
     m_projectLabel->setFixedHeight(height + 2);
     m_projectLabel->updateGeometry();
+}
+
+bool MainWindow::setupSerumData(const QString& cromcPath,
+                                const LegacyProject& legacy,
+                                std::string* error)
+{
+    m_serumData.Clear();
+    m_serumDataLoaded = false;
+    if (!cromcPath.isEmpty() && QFileInfo::exists(cromcPath)) {
+        const uint8_t flags = FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
+        if (m_serumData.LoadFromFile(cromcPath.toStdString().c_str(), flags)) {
+            m_serumDataLoaded = true;
+            return true;
+        }
+    }
+    if (!BuildConcentrateData(legacy, m_serumData, error)) {
+        return false;
+    }
+    m_serumDataLoaded = true;
+    return true;
+}
+
+void MainWindow::configureFrameStoreAdapter()
+{
+    if (!m_frameStore) {
+        return;
+    }
+    if (!m_serumDataLoaded) {
+        m_frameStore->setAdapter({}, {}, {});
+        m_frameStore->setCount(-1);
+        return;
+    }
+    m_frameStore->setCacheLimit(64);
+    m_frameStore->setAdapter({}, [this](int index) -> cv::Mat {
+        if (!m_serumDataLoaded || index < 0 || index >= static_cast<int>(m_serumData.nframes)) {
+            return cv::Mat();
+        }
+        const uint16_t* data = m_serumData.cframes_v2[static_cast<uint32_t>(index)];
+        if (!data) {
+            return cv::Mat();
+        }
+        if (m_serumData.fwidth == 0 || m_serumData.fheight == 0) {
+            return cv::Mat();
+        }
+        return ConvertRgb565ToBgrMat(data,
+                                     static_cast<int>(m_serumData.fwidth),
+                                     static_cast<int>(m_serumData.fheight));
+    }, [this](int index, const cv::Mat& image) {
+        commitFrameToSerum(index, image, false);
+    });
+    m_frameStore->setCount(static_cast<int>(m_serumData.nframes));
+}
+
+void MainWindow::configureSpriteStoreAdapter()
+{
+    if (!m_spriteStore) {
+        return;
+    }
+    if (!m_serumDataLoaded) {
+        m_spriteStore->setAdapter({}, {}, {});
+        m_spriteStore->setCount(-1);
+        return;
+    }
+    m_spriteStore->setCacheLimit(32);
+    m_spriteStore->setAdapter({}, [this](int index) -> cv::Mat {
+        if (!m_serumDataLoaded || index < 0 || index >= static_cast<int>(m_serumData.nsprites)) {
+            return cv::Mat();
+        }
+        const uint16_t* data = m_serumData.spritecolored[static_cast<uint32_t>(index)];
+        if (!data) {
+            return cv::Mat();
+        }
+        const QSize spriteSize = serumSpriteBaseSize();
+        if (spriteSize.isEmpty()) {
+            return cv::Mat();
+        }
+        return ConvertRgb565ToBgrMat(data, spriteSize.width(), spriteSize.height());
+    }, [this](int index, const cv::Mat& image) {
+        if (!m_serumDataLoaded || index < 0 || image.empty()) {
+            return;
+        }
+        const std::vector<uint16_t> sprite565 = ConvertBgrMatToRgb565(image);
+        m_serumData.spritecolored.set(static_cast<uint32_t>(index),
+                                      sprite565.data(),
+                                      sprite565.size());
+    });
+    m_spriteStore->setCount(static_cast<int>(m_serumData.nsprites));
+}
+
+void MainWindow::configureBackgroundStoreAdapter()
+{
+    if (!m_backgroundStore) {
+        return;
+    }
+    if (!m_serumDataLoaded) {
+        m_backgroundStore->setAdapter({}, {}, {});
+        m_backgroundStore->setCount(-1);
+        return;
+    }
+    m_backgroundStore->setCacheLimit(16);
+    m_backgroundStore->setAdapter({}, [this](int index) -> cv::Mat {
+        if (!m_serumDataLoaded || index < 0 || index >= static_cast<int>(m_serumData.nbackgrounds)) {
+            return cv::Mat();
+        }
+        const uint16_t* data = m_serumData.backgroundframes_v2[static_cast<uint32_t>(index)];
+        if (!data || m_serumData.fwidth == 0 || m_serumData.fheight == 0) {
+            return cv::Mat();
+        }
+        return ConvertRgb565ToBgrMat(data,
+                                     static_cast<int>(m_serumData.fwidth),
+                                     static_cast<int>(m_serumData.fheight));
+    }, [this](int index, const cv::Mat& image) {
+        if (!m_serumDataLoaded || index < 0 || image.empty()) {
+            return;
+        }
+        const std::vector<uint16_t> bg565 = ConvertBgrMatToRgb565(image);
+        m_serumData.backgroundframes_v2.set(static_cast<uint32_t>(index),
+                                            bg565.data(),
+                                            bg565.size());
+    });
+    m_backgroundStore->setCount(static_cast<int>(m_serumData.nbackgrounds));
+}
+
+void MainWindow::commitFrameEdits(const std::vector<int>& indices, bool useHd)
+{
+    if (!m_serumDataLoaded) {
+        return;
+    }
+    for (int index : indices) {
+        commitFrameFromStore(index, useHd);
+    }
+}
+
+void MainWindow::commitFrameToSerum(int index, const cv::Mat& image, bool useHd)
+{
+    if (!m_serumDataLoaded || index < 0 || image.empty()) {
+        return;
+    }
+    const int width = image.cols;
+    const int height = image.rows;
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+    std::vector<uint16_t> frame565 = ConvertBgrMatToRgb565(image);
+    if (useHd) {
+        const uint8_t extra = 1;
+        m_serumData.isextraframe.setIndex(static_cast<uint32_t>(index), &extra, 1);
+        m_serumData.cframes_v2_extra.set(static_cast<uint32_t>(index),
+                                         frame565.data(),
+                                         frame565.size(),
+                                         &m_serumData.isextraframe);
+    } else {
+        m_serumData.cframes_v2.set(static_cast<uint32_t>(index), frame565.data(), frame565.size());
+    }
+}
+
+void MainWindow::commitFrameFromStore(int index, bool useHd)
+{
+    if (!m_serumDataLoaded || index < 0) {
+        return;
+    }
+    if (!useHd) {
+        if (m_frameStore) {
+            m_frameStore->flushIndex(index);
+        }
+        return;
+    }
+    if (index >= 0 && index < static_cast<int>(m_frameExtraFrames.size())) {
+        const cv::Mat& image = m_frameExtraFrames[static_cast<std::size_t>(index)];
+        if (!image.empty()) {
+            commitFrameToSerum(index, image, true);
+        }
+    }
 }
 
 void MainWindow::handleToolPress(bool isFrame,
@@ -13397,6 +15209,7 @@ void MainWindow::handleToolPress(bool isFrame,
                         continue;
                     }
                     applyToolToImage(*target, DrawTool::Point, mapped, mapped, button == Qt::RightButton);
+                    commitFrameFromStore(frameIndex, m_useHdFrame);
                     updateFramePreviewAt(frameIndex);
                 }
             } else {
@@ -13422,6 +15235,7 @@ void MainWindow::handleToolPress(bool isFrame,
                     if (!spriteMask.empty()) {
                         restoreSpriteCoverage(*target, backup, spriteMask);
                     }
+                    commitFrameFromStore(frameIndex, m_useHdFrame);
                     updateFramePreviewAt(frameIndex);
                 }
             } else {
@@ -14593,6 +16407,7 @@ void MainWindow::handleToolRelease(bool isFrame,
             if (!spriteMask.empty()) {
                 restoreSpriteCoverage(*target, backup, spriteMask);
             }
+            commitFrameFromStore(frameIndex, m_useHdFrame);
             updateFramePreviewAt(frameIndex);
         }
         m_framesCanvas->canvas()->clearPreviewImage();
@@ -14924,7 +16739,10 @@ void MainWindow::applySpriteFilter(const QString& text)
 void MainWindow::updateFrameJumpRange()
 {
     const int count = m_framesList->count();
-    if (count <= 0 || (count == 1 && m_framesList->item(0)->text().startsWith("No frames"))) {
+    const QListWidgetItem* firstItem = (m_framesList && m_framesList->count() > 0)
+        ? m_framesList->item(0)
+        : nullptr;
+    if (count <= 0 || (count == 1 && firstItem && firstItem->text().startsWith("No frames"))) {
         m_frameJump->setEnabled(false);
         m_frameJump->setRange(0, 0);
         m_frameJump->setValue(0);
@@ -14932,4 +16750,46 @@ void MainWindow::updateFrameJumpRange()
     }
     m_frameJump->setEnabled(true);
     m_frameJump->setRange(0, std::max(0, count - 1));
+    m_frameJump->setValue(std::min(m_frameJump->value(), m_frameJump->maximum()));
 }
+namespace {
+bool EnsureConcentrateExists(const QString& cromPath,
+                             const QString& cromcPath,
+                             QString* errorMessage)
+{
+    if (QFileInfo::exists(cromcPath)) {
+        return true;
+    }
+    if (cromPath.isEmpty() || !QFileInfo::exists(cromPath)) {
+        if (errorMessage) {
+            *errorMessage = "Missing .cROM to generate .cROMc";
+        }
+        return false;
+    }
+
+    const QFileInfo cromInfo(cromPath);
+    const QString romName = cromInfo.completeBaseName();
+    const QString altcolorDir = cromPath;
+
+    Serum_SetGenerateCRomC(true);
+    const uint8_t flags = FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
+    Serum_Frame_Struc* frame = Serum_Load(altcolorDir.toUtf8().constData(),
+                                          romName.toUtf8().constData(),
+                                          flags);
+    (void)frame;
+    Serum_Dispose();
+    Serum_SetGenerateCRomC(false);
+
+    if (!QFileInfo::exists(cromcPath)) {
+        if (errorMessage) {
+            *errorMessage = QString("Failed to generate .cROMc from .cROM. "
+                                    "altcolor='%1' rom='%2' frame=0x%3")
+                                .arg(altcolorDir,
+                                     romName,
+                                     QString::number(reinterpret_cast<quintptr>(frame), 16));
+        }
+        return false;
+    }
+    return true;
+}
+}  // namespace

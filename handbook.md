@@ -2,6 +2,10 @@
 
 This handbook captures editor behaviors and workflows that differ from the legacy app. It is meant to be updated as new features land.
 
+## Performance Notes
+
+- Large projects load frame data on demand; the first time you open a frame or run a full save, expect a short delay while data is decoded.
+
 ## Navigation and Selection
 
 - Use the back/forward buttons (`<`/`>`) on each canvas to jump through recently viewed frames, sprites, images, and backgrounds.
@@ -123,5 +127,7 @@ This handbook captures editor behaviors and workflows that differ from the legac
 ## Open/Save and Legacy Compatibility
 
 - Legacy cROM/cROMc project load/save is supported.
+- When a `.cROMc` exists next to a `.cROM`, the editor loads frame data from the `.cROMc` while still reading editor metadata from the `.cRP`.
+- Saving a legacy project also writes/updates the matching `.cROMc`.
 - “Open Recent” persists across app restarts.
 - The editor targets Serum V2 while preserving legacy file compatibility.
