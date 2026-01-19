@@ -1173,6 +1173,7 @@ MainWindow::MainWindow(QWidget* parent)
         }
     });
     connect(newAction, &QAction::triggered, this, [this]() {
+        stopPlayback();
         m_state->newProject();
         m_imageStore->clear();
         m_frameStore->clear();
@@ -1469,6 +1470,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_spritesCanvas->setMaskButtonToolTip("Edit sprite detection areas");
     m_imagesCanvas = new CanvasWidget("Images canvas (placeholder)", tabs);
     m_backgroundsCanvas = new CanvasWidget("Backgrounds canvas (placeholder)", tabs);
+    m_playbackCanvas = new CanvasWidget("Playback canvas (placeholder)", tabs);
     m_framesCanvas->addAction(cancelDrawAction);
     m_spritesCanvas->addAction(cancelDrawAction);
     m_backgroundsCanvas->addAction(cancelDrawAction);
@@ -1488,15 +1490,65 @@ MainWindow::MainWindow(QWidget* parent)
     m_spritesCanvas->setBackgroundVisible(false);
     m_imagesCanvas->setBackgroundVisible(false);
     m_backgroundsCanvas->setBackgroundVisible(false);
+    m_playbackCanvas->setMaskButtonsVisible(false);
+    m_playbackCanvas->setZoneButtonVisible(false);
+    m_playbackCanvas->setBackgroundVisible(false);
+    m_playbackCanvas->setBackgroundMaskVisible(false);
+    m_playbackCanvas->setOriginalVisible(true);
+    m_playbackCanvas->setHdButtonEnabled(false);
+    m_playbackCanvas->setRotateEnabled(false);
     m_backgroundsCanvas->setHdButtonEnabled(true);
     m_framesCanvas->setRotateEnabled(true);
     m_spritesCanvas->setRotateEnabled(false);
     m_imagesCanvas->setRotateEnabled(false);
     m_backgroundsCanvas->setRotateEnabled(false);
+    m_playbackTab = new QWidget(tabs);
+    auto* playbackLayout = new QVBoxLayout(m_playbackTab);
+    playbackLayout->setContentsMargins(0, 0, 0, 0);
+    playbackLayout->setSpacing(6);
+    playbackLayout->addWidget(m_playbackCanvas, 1);
+    auto* playbackControls = new QWidget(m_playbackTab);
+    auto* playbackControlsLayout = new QHBoxLayout(playbackControls);
+    playbackControlsLayout->setContentsMargins(0, 0, 0, 0);
+    playbackControlsLayout->setSpacing(8);
+    m_previewRewindButton = new QToolButton(playbackControls);
+    m_previewRewindButton->setText("Rew");
+    m_previewRewindButton->setToolTip("Jump back 10 frames while playing");
+    m_previewPrevButton = new QToolButton(playbackControls);
+    m_previewPrevButton->setText("Prev");
+    m_previewPrevButton->setToolTip("Step to previous frame");
+    m_previewPlayButton = new QToolButton(playbackControls);
+    m_previewPlayButton->setText("Play");
+    m_previewPlayButton->setToolTip("Play selected frames or full ROM");
+    m_previewStopButton = new QToolButton(playbackControls);
+    m_previewStopButton->setText("Stop");
+    m_previewStopButton->setToolTip("Stop playback");
+    m_previewPauseButton = new QToolButton(playbackControls);
+    m_previewPauseButton->setText("Pause");
+    m_previewPauseButton->setToolTip("Pause playback");
+    m_previewNextButton = new QToolButton(playbackControls);
+    m_previewNextButton->setText("Next");
+    m_previewNextButton->setToolTip("Step to next frame");
+    m_previewFastForwardButton = new QToolButton(playbackControls);
+    m_previewFastForwardButton->setText("Fwd");
+    m_previewFastForwardButton->setToolTip("Jump forward 10 frames while playing");
+    playbackControlsLayout->addStretch(1);
+    playbackControlsLayout->addWidget(m_previewRewindButton);
+    playbackControlsLayout->addWidget(m_previewPrevButton);
+    playbackControlsLayout->addWidget(m_previewPlayButton);
+    playbackControlsLayout->addWidget(m_previewPauseButton);
+    playbackControlsLayout->addWidget(m_previewStopButton);
+    playbackControlsLayout->addWidget(m_previewNextButton);
+    playbackControlsLayout->addWidget(m_previewFastForwardButton);
+    playbackControlsLayout->addStretch(1);
+    playbackControls->setLayout(playbackControlsLayout);
+    playbackLayout->addWidget(playbackControls, 0, Qt::AlignHCenter);
+    m_playbackTab->setLayout(playbackLayout);
     tabs->addTab(m_framesCanvas, "Frames");
     tabs->addTab(m_spritesCanvas, "Sprites");
     tabs->addTab(m_imagesCanvas, "Images");
     tabs->addTab(m_backgroundsCanvas, "Backgrounds");
+    tabs->addTab(m_playbackTab, "Playback");
     setCentralWidget(tabs);
     connect(tabs, &QTabWidget::currentChanged, this, [this](int) {
         updateUndoActions();
@@ -2459,8 +2511,10 @@ MainWindow::MainWindow(QWidget* parent)
     viewMenu->addAction(previewDock->toggleViewAction());
 
     auto* handbookAction = new QAction("&Handbook", this);
+    auto* copyLogAction = new QAction("&Copy Log", this);
     auto* aboutAction = new QAction("&About", this);
     helpMenu->addAction(handbookAction);
+    helpMenu->addAction(copyLogAction);
     helpMenu->addAction(aboutAction);
     connect(handbookAction, &QAction::triggered, this, [this]() {
         QFile file(":/docs/handbook.md");
@@ -2479,6 +2533,19 @@ MainWindow::MainWindow(QWidget* parent)
         layout->addWidget(viewer);
         dialog->setLayout(layout);
         dialog->show();
+    });
+    connect(copyLogAction, &QAction::triggered, this, [this]() {
+        if (m_logPath.isEmpty()) {
+            QMessageBox::warning(this, "Copy Log", "No log file path configured.");
+            return;
+        }
+        QFile file(m_logPath);
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QMessageBox::warning(this, "Copy Log", "Unable to open the log file.");
+            return;
+        }
+        QGuiApplication::clipboard()->setText(QString::fromUtf8(file.readAll()));
+        logLine("Log copied from Help menu");
     });
     connect(aboutAction, &QAction::triggered, this, [this]() {
         const QString appName = QCoreApplication::applicationName().isEmpty()
@@ -3506,6 +3573,9 @@ MainWindow::MainWindow(QWidget* parent)
         if (frameIndex < 0 || frameIndex >= m_framesList->count()) {
             return;
         }
+        if (m_playbackActive) {
+            jumpPlayback(frameIndex);
+        }
         if (m_previewSelectedFrames.size() > 1 &&
             std::find(m_previewSelectedFrames.begin(),
                       m_previewSelectedFrames.end(),
@@ -4025,6 +4095,9 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_backgroundsCanvas, &CanvasWidget::fitRequested, this, [this]() {
         m_backgroundsCanvas->canvas()->requestFitOnResize(true);
     });
+    connect(m_playbackCanvas, &CanvasWidget::fitRequested, this, [this]() {
+        m_playbackCanvas->canvas()->requestFitOnResize(true);
+    });
     connect(m_backgroundsCanvas, &CanvasWidget::backRequested, this, [this]() {
         navigateHistory(m_backgroundHistory, m_backgroundList, false);
     });
@@ -4045,6 +4118,9 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(m_backgroundsCanvas, &CanvasWidget::gridToggled, this, [this](bool enabled) {
         m_backgroundsCanvas->canvas()->setGridEnabled(enabled);
+    });
+    connect(m_playbackCanvas, &CanvasWidget::gridToggled, this, [this](bool enabled) {
+        m_playbackCanvas->canvas()->setGridEnabled(enabled);
     });
     connect(m_framesCanvas, &CanvasWidget::maskToggled, this, [this](bool enabled) {
         if (enabled) {
@@ -4095,6 +4171,12 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_spritesCanvas, &CanvasWidget::originalToggled, this, [this](bool enabled) {
         m_showSpriteOriginal = enabled;
         updateSpriteCanvasImage(m_spritesList ? m_spritesList->currentRow() : -1);
+    });
+    connect(m_playbackCanvas, &CanvasWidget::originalToggled, this, [this](bool enabled) {
+        m_playbackShowOriginal = enabled;
+        if (m_playbackActive) {
+            renderPlaybackFrame();
+        }
     });
     connect(m_framesCanvas, &CanvasWidget::hdToggled, this, [this](bool enabled) {
         setHdMode(enabled);
@@ -4157,6 +4239,33 @@ MainWindow::MainWindow(QWidget* parent)
         }
         refreshFramePreviews();
     });
+    connect(m_previewPlayButton, &QToolButton::clicked, this, [this]() {
+        if (!m_playbackActive) {
+            startPlayback();
+        } else if (m_playbackPaused) {
+            resumePlayback();
+        } else {
+            pausePlayback();
+        }
+    });
+    connect(m_previewStopButton, &QToolButton::clicked, this, [this]() {
+        stopPlayback();
+    });
+    connect(m_previewPauseButton, &QToolButton::clicked, this, [this]() {
+        pausePlayback();
+    });
+    connect(m_previewPrevButton, &QToolButton::clicked, this, [this]() {
+        stepPlayback(-1);
+    });
+    connect(m_previewNextButton, &QToolButton::clicked, this, [this]() {
+        stepPlayback(1);
+    });
+    connect(m_previewRewindButton, &QToolButton::clicked, this, [this]() {
+        stepPlayback(-10);
+    });
+    connect(m_previewFastForwardButton, &QToolButton::clicked, this, [this]() {
+        stepPlayback(10);
+    });
     connect(m_previewRefreshButton, &QToolButton::clicked, this, [this]() {
         refreshAllPreviews();
     });
@@ -4171,6 +4280,11 @@ MainWindow::MainWindow(QWidget* parent)
         refreshFramePreviews();
         schedulePreviewRotationUpdate();
     });
+    m_playbackTimer = new QTimer(this);
+    m_playbackTimer->setSingleShot(true);
+    connect(m_playbackTimer, &QTimer::timeout, this, [this]() {
+        schedulePlaybackTick();
+    });
     m_previewSelectionTimer = new QTimer(this);
     m_previewSelectionTimer->setSingleShot(true);
     connect(m_previewSelectionTimer, &QTimer::timeout, this, [this]() {
@@ -4179,6 +4293,7 @@ MainWindow::MainWindow(QWidget* parent)
             refreshFramePreviews();
         }
     });
+    updatePlaybackButtons();
     m_paletteBlinkTimer = new QTimer(this);
     m_paletteBlinkTimer->setInterval(350);
     connect(m_paletteBlinkTimer, &QTimer::timeout, this, [this]() {
@@ -4469,7 +4584,14 @@ void MainWindow::openProjectFile(const QString& filename)
     if (filename.isEmpty()) {
         return;
     }
+    if (!m_uiReady) {
+        QTimer::singleShot(150, this, [this, filename]() {
+            openProjectFile(filename);
+        });
+        return;
+    }
     logLine(QString("Open project: %1").arg(filename));
+    stopPlayback();
     QScopedValueRollback<bool> loadGuard(m_isLoadingProject, true);
     const QFileInfo info(filename);
     const QString suffix = info.suffix().toLower();
@@ -5437,6 +5559,338 @@ std::vector<int> MainWindow::targetFrameIndices() const
     return indices;
 }
 
+std::vector<int> MainWindow::playbackFrameIndices() const
+{
+    std::vector<int> indices = selectedPreviewFrameIndices();
+    if (indices.empty() && !m_previewSelectedFrames.empty()) {
+        indices = m_previewSelectedFrames;
+    }
+    if (indices.size() >= 2) {
+        return indices;
+    }
+    const int count = static_cast<int>(m_frameDurations.size());
+    if (count <= 0) {
+        return {};
+    }
+    indices.reserve(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        indices.push_back(i);
+    }
+    return indices;
+}
+
+void MainWindow::startPlayback()
+{
+    stopPlayback();
+    const std::vector<int> selected = selectedPreviewFrameIndices();
+    const std::vector<int> fallbackSelected = selected.empty() ? m_previewSelectedFrames : selected;
+    const bool multiSelect = fallbackSelected.size() >= 2;
+    if (multiSelect) {
+        m_playbackFrames = fallbackSelected;
+    } else {
+        m_playbackFrames = playbackFrameIndices();
+    }
+    if (m_playbackFrames.empty()) {
+        return;
+    }
+    const int current = m_framesList ? m_framesList->currentRow() : -1;
+    int startIndex = m_playbackFrames.front();
+    if (!fallbackSelected.empty() && fallbackSelected.size() == 1) {
+        startIndex = fallbackSelected.front();
+    } else if (current >= 0) {
+        const auto it = std::find(m_playbackFrames.begin(), m_playbackFrames.end(), current);
+        if (it != m_playbackFrames.end()) {
+            startIndex = current;
+        }
+    }
+    const auto startIt = std::find(m_playbackFrames.begin(), m_playbackFrames.end(), startIndex);
+    m_playbackPos = startIt != m_playbackFrames.end()
+        ? static_cast<int>(std::distance(m_playbackFrames.begin(), startIt))
+        : 0;
+    m_playbackActive = true;
+    m_playbackPaused = false;
+    if (m_canvasTabs && m_playbackTab) {
+        m_canvasTabs->setCurrentWidget(m_playbackTab);
+    }
+    renderPlaybackFrame();
+    updatePlaybackButtons();
+}
+
+void MainWindow::pausePlayback()
+{
+    if (!m_playbackActive || m_playbackPaused) {
+        return;
+    }
+    m_playbackPaused = true;
+    if (m_playbackTimer) {
+        m_playbackTimer->stop();
+    }
+    updatePlaybackButtons();
+}
+
+void MainWindow::resumePlayback()
+{
+    if (!m_playbackActive || !m_playbackPaused) {
+        return;
+    }
+    m_playbackPaused = false;
+    schedulePlaybackTick();
+    updatePlaybackButtons();
+}
+
+void MainWindow::stopPlayback()
+{
+    if (m_playbackTimer) {
+        m_playbackTimer->stop();
+    }
+    m_playbackActive = false;
+    m_playbackPaused = false;
+    m_playbackFrames.clear();
+    m_playbackPos = -1;
+    m_playbackFrameIndex = -1;
+    m_playbackRotationData = nullptr;
+    m_playbackBase565.clear();
+    m_playbackRotationMask.clear();
+    m_playbackStaticFrame.release();
+    m_playbackOriginalPreview.release();
+    updatePlaybackButtons();
+}
+
+void MainWindow::stepPlayback(int delta)
+{
+    if (delta == 0) {
+        return;
+    }
+    if (m_playbackFrames.empty()) {
+        m_playbackFrames = playbackFrameIndices();
+    }
+    if (m_playbackFrames.empty()) {
+        return;
+    }
+    int pos = m_playbackPos;
+    if (pos < 0) {
+        const int current = m_framesList ? m_framesList->currentRow() : -1;
+        const auto it = std::find(m_playbackFrames.begin(), m_playbackFrames.end(), current);
+        pos = it != m_playbackFrames.end()
+            ? static_cast<int>(std::distance(m_playbackFrames.begin(), it))
+            : 0;
+    }
+    pos += delta;
+    if (pos < 0) {
+        pos = 0;
+    } else if (pos >= static_cast<int>(m_playbackFrames.size())) {
+        pos = static_cast<int>(m_playbackFrames.size()) - 1;
+    }
+    m_playbackPos = pos;
+    m_playbackActive = true;
+    m_playbackPaused = true;
+    if (m_playbackTimer) {
+        m_playbackTimer->stop();
+    }
+    if (m_canvasTabs && m_playbackTab) {
+        m_canvasTabs->setCurrentWidget(m_playbackTab);
+    }
+    renderPlaybackFrame();
+    updatePlaybackButtons();
+}
+
+void MainWindow::jumpPlayback(int index)
+{
+    if (index < 0) {
+        return;
+    }
+    if (m_playbackFrames.empty()) {
+        m_playbackFrames = playbackFrameIndices();
+    }
+    if (m_playbackFrames.empty()) {
+        return;
+    }
+    auto it = std::find(m_playbackFrames.begin(), m_playbackFrames.end(), index);
+    if (it == m_playbackFrames.end()) {
+        m_playbackFrames = playbackFrameIndices();
+        it = std::find(m_playbackFrames.begin(), m_playbackFrames.end(), index);
+    }
+    if (it == m_playbackFrames.end()) {
+        return;
+    }
+    m_playbackPos = static_cast<int>(std::distance(m_playbackFrames.begin(), it));
+    if (m_canvasTabs && m_playbackTab) {
+        m_canvasTabs->setCurrentWidget(m_playbackTab);
+    }
+    renderPlaybackFrame();
+    if (m_playbackActive && !m_playbackPaused) {
+        schedulePlaybackTick();
+    }
+}
+
+void MainWindow::renderPlaybackFrame()
+{
+    if (!m_playbackActive || m_playbackFrames.empty() || !m_playbackCanvas) {
+        return;
+    }
+    if (m_playbackPos < 0 || m_playbackPos >= static_cast<int>(m_playbackFrames.size())) {
+        return;
+    }
+    const int frameIndex = m_playbackFrames[static_cast<std::size_t>(m_playbackPos)];
+    m_playbackFrameIndex = frameIndex;
+    m_playbackFrameDurationMs = 30;
+    if (frameIndex >= 0 && frameIndex < static_cast<int>(m_frameDurations.size())) {
+        const int duration = static_cast<int>(m_frameDurations[frameIndex]);
+        if (duration > 0) {
+            m_playbackFrameDurationMs = duration;
+        }
+    }
+    m_playbackUseHd = m_useHdFrame && hasHdFrame(frameIndex);
+    m_playbackRotationData = rotationBlockForRead(frameIndex, m_playbackUseHd);
+    m_playbackBase565.clear();
+    m_playbackRotationMask.clear();
+    m_playbackStaticFrame.release();
+    m_playbackOriginalPreview.release();
+    m_playbackWidth = 0;
+    m_playbackHeight = 0;
+    m_playbackFrameClock.restart();
+
+    bool hasRotations = m_playbackRotationData != nullptr;
+    if (hasRotations) {
+        m_playbackRotationClock.restart();
+        SerumEditor_InitRotationState(m_playbackRotationData, &m_playbackRotationState, 0);
+        std::vector<uint16_t> base565;
+        std::vector<uint16_t> rotationsInFrame;
+        int width = 0;
+        int height = 0;
+        if (renderFrameWithSerumRaw(frameIndex, m_playbackUseHd, cv::Mat(), base565, width,
+                                    height, &rotationsInFrame, nullptr) &&
+            !base565.empty() && !rotationsInFrame.empty()) {
+            m_playbackBase565 = std::move(base565);
+            m_playbackRotationMask = std::move(rotationsInFrame);
+            m_playbackWidth = width;
+            m_playbackHeight = height;
+            std::vector<uint16_t> rotated(m_playbackBase565.size(), 0);
+            SerumEditor_ApplyRotationsMasked(m_playbackRotationData, m_playbackBase565.data(),
+                                             rotated.data(), m_playbackRotationMask.data(),
+                                             static_cast<uint32_t>(width),
+                                             static_cast<uint32_t>(height),
+                                             &m_playbackRotationState, 0);
+            m_playbackStaticFrame = ConvertRgb565ToBgrMat(rotated.data(), width, height);
+        } else {
+            hasRotations = false;
+            m_playbackRotationData = nullptr;
+        }
+    }
+    if (!hasRotations) {
+        const cv::Mat composed = renderFrameWithSerum(frameIndex, m_playbackUseHd);
+        m_playbackStaticFrame = EnsureBgr(composed);
+    }
+    cv::Mat reference = buildOriginalPreviewForIndex(frameIndex);
+    if (m_playbackShowOriginal && !reference.empty()) {
+        m_playbackOriginalPreview = buildOriginalFrame(reference);
+    }
+    const QColor gap = m_playbackCanvas
+        ? m_playbackCanvas->palette().color(QPalette::Window)
+        : QApplication::palette().color(QPalette::Window);
+    const cv::Scalar gapColor(gap.blue(), gap.green(), gap.red());
+    const cv::Mat combined = (!m_playbackOriginalPreview.empty())
+        ? buildCombinedFrame(m_playbackStaticFrame, m_playbackOriginalPreview, gapColor)
+        : m_playbackStaticFrame;
+    m_playbackCanvas->setTitle(QString("Playback (frame %1)").arg(frameIndex + 1));
+    m_playbackCanvas->setImage(combined);
+    if (!m_playbackOriginalPreview.empty()) {
+        const int gapPixels = FrameGapForWidth(m_playbackStaticFrame.cols);
+        m_playbackCanvas->canvas()->setGridSegments(m_playbackStaticFrame.rows,
+                                                    gapPixels,
+                                                    m_playbackOriginalPreview.rows);
+        m_playbackCanvas->canvas()->setGridScales(1, 1);
+        FrameLayout layout = BuildFrameLayout(m_playbackStaticFrame, m_playbackOriginalPreview);
+        const QRect topRegion(layout.topX, 0, layout.topWidth, layout.topHeight);
+        const QRect bottomRegion(layout.bottomX,
+                                 layout.topHeight + gapPixels,
+                                 layout.bottomWidth,
+                                 layout.bottomHeight);
+        m_playbackCanvas->canvas()->setGridRegions(topRegion, bottomRegion);
+    } else {
+        m_playbackCanvas->canvas()->setGridSegments(0, 0, 0);
+        m_playbackCanvas->canvas()->setGridScales(1, 1);
+        m_playbackCanvas->canvas()->setGridRegions(QRect(), QRect());
+    }
+    schedulePlaybackTick();
+}
+
+void MainWindow::schedulePlaybackTick()
+{
+    if (!m_playbackActive || m_playbackPaused || !m_playbackTimer) {
+        return;
+    }
+    const int elapsed = static_cast<int>(m_playbackFrameClock.elapsed());
+    const int remaining = m_playbackFrameDurationMs - elapsed;
+    if (remaining <= 0) {
+        advancePlaybackFrame();
+        return;
+    }
+    if (m_playbackRotationData && !m_playbackBase565.empty() && !m_playbackRotationMask.empty()) {
+        const uint32_t nowMs = static_cast<uint32_t>(m_playbackRotationClock.elapsed());
+        std::vector<uint16_t> rotated(m_playbackBase565.size(), 0);
+        const uint32_t nextDelay = SerumEditor_ApplyRotationsMasked(
+            m_playbackRotationData, m_playbackBase565.data(), rotated.data(),
+            m_playbackRotationMask.data(), static_cast<uint32_t>(m_playbackWidth),
+            static_cast<uint32_t>(m_playbackHeight), &m_playbackRotationState, nowMs);
+        if (m_playbackCanvas) {
+            const cv::Mat rotatedMat = ConvertRgb565ToBgrMat(rotated.data(), m_playbackWidth, m_playbackHeight);
+            const QColor gap = m_playbackCanvas
+                ? m_playbackCanvas->palette().color(QPalette::Window)
+                : QApplication::palette().color(QPalette::Window);
+            const cv::Scalar gapColor(gap.blue(), gap.green(), gap.red());
+            const cv::Mat combined = (!m_playbackOriginalPreview.empty())
+                ? buildCombinedFrame(rotatedMat, m_playbackOriginalPreview, gapColor)
+                : rotatedMat;
+            m_playbackCanvas->setImage(combined);
+        }
+        const int delay = std::min<int>(remaining, static_cast<int>(std::max<uint32_t>(nextDelay, 16)));
+        m_playbackTimer->start(delay);
+        return;
+    }
+    m_playbackTimer->start(remaining);
+}
+
+void MainWindow::advancePlaybackFrame()
+{
+    if (!m_playbackActive || m_playbackFrames.empty()) {
+        stopPlayback();
+        return;
+    }
+    m_playbackPos += 1;
+    if (m_playbackPos >= static_cast<int>(m_playbackFrames.size())) {
+        stopPlayback();
+        return;
+    }
+    renderPlaybackFrame();
+}
+
+void MainWindow::updatePlaybackButtons()
+{
+    const bool hasFrames = !m_frameDurations.empty();
+    if (m_previewPlayButton) {
+        m_previewPlayButton->setEnabled(hasFrames);
+    }
+    if (m_previewStopButton) {
+        m_previewStopButton->setEnabled(m_playbackActive);
+    }
+    if (m_previewPauseButton) {
+        m_previewPauseButton->setEnabled(m_playbackActive && !m_playbackPaused);
+    }
+    if (m_previewPrevButton) {
+        m_previewPrevButton->setEnabled(hasFrames);
+    }
+    if (m_previewNextButton) {
+        m_previewNextButton->setEnabled(hasFrames);
+    }
+    if (m_previewRewindButton) {
+        m_previewRewindButton->setEnabled(hasFrames);
+    }
+    if (m_previewFastForwardButton) {
+        m_previewFastForwardButton->setEnabled(hasFrames);
+    }
+}
+
 void MainWindow::updatePreviewsForMaskId(int maskId)
 {
     if (maskId < 0) {
@@ -5756,6 +6210,7 @@ void MainWindow::refreshFramePreviews()
         auto* item = new QListWidgetItem("No frames");
         item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
         m_framePreviewList->addItem(item);
+        updatePlaybackButtons();
         return;
     }
 
@@ -5768,6 +6223,7 @@ void MainWindow::refreshFramePreviews()
         auto* item = new QListWidgetItem("No frames");
         item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
         m_framePreviewList->addItem(item);
+        updatePlaybackButtons();
         return;
     }
 
@@ -5776,6 +6232,7 @@ void MainWindow::refreshFramePreviews()
         auto* item = new QListWidgetItem(m_previewFilterEnabled ? "No frames match filter" : "No frames");
         item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
         m_framePreviewList->addItem(item);
+        updatePlaybackButtons();
         return;
     }
 
@@ -5830,6 +6287,7 @@ void MainWindow::refreshFramePreviews()
     if (m_previewRotateEnabled && m_previewRotationTimer && !m_previewRotationTimer->isActive()) {
         schedulePreviewRotationUpdate();
     }
+    updatePlaybackButtons();
 }
 
 void MainWindow::updateFramePreviewAt(int index)
@@ -10918,6 +11376,20 @@ void MainWindow::logLine(const QString& message)
     }
     if (!m_logFile->isOpen()) {
         m_logFile->setFileName(m_logPath);
+        if (!m_logFile->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+            return;
+        }
+    }
+    constexpr qint64 kMaxLogBytes = 1024 * 1024;
+    const QFileInfo info(m_logPath);
+    if (info.exists() && info.size() > kMaxLogBytes) {
+        m_logFile->close();
+        if (m_logFile->open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+            const QByteArray header = QByteArrayLiteral("[log] truncated\n");
+            m_logFile->write(header);
+            m_logFile->flush();
+        }
+        m_logFile->close();
         if (!m_logFile->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
             return;
         }

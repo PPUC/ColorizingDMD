@@ -22,6 +22,7 @@ This handbook captures editor behaviors and workflows that differ from the legac
 - Use the mask overlay toggle to show masks on the original preview frames.
 - Use the rotate toggle to preview color rotations in the preview row.
 - Use the refresh button to rebuild previews after bulk edits.
+- Use Play/Pause/Stop/Prev/Next/Rew/Fwd in the Playback tab to test-play the selected frames (or the whole ROM if none or only one frame is selected). A single selected frame becomes the start point.
 
 ## Canvas Controls
 
@@ -33,6 +34,7 @@ This handbook captures editor behaviors and workflows that differ from the legac
 - **Background toggle** shows/hides the background layer while editing frames.
 - **HD toggle** switches between SD and HD for frames, sprites, and backgrounds.
 - The status bar shows pixel coordinates for the canvas under the cursor.
+- The Playback canvas shows the rendered output from libserum while playing.
 
 ## Drawing Tools
 
@@ -125,6 +127,7 @@ This handbook captures editor behaviors and workflows that differ from the legac
 - Settings dialog allows adjusting undo/history sizes and cache limits (frames, sprites, backgrounds).
 - Logging can be enabled/disabled in Settings (enabled by default) and writes to `ppuc-serum-colorizer.log` in the app data folder.
 - If the app did not shut down cleanly, a startup prompt offers to copy the log for reporting.
+- The Help menu includes “Copy Log” and the log is truncated automatically to keep it manageable.
 
 ## Open/Save and Legacy Compatibility
 
