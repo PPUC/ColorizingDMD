@@ -122,7 +122,9 @@ This handbook captures editor behaviors and workflows that differ from the legac
 - Undo/redo stacks are separated for frames, masks, backgrounds, sprites, and palettes (including rotation edits).
 - Undo/redo applies to all selected frames where relevant.
 - Legacy `.cROM/.cRP` saves preserve existing metadata even if the editor does not expose it yet.
-- Settings dialog allows adjusting undo and navigation history sizes.
+- Settings dialog allows adjusting undo/history sizes and cache limits (frames, sprites, backgrounds).
+- Logging can be enabled/disabled in Settings (enabled by default) and writes to `ppuc-serum-colorizer.log` in the app data folder.
+- If the app did not shut down cleanly, a startup prompt offers to copy the log for reporting.
 
 ## Open/Save and Legacy Compatibility
 

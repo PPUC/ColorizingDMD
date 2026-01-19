@@ -100,6 +100,29 @@ cv::Mat* IndexedImageStore::atMutable(int index)
     return &m_images[index];
 }
 
+const cv::Mat* IndexedImageStore::peek(int index) const
+{
+    if (index < 0 || index >= count()) {
+        return nullptr;
+    }
+    if (m_loader) {
+        auto it = m_cache.find(index);
+        return it == m_cache.end() ? nullptr : it.value().get();
+    }
+    if (index < 0 || index >= m_images.size()) {
+        return nullptr;
+    }
+    return &m_images[index];
+}
+
+bool IndexedImageStore::isDirty(int index) const
+{
+    if (!m_loader) {
+        return false;
+    }
+    return m_dirty.contains(index);
+}
+
 int IndexedImageStore::count() const
 {
     if (m_countFn) {

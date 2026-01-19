@@ -32,6 +32,26 @@
 #include <QMessageBox>
 #include <QInputDialog>
 #include <QSettings>
+#include <QDateTime>
+#include <QDir>
+#include <QStandardPaths>
+#include <QClipboard>
+#include <QTimer>
+#include <QCloseEvent>
+#include <cstdint>
+#include <cstdio>
+
+#if defined(_WIN32)
+#include <windows.h>
+#include <psapi.h>
+#if defined(_MSC_VER)
+#pragma comment(lib, "psapi.lib")
+#endif
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#elif defined(__linux__)
+#include <unistd.h>
+#endif
 #include <QScopedValueRollback>
 #include <QStackedWidget>
 #include <QButtonGroup>
@@ -2532,15 +2552,19 @@ MainWindow::MainWindow(QWidget* parent)
         if (m_canvasTabs && m_canvasTabs->currentWidget() == m_backgroundsCanvas) {
             const int index = m_backgroundList ? m_backgroundList->currentRow() : -1;
             if (index < 0 || !m_backgroundStore) {
+                logLine("HD background create: invalid selection");
                 return;
             }
+            logLine(QString("HD background create: index=%1").arg(index));
             if (hasHdBackground(index)) {
                 statusBar()->showMessage("HD background already exists.", 2000);
+                logLine("HD background create: already exists");
                 return;
             }
             const cv::Mat* src = m_backgroundStore->at(index);
             if (!src || src->empty()) {
                 statusBar()->showMessage("No background image to upscale.", 2000);
+                logLine("HD background create: missing source");
                 return;
             }
             if (m_backgroundFramesX.size() <= static_cast<std::size_t>(index)) {
@@ -2558,6 +2582,7 @@ MainWindow::MainWindow(QWidget* parent)
             }
             if (hd.empty()) {
                 statusBar()->showMessage("HD background create failed.", 2000);
+                logLine("HD background create: resize failed");
                 return;
             }
             m_backgroundFramesX[static_cast<std::size_t>(index)] = hd;
@@ -2568,20 +2593,25 @@ MainWindow::MainWindow(QWidget* parent)
             refreshFramePreviews();
             updateFrameCanvasImage(m_framesList ? m_framesList->currentRow() : -1);
             statusBar()->showMessage("HD background created.", 2000);
+            logLine("HD background create: success");
             return;
         }
         if (m_canvasTabs && m_canvasTabs->currentWidget() == m_spritesCanvas) {
             const int index = m_spritesList ? m_spritesList->currentRow() : -1;
             if (index < 0 || !m_spriteStore) {
+                logLine("HD sprite create: invalid selection");
                 return;
             }
+            logLine(QString("HD sprite create: index=%1").arg(index));
             if (hasHdSprite(index)) {
                 statusBar()->showMessage("HD sprite already exists.", 2000);
+                logLine("HD sprite create: already exists");
                 return;
             }
             const cv::Mat* src = m_spriteStore->at(index);
             if (!src || src->empty()) {
                 statusBar()->showMessage("No sprite image to upscale.", 2000);
+                logLine("HD sprite create: missing source");
                 return;
             }
             if (m_spriteColoredX.size() <= static_cast<std::size_t>(index)) {
@@ -2597,6 +2627,7 @@ MainWindow::MainWindow(QWidget* parent)
             cv::Mat hd = UpscaleSpriteToHd(srcBgr, contentRect, interpolation, false, 0);
             if (hd.empty()) {
                 statusBar()->showMessage("HD sprite create failed.", 2000);
+                logLine("HD sprite create: resize failed");
                 return;
             }
             m_spriteColoredX[static_cast<std::size_t>(index)] = hd;
@@ -2630,16 +2661,20 @@ MainWindow::MainWindow(QWidget* parent)
             refreshFrameSpriteLists();
             updateSpriteCanvasImage(index);
             statusBar()->showMessage("HD sprite created.", 2000);
+            logLine("HD sprite create: success");
             return;
         }
         const int frameCount = m_frameStore ? m_frameStore->count() : 0;
         if (frameCount <= 0) {
+            logLine("HD frame create: no frames");
             return;
         }
         const std::vector<int> targets = targetFrameIndices();
         if (targets.empty()) {
+            logLine("HD frame create: no targets");
             return;
         }
+        logLine(QString("HD frame create: targets=%1").arg(targets.size()));
         if (m_frameExtraFrames.size() < static_cast<std::size_t>(frameCount)) {
             m_frameExtraFrames.resize(static_cast<std::size_t>(frameCount));
         }
@@ -2898,6 +2933,9 @@ MainWindow::MainWindow(QWidget* parent)
         if (createdAny) {
             refreshFrameSpriteLists();
             statusBar()->showMessage("HD frame created.", 2000);
+            logLine("HD frame create: success");
+        } else {
+            logLine("HD frame create: no frames created");
         }
     });
     connect(m_hdDeleteButton, &QPushButton::clicked, this, [this]() {
@@ -4385,6 +4423,23 @@ MainWindow::MainWindow(QWidget* parent)
     }
     m_maxUndoDepth = std::clamp(settings.value("maxUndoDepth", kDefaultUndoDepth).toInt(), 1, 1000);
     m_maxHistoryDepth = std::clamp(settings.value("maxHistoryDepth", kDefaultHistoryDepth).toInt(), 1, 1000);
+    m_frameCacheLimit = std::clamp(settings.value("frameCacheLimit", 16).toInt(), 1, 256);
+    m_spriteCacheLimit = std::clamp(settings.value("spriteCacheLimit", 8).toInt(), 1, 256);
+    m_backgroundCacheLimit = std::clamp(settings.value("backgroundCacheLimit", 4).toInt(), 1, 256);
+    const bool wasCleanShutdown = settings.value("lastShutdownClean", true).toBool();
+    m_loggingEnabled = settings.value("loggingEnabled", true).toBool();
+    const QString defaultLogDir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+    const QString logDir = defaultLogDir.isEmpty()
+        ? QDir::home().filePath(".ppuc-serum-colorizer")
+        : defaultLogDir;
+    QDir().mkpath(logDir);
+    m_logPath = settings.value("logPath", QDir(logDir).filePath("ppuc-serum-colorizer.log")).toString();
+    settings.setValue("lastShutdownClean", false);
+    settings.sync();
+    initLogging();
+    if (!wasCleanShutdown) {
+        QTimer::singleShot(0, this, [this]() { showCrashLogDialog(); });
+    }
     resetNavigationHistory();
     m_uiReady = true;
 }
@@ -4414,6 +4469,7 @@ void MainWindow::openProjectFile(const QString& filename)
     if (filename.isEmpty()) {
         return;
     }
+    logLine(QString("Open project: %1").arg(filename));
     QScopedValueRollback<bool> loadGuard(m_isLoadingProject, true);
     const QFileInfo info(filename);
     const QString suffix = info.suffix().toLower();
@@ -4851,6 +4907,7 @@ bool MainWindow::saveProjectToPath(const QString& filename)
     if (filename.isEmpty()) {
         return false;
     }
+    logLine(QString("Save project: %1").arg(filename));
     QFileInfo info(filename);
     QString suffix = info.suffix().toLower();
     QString target = filename;
@@ -6750,16 +6807,24 @@ bool MainWindow::renderFrameWithSerumRaw(int index,
     std::vector<uint16_t> background565;
     std::vector<uint16_t> background565Extra;
     if (backgroundId != 0xffff) {
-        if (m_backgroundStore && backgroundId < m_backgroundStore->count()) {
+        const cv::Mat* backgroundOverride = nullptr;
+        if (useSerumData && m_backgroundStore &&
+            m_backgroundStore->isDirty(static_cast<int>(backgroundId))) {
+            backgroundOverride = m_backgroundStore->peek(static_cast<int>(backgroundId));
+        }
+        if (backgroundOverride && !backgroundOverride->empty()) {
+            background565 = ConvertBgrMatToRgb565(*backgroundOverride);
+            frameView.background_frame = background565.data();
+        } else if (useSerumData &&
+                   backgroundId < m_serumData.nbackgrounds &&
+                   m_serumData.backgroundframes_v2.hasData(backgroundId)) {
+            frameView.background_frame = m_serumData.backgroundframes_v2[backgroundId];
+        } else if (m_backgroundStore && backgroundId < m_backgroundStore->count()) {
             const cv::Mat* background = m_backgroundStore->at(static_cast<int>(backgroundId));
             if (background && !background->empty()) {
                 background565 = ConvertBgrMatToRgb565(*background);
                 frameView.background_frame = background565.data();
             }
-        } else if (useSerumData &&
-                   backgroundId < m_serumData.nbackgrounds &&
-                   m_serumData.backgroundframes_v2.hasData(backgroundId)) {
-            frameView.background_frame = m_serumData.backgroundframes_v2[backgroundId];
         }
         if (backgroundId < m_backgroundFramesX.size() &&
             !m_backgroundFramesX[static_cast<std::size_t>(backgroundId)].empty()) {
@@ -6798,8 +6863,9 @@ bool MainWindow::renderFrameWithSerumRaw(int index,
         }
         if (!frameView.background_frame_extra) {
             cv::Mat backgroundSource;
-            if (m_backgroundStore && backgroundId < m_backgroundStore->count()) {
-                const cv::Mat* sdBackground = m_backgroundStore->at(static_cast<int>(backgroundId));
+            if (useSerumData && m_backgroundStore &&
+                m_backgroundStore->isDirty(static_cast<int>(backgroundId))) {
+                const cv::Mat* sdBackground = m_backgroundStore->peek(static_cast<int>(backgroundId));
                 if (sdBackground && !sdBackground->empty()) {
                     backgroundSource = *sdBackground;
                 }
@@ -6807,6 +6873,11 @@ bool MainWindow::renderFrameWithSerumRaw(int index,
                 backgroundSource = ConvertRgb565ToBgrMat(frameView.background_frame,
                                                          static_cast<int>(m_serumData.fwidth),
                                                          static_cast<int>(m_serumData.fheight));
+            } else if (m_backgroundStore && backgroundId < m_backgroundStore->count()) {
+                const cv::Mat* sdBackground = m_backgroundStore->at(static_cast<int>(backgroundId));
+                if (sdBackground && !sdBackground->empty()) {
+                    backgroundSource = *sdBackground;
+                }
             }
             if (!backgroundSource.empty()) {
                 cv::resize(backgroundSource, scaledBackgroundFrame, cv::Size(outWidth, outHeight), 0.0, 0.0, cv::INTER_NEAREST);
@@ -6868,7 +6939,15 @@ bool MainWindow::renderFrameWithSerumRaw(int index,
             } else if (serumOriginal) {
                 view.original = serumOriginal;
             }
-            if (spriteIndex < m_spriteColored.size()) {
+            const cv::Mat* spriteOverride = nullptr;
+            if (useSerumData && m_spriteStore &&
+                m_spriteStore->isDirty(static_cast<int>(spriteId))) {
+                spriteOverride = m_spriteStore->peek(static_cast<int>(spriteId));
+            }
+            if (spriteOverride && !spriteOverride->empty()) {
+                sprite565[spriteIndex] = ConvertBgrMatToRgb565(*spriteOverride);
+                view.colored = sprite565[spriteIndex].data();
+            } else if (spriteIndex < m_spriteColored.size()) {
                 const cv::Mat& colored = m_spriteColored[spriteIndex];
                 if (!colored.empty()) {
                     sprite565[spriteIndex] = ConvertBgrMatToRgb565(colored);
@@ -7269,9 +7348,17 @@ cv::Mat MainWindow::renderFrameWithSerum(int index, bool useHd, const cv::Mat& o
     std::vector<uint16_t> background565;
     std::vector<uint16_t> background565Extra;
     if (backgroundId != 0xffff) {
-        if (useSerumData &&
-            backgroundId < m_serumData.nbackgrounds &&
-            m_serumData.backgroundframes_v2.hasData(backgroundId)) {
+        const cv::Mat* backgroundOverride = nullptr;
+        if (useSerumData && m_backgroundStore &&
+            m_backgroundStore->isDirty(static_cast<int>(backgroundId))) {
+            backgroundOverride = m_backgroundStore->peek(static_cast<int>(backgroundId));
+        }
+        if (backgroundOverride && !backgroundOverride->empty()) {
+            background565 = ConvertBgrMatToRgb565(*backgroundOverride);
+            frameView.background_frame = background565.data();
+        } else if (useSerumData &&
+                   backgroundId < m_serumData.nbackgrounds &&
+                   m_serumData.backgroundframes_v2.hasData(backgroundId)) {
             frameView.background_frame = m_serumData.backgroundframes_v2[backgroundId];
         } else if (m_backgroundStore && backgroundId < m_backgroundStore->count()) {
             const cv::Mat* background = m_backgroundStore->at(static_cast<int>(backgroundId));
@@ -7317,8 +7404,9 @@ cv::Mat MainWindow::renderFrameWithSerum(int index, bool useHd, const cv::Mat& o
         }
         if (!frameView.background_frame_extra) {
             cv::Mat backgroundSource;
-            if (m_backgroundStore && backgroundId < m_backgroundStore->count()) {
-                const cv::Mat* sdBackground = m_backgroundStore->at(static_cast<int>(backgroundId));
+            if (useSerumData && m_backgroundStore &&
+                m_backgroundStore->isDirty(static_cast<int>(backgroundId))) {
+                const cv::Mat* sdBackground = m_backgroundStore->peek(static_cast<int>(backgroundId));
                 if (sdBackground && !sdBackground->empty()) {
                     backgroundSource = *sdBackground;
                 }
@@ -7326,6 +7414,11 @@ cv::Mat MainWindow::renderFrameWithSerum(int index, bool useHd, const cv::Mat& o
                 backgroundSource = ConvertRgb565ToBgrMat(frameView.background_frame,
                                                          static_cast<int>(m_serumData.fwidth),
                                                          static_cast<int>(m_serumData.fheight));
+            } else if (m_backgroundStore && backgroundId < m_backgroundStore->count()) {
+                const cv::Mat* sdBackground = m_backgroundStore->at(static_cast<int>(backgroundId));
+                if (sdBackground && !sdBackground->empty()) {
+                    backgroundSource = *sdBackground;
+                }
             }
             if (!backgroundSource.empty()) {
                 cv::resize(backgroundSource, scaledBackgroundFrame, cv::Size(outWidth, outHeight), 0.0, 0.0, cv::INTER_NEAREST);
@@ -7394,7 +7487,15 @@ cv::Mat MainWindow::renderFrameWithSerum(int index, bool useHd, const cv::Mat& o
             if (!view.original && serumOriginal) {
                 view.original = serumOriginal;
             }
-            if (spriteIndex < m_spriteColored.size()) {
+            const cv::Mat* spriteOverride = nullptr;
+            if (useSerumData && m_spriteStore &&
+                m_spriteStore->isDirty(static_cast<int>(spriteId))) {
+                spriteOverride = m_spriteStore->peek(static_cast<int>(spriteId));
+            }
+            if (spriteOverride && !spriteOverride->empty()) {
+                sprite565[spriteIndex] = ConvertBgrMatToRgb565(*spriteOverride);
+                view.colored = sprite565[spriteIndex].data();
+            } else if (spriteIndex < m_spriteColored.size()) {
                 const cv::Mat& colored = m_spriteColored[spriteIndex];
                 if (!colored.empty()) {
                     sprite565[spriteIndex] = ConvertBgrMatToRgb565(colored);
@@ -7765,11 +7866,7 @@ cv::Mat MainWindow::applySpritesToFrame(int index,
 cv::Mat MainWindow::applySpriteDynamicColors(int index, const cv::Mat& sprite) const
 {
     cv::Mat output = EnsureBgr(sprite);
-    if (output.empty() ||
-        index < 0 ||
-        index >= static_cast<int>(m_spriteDynamicColors.size()) ||
-        index >= static_cast<int>(m_spriteDynamicMasks.size()) ||
-        index >= static_cast<int>(m_spriteOriginals.size())) {
+    if (output.empty() || index < 0) {
         return output;
     }
     const std::vector<uint16_t>* colors = nullptr;
@@ -7869,7 +7966,7 @@ cv::Mat* MainWindow::activeSpriteImageMutable(int index)
         }
     }
     cv::Mat* sprite = m_spriteStore->atMutable(index);
-    if (sprite && m_serumDataLoaded) {
+    if (sprite && !m_serumDataLoaded) {
         if (index >= static_cast<int>(m_spriteColored.size())) {
             m_spriteColored.resize(static_cast<std::size_t>(index + 1));
         }
@@ -8224,8 +8321,8 @@ void MainWindow::updateSpriteCanvasImage(int index)
         const cv::Mat* map = nullptr;
         if (m_useHdSprite && index >= 0) {
             map = ensureHdSpriteDynamicMaskLocal(index);
-        } else if (index >= 0 && index < static_cast<int>(m_spriteDynamicMasks.size())) {
-            map = &m_spriteDynamicMasks[static_cast<std::size_t>(index)];
+        } else if (index >= 0) {
+            map = ensureSpriteDynamicMaskLocal(index);
         }
         if (map && !map->empty()) {
             cv::Mat maskFull = buildDynamicMaskFromMap(*map, m_spriteDynamicSetIndex);
@@ -8948,29 +9045,57 @@ void MainWindow::ensureSpriteDataSize()
         return;
     }
     const cv::Size spriteSize(MAX_SPRITE_WIDTH, MAX_SPRITE_HEIGHT);
-    if (m_spriteOriginals.size() != static_cast<std::size_t>(spriteCount)) {
-        m_spriteOriginals.resize(static_cast<std::size_t>(spriteCount));
-    }
-    if (m_spriteDynamicMasks.size() != static_cast<std::size_t>(spriteCount)) {
-        m_spriteDynamicMasks.resize(static_cast<std::size_t>(spriteCount));
-    }
-    if (m_spriteDynamicColors.size() != static_cast<std::size_t>(spriteCount)) {
-        m_spriteDynamicColors.resize(static_cast<std::size_t>(spriteCount));
-    }
-    if (m_spriteColored.size() != static_cast<std::size_t>(spriteCount)) {
-        m_spriteColored.resize(static_cast<std::size_t>(spriteCount));
-    }
-    if (m_spriteColoredX.size() != static_cast<std::size_t>(spriteCount)) {
-        m_spriteColoredX.resize(static_cast<std::size_t>(spriteCount));
-    }
-    if (m_spriteMasksX.size() != static_cast<std::size_t>(spriteCount)) {
-        m_spriteMasksX.resize(static_cast<std::size_t>(spriteCount));
-    }
-    if (m_spriteDynamicMasksX.size() != static_cast<std::size_t>(spriteCount)) {
-        m_spriteDynamicMasksX.resize(static_cast<std::size_t>(spriteCount));
-    }
-    if (m_spriteDynamicColorsX.size() != static_cast<std::size_t>(spriteCount)) {
-        m_spriteDynamicColorsX.resize(static_cast<std::size_t>(spriteCount));
+    const std::size_t spriteCountSize = static_cast<std::size_t>(spriteCount);
+    if (m_serumDataLoaded) {
+        if (m_spriteOriginals.size() > spriteCountSize) {
+            m_spriteOriginals.resize(spriteCountSize);
+        }
+        if (m_spriteDynamicMasks.size() > spriteCountSize) {
+            m_spriteDynamicMasks.resize(spriteCountSize);
+        }
+        if (m_spriteDynamicColors.size() > spriteCountSize) {
+            m_spriteDynamicColors.resize(spriteCountSize);
+        }
+        if (m_spriteColored.size() > spriteCountSize) {
+            m_spriteColored.resize(spriteCountSize);
+        }
+        if (m_spriteColoredX.size() > spriteCountSize) {
+            m_spriteColoredX.resize(spriteCountSize);
+        }
+        if (m_spriteMasksX.size() > spriteCountSize) {
+            m_spriteMasksX.resize(spriteCountSize);
+        }
+        if (m_spriteDynamicMasksX.size() > spriteCountSize) {
+            m_spriteDynamicMasksX.resize(spriteCountSize);
+        }
+        if (m_spriteDynamicColorsX.size() > spriteCountSize) {
+            m_spriteDynamicColorsX.resize(spriteCountSize);
+        }
+    } else {
+        if (m_spriteOriginals.size() != spriteCountSize) {
+            m_spriteOriginals.resize(spriteCountSize);
+        }
+        if (m_spriteDynamicMasks.size() != spriteCountSize) {
+            m_spriteDynamicMasks.resize(spriteCountSize);
+        }
+        if (m_spriteDynamicColors.size() != spriteCountSize) {
+            m_spriteDynamicColors.resize(spriteCountSize);
+        }
+        if (m_spriteColored.size() != spriteCountSize) {
+            m_spriteColored.resize(spriteCountSize);
+        }
+        if (m_spriteColoredX.size() != spriteCountSize) {
+            m_spriteColoredX.resize(spriteCountSize);
+        }
+        if (m_spriteMasksX.size() != spriteCountSize) {
+            m_spriteMasksX.resize(spriteCountSize);
+        }
+        if (m_spriteDynamicMasksX.size() != spriteCountSize) {
+            m_spriteDynamicMasksX.resize(spriteCountSize);
+        }
+        if (m_spriteDynamicColorsX.size() != spriteCountSize) {
+            m_spriteDynamicColorsX.resize(spriteCountSize);
+        }
     }
     if (m_spriteExtraFlags.size() != static_cast<std::size_t>(spriteCount)) {
         m_spriteExtraFlags.resize(static_cast<std::size_t>(spriteCount), 0);
@@ -8983,28 +9108,28 @@ void MainWindow::ensureSpriteDataSize()
         m_spriteDetAreas.resize(detSize, 0xffff);
     }
 
-    for (int i = 0; i < spriteCount; ++i) {
-        cv::Mat& original = m_spriteOriginals[static_cast<std::size_t>(i)];
-        if (m_serumDataLoaded && original.empty()) {
-            // Keep empty to read from SerumData unless the user edits.
-        } else if (original.empty() || original.size() != spriteSize) {
-            original = cv::Mat(spriteSize, CV_8UC1, cv::Scalar(0));
-        }
-        cv::Mat& map = m_spriteDynamicMasks[static_cast<std::size_t>(i)];
-        if (map.empty() || map.size() != spriteSize) {
-            map = cv::Mat(spriteSize, CV_8UC1, cv::Scalar(255));
-        }
-        std::vector<uint16_t>& colors = m_spriteDynamicColors[static_cast<std::size_t>(i)];
-        if (colors.empty()) {
-            colors.resize(MAX_DYNA_SETS_PER_SPRITE * 64, 0);
-            for (int set = 0; set < MAX_DYNA_SETS_PER_SPRITE; ++set) {
-                const cv::Vec3b base = MaskColorForIndex(set);
-                for (int c = 0; c < 64; ++c) {
-                    const double t = static_cast<double>(c) / 63.0;
-                    cv::Vec3b value(static_cast<uint8_t>(base[0] * t),
-                                    static_cast<uint8_t>(base[1] * t),
-                                    static_cast<uint8_t>(base[2] * t));
-                    colors[set * 64 + c] = BgrToRgb565(value);
+    if (!m_serumDataLoaded) {
+        for (int i = 0; i < spriteCount; ++i) {
+            cv::Mat& original = m_spriteOriginals[static_cast<std::size_t>(i)];
+            if (original.empty() || original.size() != spriteSize) {
+                original = cv::Mat(spriteSize, CV_8UC1, cv::Scalar(0));
+            }
+            cv::Mat& map = m_spriteDynamicMasks[static_cast<std::size_t>(i)];
+            if (map.empty() || map.size() != spriteSize) {
+                map = cv::Mat(spriteSize, CV_8UC1, cv::Scalar(255));
+            }
+            std::vector<uint16_t>& colors = m_spriteDynamicColors[static_cast<std::size_t>(i)];
+            if (colors.empty()) {
+                colors.resize(MAX_DYNA_SETS_PER_SPRITE * 64, 0);
+                for (int set = 0; set < MAX_DYNA_SETS_PER_SPRITE; ++set) {
+                    const cv::Vec3b base = MaskColorForIndex(set);
+                    for (int c = 0; c < 64; ++c) {
+                        const double t = static_cast<double>(c) / 63.0;
+                        cv::Vec3b value(static_cast<uint8_t>(base[0] * t),
+                                        static_cast<uint8_t>(base[1] * t),
+                                        static_cast<uint8_t>(base[2] * t));
+                        colors[set * 64 + c] = BgrToRgb565(value);
+                    }
                 }
             }
         }
@@ -10201,7 +10326,7 @@ cv::Mat* MainWindow::activeDynamicMaskMap(int frameIndex)
 
 cv::Mat* MainWindow::activeSpriteDynamicMask(int spriteIndex)
 {
-    if (spriteIndex < 0 || spriteIndex >= static_cast<int>(m_spriteDynamicMasks.size())) {
+    if (spriteIndex < 0) {
         return nullptr;
     }
     if (m_useHdSprite) {
@@ -10209,10 +10334,7 @@ cv::Mat* MainWindow::activeSpriteDynamicMask(int spriteIndex)
             return mask;
         }
     }
-    if (auto* mask = ensureSpriteDynamicMaskLocal(spriteIndex)) {
-        return mask;
-    }
-    return &m_spriteDynamicMasks[static_cast<std::size_t>(spriteIndex)];
+    return ensureSpriteDynamicMaskLocal(spriteIndex);
 }
 
 cv::Mat* MainWindow::activeBackgroundMask(int index)
@@ -10673,8 +10795,23 @@ void MainWindow::showSettingsDialog()
     auto* undoSpin = new QSpinBox(&dialog);
     undoSpin->setRange(1, 1000);
     undoSpin->setValue(m_maxUndoDepth);
+    auto* frameCacheSpin = new QSpinBox(&dialog);
+    frameCacheSpin->setRange(1, 256);
+    frameCacheSpin->setValue(m_frameCacheLimit);
+    auto* spriteCacheSpin = new QSpinBox(&dialog);
+    spriteCacheSpin->setRange(1, 256);
+    spriteCacheSpin->setValue(m_spriteCacheLimit);
+    auto* backgroundCacheSpin = new QSpinBox(&dialog);
+    backgroundCacheSpin->setRange(1, 256);
+    backgroundCacheSpin->setValue(m_backgroundCacheLimit);
+    auto* loggingCheck = new QCheckBox(&dialog);
+    loggingCheck->setChecked(m_loggingEnabled);
     layout->addRow("History depth", historySpin);
     layout->addRow("Undo depth", undoSpin);
+    layout->addRow("Frame cache size", frameCacheSpin);
+    layout->addRow("Sprite cache size", spriteCacheSpin);
+    layout->addRow("Background cache size", backgroundCacheSpin);
+    layout->addRow("Enable logging", loggingCheck);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     layout->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
@@ -10684,6 +10821,10 @@ void MainWindow::showSettingsDialog()
     }
     m_maxHistoryDepth = std::clamp(historySpin->value(), 1, 1000);
     m_maxUndoDepth = std::clamp(undoSpin->value(), 1, 1000);
+    m_frameCacheLimit = std::clamp(frameCacheSpin->value(), 1, 256);
+    m_spriteCacheLimit = std::clamp(spriteCacheSpin->value(), 1, 256);
+    m_backgroundCacheLimit = std::clamp(backgroundCacheSpin->value(), 1, 256);
+    m_loggingEnabled = loggingCheck->isChecked();
     const auto trimHistory = [this](NavigationHistory& history) {
         while (history.back.size() > m_maxHistoryDepth) {
             history.back.pop_front();
@@ -10698,10 +10839,159 @@ void MainWindow::showSettingsDialog()
     trimHistory(m_backgroundHistory);
     updateNavigationButtons();
     trimUndoStacks();
+    if (m_frameStore) {
+        m_frameStore->setCacheLimit(m_frameCacheLimit);
+    }
+    if (m_spriteStore) {
+        m_spriteStore->setCacheLimit(m_spriteCacheLimit);
+    }
+    if (m_backgroundStore) {
+        m_backgroundStore->setCacheLimit(m_backgroundCacheLimit);
+    }
+    if (m_loggingEnabled) {
+        initLogging();
+    } else {
+        shutdownLogging();
+    }
     QSettings settings("PPUC", "PPUC-Serum-Colorizer");
     settings.setValue("maxHistoryDepth", m_maxHistoryDepth);
     settings.setValue("maxUndoDepth", m_maxUndoDepth);
+    settings.setValue("frameCacheLimit", m_frameCacheLimit);
+    settings.setValue("spriteCacheLimit", m_spriteCacheLimit);
+    settings.setValue("backgroundCacheLimit", m_backgroundCacheLimit);
+    settings.setValue("loggingEnabled", m_loggingEnabled);
+    settings.setValue("logPath", m_logPath);
     settings.sync();
+}
+
+void MainWindow::closeEvent(QCloseEvent* event)
+{
+    logLine("Shutdown: clean");
+    QSettings settings("PPUC", "PPUC-Serum-Colorizer");
+    settings.setValue("lastShutdownClean", true);
+    settings.sync();
+    shutdownLogging();
+    QMainWindow::closeEvent(event);
+}
+
+void MainWindow::initLogging()
+{
+    if (!m_loggingEnabled) {
+        shutdownLogging();
+        return;
+    }
+    if (!m_logFile) {
+        m_logFile = new QFile(this);
+    }
+    if (m_logPath.isEmpty()) {
+        const QString defaultLogDir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+        const QString logDir = defaultLogDir.isEmpty()
+            ? QDir::home().filePath(".ppuc-serum-colorizer")
+            : defaultLogDir;
+        QDir().mkpath(logDir);
+        m_logPath = QDir(logDir).filePath("ppuc-serum-colorizer.log");
+    }
+    if (!m_logFile->isOpen()) {
+        m_logFile->setFileName(m_logPath);
+        if (!m_logFile->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+            return;
+        }
+    }
+    logLine(QString("Startup: %1").arg(QCoreApplication::applicationVersion()));
+}
+
+void MainWindow::shutdownLogging()
+{
+    if (!m_logFile) {
+        return;
+    }
+    if (m_logFile->isOpen()) {
+        m_logFile->flush();
+        m_logFile->close();
+    }
+}
+
+void MainWindow::logLine(const QString& message)
+{
+    if (!m_loggingEnabled || !m_logFile) {
+        return;
+    }
+    if (!m_logFile->isOpen()) {
+        m_logFile->setFileName(m_logPath);
+        if (!m_logFile->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+            return;
+        }
+    }
+    const QString stamp = QDateTime::currentDateTime().toString(Qt::ISODate);
+    const std::uint64_t rssBytes = currentRssBytes();
+    const double rssMb = rssBytes > 0 ? static_cast<double>(rssBytes) / (1024.0 * 1024.0) : 0.0;
+    const QString mem = rssBytes > 0 ? QString(" (rss %1 MB)").arg(rssMb, 0, 'f', 1) : QString();
+    const QByteArray line = QString("[%1] %2%3\n").arg(stamp, message, mem).toUtf8();
+    m_logFile->write(line);
+    m_logFile->flush();
+}
+
+std::uint64_t MainWindow::currentRssBytes() const
+{
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS counters{};
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters))) {
+        return static_cast<std::uint64_t>(counters.WorkingSetSize);
+    }
+    return 0;
+#elif defined(__APPLE__)
+    task_vm_info_data_t info{};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO,
+                  reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS) {
+        return static_cast<std::uint64_t>(info.phys_footprint);
+    }
+    return 0;
+#elif defined(__linux__)
+    std::FILE* file = std::fopen("/proc/self/statm", "r");
+    if (!file) {
+        return 0;
+    }
+    unsigned long size = 0;
+    unsigned long resident = 0;
+    if (std::fscanf(file, "%lu %lu", &size, &resident) != 2) {
+        std::fclose(file);
+        return 0;
+    }
+    std::fclose(file);
+    const long pageSize = sysconf(_SC_PAGESIZE);
+    if (pageSize <= 0) {
+        return 0;
+    }
+    return static_cast<std::uint64_t>(resident) * static_cast<std::uint64_t>(pageSize);
+#else
+    return 0;
+#endif
+}
+
+void MainWindow::showCrashLogDialog()
+{
+    if (m_logPath.isEmpty()) {
+        return;
+    }
+    logLine("Detected unclean shutdown");
+    QMessageBox box(this);
+    box.setWindowTitle("Previous Crash Detected");
+    box.setIcon(QMessageBox::Warning);
+    box.setText("The app did not shut down correctly last time. "
+                "You can copy the log to send for debugging.");
+    box.setInformativeText(QString("Log file: %1").arg(m_logPath));
+    auto* copyButton = box.addButton("Copy Log", QMessageBox::ActionRole);
+    box.addButton(QMessageBox::Ok);
+    box.exec();
+    if (box.clickedButton() == copyButton) {
+        QFile file(m_logPath);
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            const QByteArray data = file.readAll();
+            QGuiApplication::clipboard()->setText(QString::fromUtf8(data));
+            logLine("Crash log copied to clipboard");
+        }
+    }
 }
 
 void MainWindow::pushUndoSnapshot(bool isFrame, int index)
@@ -14578,7 +14868,7 @@ void MainWindow::configureFrameStoreAdapter()
         m_frameStore->setCount(-1);
         return;
     }
-    m_frameStore->setCacheLimit(64);
+    m_frameStore->setCacheLimit(m_frameCacheLimit);
     m_frameStore->setAdapter({}, [this](int index) -> cv::Mat {
         if (!m_serumDataLoaded || index < 0 || index >= static_cast<int>(m_serumData.nframes)) {
             return cv::Mat();
@@ -14609,7 +14899,7 @@ void MainWindow::configureSpriteStoreAdapter()
         m_spriteStore->setCount(-1);
         return;
     }
-    m_spriteStore->setCacheLimit(32);
+    m_spriteStore->setCacheLimit(m_spriteCacheLimit);
     m_spriteStore->setAdapter({}, [this](int index) -> cv::Mat {
         if (!m_serumDataLoaded || index < 0 || index >= static_cast<int>(m_serumData.nsprites)) {
             return cv::Mat();
@@ -14645,7 +14935,7 @@ void MainWindow::configureBackgroundStoreAdapter()
         m_backgroundStore->setCount(-1);
         return;
     }
-    m_backgroundStore->setCacheLimit(16);
+    m_backgroundStore->setCacheLimit(m_backgroundCacheLimit);
     m_backgroundStore->setAdapter({}, [this](int index) -> cv::Mat {
         if (!m_serumDataLoaded || index < 0 || index >= static_cast<int>(m_serumData.nbackgrounds)) {
             return cv::Mat();
@@ -15155,12 +15445,13 @@ void MainWindow::handleToolPress(bool isFrame,
         const int offsetY = displayRect.isValid() ? displayRect.y() : 0;
         const int baseWidth = displayRect.isValid() ? displayRect.width() : image->cols;
         const int baseHeight = displayRect.isValid() ? displayRect.height() : image->rows;
-        cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-            ? (contentRect.isValid()
-                ? m_spriteOriginals[static_cast<std::size_t>(index)](
-                    cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height()))
-                : m_spriteOriginals[static_cast<std::size_t>(index)])
-            : cv::Mat();
+        cv::Mat originalRef;
+        if (const cv::Mat* originalSource = spriteOriginalForDisplay(index)) {
+            originalRef = contentRect.isValid()
+                ? (*originalSource)(cv::Rect(contentRect.x(), contentRect.y(),
+                                             contentRect.width(), contentRect.height()))
+                : *originalSource;
+        }
         cv::Mat original = originalRef.empty() ? cv::Mat() : buildOriginalFrame(originalRef);
         cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseWidth, baseHeight));
         FrameLayout layout = BuildFrameLayout(baseWidth, baseHeight,
@@ -15768,12 +16059,13 @@ void MainWindow::handleToolDrag(bool isFrame,
         const int offsetY = displayRect.isValid() ? displayRect.y() : 0;
         const int baseWidth = displayRect.isValid() ? displayRect.width() : image->cols;
         const int baseHeight = displayRect.isValid() ? displayRect.height() : image->rows;
-        cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-            ? (contentRect.isValid()
-                ? m_spriteOriginals[static_cast<std::size_t>(index)](
-                    cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height()))
-                : m_spriteOriginals[static_cast<std::size_t>(index)])
-            : cv::Mat();
+        cv::Mat originalRef;
+        if (const cv::Mat* originalSource = spriteOriginalForDisplay(index)) {
+            originalRef = contentRect.isValid()
+                ? (*originalSource)(cv::Rect(contentRect.x(), contentRect.y(),
+                                             contentRect.width(), contentRect.height()))
+                : *originalSource;
+        }
         cv::Mat original = originalRef.empty() ? cv::Mat() : buildOriginalFrame(originalRef);
         cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseWidth, baseHeight));
         FrameLayout layout = BuildFrameLayout(baseWidth, baseHeight,
@@ -15856,12 +16148,13 @@ void MainWindow::handleToolDrag(bool isFrame,
         if (displayRect.isValid()) {
             previewDisplay = previewDisplay(cv::Rect(offsetX, offsetY, baseWidth, baseHeight)).clone();
         }
-        cv::Mat originalRef = (spriteIndex >= 0 && spriteIndex < static_cast<int>(m_spriteOriginals.size()))
-            ? (contentRect.isValid()
-                ? m_spriteOriginals[static_cast<std::size_t>(spriteIndex)](
-                    cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height()))
-                : m_spriteOriginals[static_cast<std::size_t>(spriteIndex)])
-            : cv::Mat();
+        cv::Mat originalRef;
+        if (const cv::Mat* originalSource = spriteOriginalForDisplay(spriteIndex)) {
+            originalRef = contentRect.isValid()
+                ? (*originalSource)(cv::Rect(contentRect.x(), contentRect.y(),
+                                             contentRect.width(), contentRect.height()))
+                : *originalSource;
+        }
         cv::Mat original;
         if (!originalRef.empty()) {
             cv::Mat cleaned = originalRef.clone();
@@ -16367,12 +16660,13 @@ void MainWindow::handleToolRelease(bool isFrame,
         const int offsetY = displayRect.isValid() ? displayRect.y() : 0;
         const int baseWidth = displayRect.isValid() ? displayRect.width() : image->cols;
         const int baseHeight = displayRect.isValid() ? displayRect.height() : image->rows;
-        cv::Mat originalRef = (index >= 0 && index < static_cast<int>(m_spriteOriginals.size()))
-            ? (contentRect.isValid()
-                ? m_spriteOriginals[static_cast<std::size_t>(index)](
-                    cv::Rect(contentRect.x(), contentRect.y(), contentRect.width(), contentRect.height()))
-                : m_spriteOriginals[static_cast<std::size_t>(index)])
-            : cv::Mat();
+        cv::Mat originalRef;
+        if (const cv::Mat* originalSource = spriteOriginalForDisplay(index)) {
+            originalRef = contentRect.isValid()
+                ? (*originalSource)(cv::Rect(contentRect.x(), contentRect.y(),
+                                             contentRect.width(), contentRect.height()))
+                : *originalSource;
+        }
         cv::Mat original = originalRef.empty() ? cv::Mat() : buildOriginalFrame(originalRef);
         cv::Mat displayOriginal = BuildDisplayOriginal(original, cv::Size(baseWidth, baseHeight));
         FrameLayout layout = BuildFrameLayout(baseWidth, baseHeight,

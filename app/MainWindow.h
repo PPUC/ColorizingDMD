@@ -5,6 +5,7 @@
 #include <QStringList>
 #include <QElapsedTimer>
 #include <QTimer>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -178,6 +179,12 @@ private:
     void updateNavigationButtons();
     void trimUndoStacks();
     void showSettingsDialog();
+    void closeEvent(QCloseEvent* event) override;
+    void initLogging();
+    void shutdownLogging();
+    void logLine(const QString& message);
+    std::uint64_t currentRssBytes() const;
+    void showCrashLogDialog();
     void pushPaletteUndoSnapshot();
     void pushReducedUndoSnapshot(int setIndex);
     void pushDynamicUndoSnapshot(int frameIndex, int setIndex);
@@ -624,4 +631,10 @@ private:
     NavigationHistory m_imageHistory;
     NavigationHistory m_backgroundHistory;
     QAction* m_settingsAction = nullptr;
+    int m_frameCacheLimit = 16;
+    int m_spriteCacheLimit = 8;
+    int m_backgroundCacheLimit = 4;
+    bool m_loggingEnabled = true;
+    QString m_logPath;
+    class QFile* m_logFile = nullptr;
 };
