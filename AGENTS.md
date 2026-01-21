@@ -40,6 +40,7 @@
 - WYSIWYG: render canvas + preview using libserum logic.
 - Avoid data duplication for large projects.
 - Preview row only renders the visible subset of frames.
+- libserum is the source of truth; the editor must not render differently.
 - Every feature addition, modification, or removal must be reflected in `handbook.md`.
 - libserum is the source of truth; the editor must not render differently.
 
@@ -58,3 +59,8 @@
 ## Open integration task
 - Add libserum editor API (non-owning view) to render frames + sprite matches.
 - Keep libserum free of new dependencies (no Qt/OpenCV).
+
+## IndexedImageStore safety
+- `IndexedImageStore::at()` returns a raw pointer to a cached `cv::Mat` that can be evicted on subsequent cache activity.
+- When building UI previews or iterating through many items, use `loadCopy()` (or copy immediately) instead of holding a raw pointer.
+- Avoid storing `const cv::Mat*` across calls that can trigger cache eviction (`at()`, `add/remove`, cache limit changes).

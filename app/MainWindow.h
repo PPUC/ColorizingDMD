@@ -286,6 +286,7 @@ private:
     void stopPlayback();
     void stepPlayback(int delta);
     void jumpPlayback(int index);
+    void updatePlaybackIdleFrame(int index);
     void renderPlaybackFrame();
     void schedulePlaybackTick();
     void advancePlaybackFrame();
@@ -431,6 +432,8 @@ private:
     class QPushButton* m_frameDynamicCopyButton;
     class QComboBox* m_frameBackgroundAssign;
     class QCheckBox* m_shapeCompToggle;
+    class QSpinBox* m_triggerIdSpin;
+    class QCheckBox* m_triggerMonochromeCheck;
     class QComboBox* m_spriteDynamicSetCombo;
     class QComboBox* m_spriteDetAreaCombo;
     class QPushButton* m_spriteDetAreaClearButton;
@@ -504,6 +507,7 @@ private:
     std::vector<uint32_t> m_spriteColFromFrame;
     std::vector<uint16_t> m_spriteRects;
     std::vector<uint32_t> m_spriteRectMirror;
+    std::vector<uint32_t> m_frameTriggerIds;
     std::vector<SpriteZoneGroup> m_spriteZones;
     std::vector<uint8_t> m_frameSpriteZoneFlags;
     int m_spriteZonePreferredSlot = -1;

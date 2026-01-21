@@ -118,6 +118,7 @@ constexpr int kDefaultFrameHeight = 32;
 constexpr int kDefaultSpriteWidth = 64;
 constexpr int kDefaultSpriteHeight = 64;
 constexpr int kPreviewIconWidth = 160;
+constexpr int kMonochromeTriggerId = 65432;
 constexpr int kPreviewIconHeight = 120;
 constexpr int kPreviewItemWidth = 180;
 constexpr int kPreviewItemHeight = 150;
@@ -1179,6 +1180,7 @@ MainWindow::MainWindow(QWidget* parent)
         m_frameStore->clear();
         m_spriteStore->clear();
         m_frameDurations.clear();
+        m_frameTriggerIds.clear();
         m_spriteNames.clear();
         m_spriteColored.clear();
         m_spriteColoredX.clear();
@@ -1296,6 +1298,10 @@ MainWindow::MainWindow(QWidget* parent)
             m_serumData.nframes = static_cast<uint32_t>(m_frameStore->count());
         }
         m_state->addFrame();
+        m_frameTriggerIds.push_back(0xffffffffu);
+        if (m_hasLegacyRoundTrip) {
+            m_legacyRoundTrip.trigger_ids = m_frameTriggerIds;
+        }
         ensureUndoStacksSize();
         if (m_framesList->count() > 0) {
             m_framesList->setCurrentRow(m_framesList->count() - 1);
@@ -1399,6 +1405,12 @@ MainWindow::MainWindow(QWidget* parent)
             }
             if (row >= 0 && row < static_cast<int>(m_frameDynamicMaskMapsX.size())) {
                 m_frameDynamicMaskMapsX.erase(m_frameDynamicMaskMapsX.begin() + row);
+            }
+            if (row >= 0 && row < static_cast<int>(m_frameTriggerIds.size())) {
+                m_frameTriggerIds.erase(m_frameTriggerIds.begin() + row);
+                if (m_hasLegacyRoundTrip) {
+                    m_legacyRoundTrip.trigger_ids = m_frameTriggerIds;
+                }
             }
             ensureUndoStacksSize();
         } else if (m_spritesList->hasFocus()) {
@@ -2370,6 +2382,14 @@ MainWindow::MainWindow(QWidget* parent)
     m_frameBackgroundAssign = new QComboBox(inspectorWidget);
     m_backgroundAssignLabel = new QLabel("Background", inspectorWidget);
     m_shapeCompToggle = new QCheckBox("Shape comparison", inspectorWidget);
+    m_triggerIdSpin = new QSpinBox(inspectorWidget);
+    m_triggerIdSpin->setMinimum(-1);
+    m_triggerIdSpin->setMaximum(kMonochromeTriggerId);
+    m_triggerIdSpin->setSpecialValueText("None");
+    m_triggerIdSpin->setKeyboardTracking(false);
+    m_triggerIdSpin->setEnabled(false);
+    m_triggerMonochromeCheck = new QCheckBox("Switch to Monochrome", inspectorWidget);
+    m_triggerMonochromeCheck->setEnabled(false);
     m_hdSourceCombo = new QComboBox(inspectorWidget);
     m_hdScaleCombo = new QComboBox(inspectorWidget);
     m_hdCreateButton = new QPushButton("Create HD", inspectorWidget);
@@ -2385,6 +2405,8 @@ MainWindow::MainWindow(QWidget* parent)
     inspectorLayout->addRow("Counts", m_countsLabel);
     inspectorLayout->addRow("Selection", m_selectionLabel);
     inspectorLayout->addRow("Frame info", m_frameMetaLabel);
+    inspectorLayout->addRow("Trigger ID", m_triggerIdSpin);
+    inspectorLayout->addRow(m_triggerMonochromeCheck);
     inspectorLayout->addRow("Mask", m_frameMaskAssign);
     inspectorLayout->addRow("Dynamic mask", m_frameDynamicMaskAssign);
     inspectorLayout->addRow("Dynamic copy", m_frameDynamicCopyButton);
@@ -2588,6 +2610,73 @@ MainWindow::MainWindow(QWidget* parent)
                 continue;
             }
             m_frameShapeCompModes[static_cast<std::size_t>(row)] = enabled ? 1 : 0;
+        }
+    });
+    connect(m_triggerMonochromeCheck, &QCheckBox::toggled, this, [this](bool enabled) {
+        if (!m_triggerIdSpin) {
+            return;
+        }
+        const int frameCount = m_frameStore ? m_frameStore->count() : 0;
+        if (frameCount <= 0) {
+            return;
+        }
+        if (m_frameTriggerIds.size() < static_cast<std::size_t>(frameCount)) {
+            m_frameTriggerIds.resize(static_cast<std::size_t>(frameCount), 0xffffffffu);
+        }
+        const uint32_t triggerValue = enabled ? static_cast<uint32_t>(kMonochromeTriggerId) : 0xffffffffu;
+        const std::vector<int> targets = targetFrameIndices();
+        if (targets.empty()) {
+            return;
+        }
+        for (int row : targets) {
+            if (row < 0 || row >= static_cast<int>(m_frameTriggerIds.size())) {
+                continue;
+            }
+            m_frameTriggerIds[static_cast<std::size_t>(row)] = triggerValue;
+        }
+        if (m_hasLegacyRoundTrip) {
+            m_legacyRoundTrip.trigger_ids = m_frameTriggerIds;
+        }
+        QSignalBlocker blockSpin(m_triggerIdSpin);
+        if (enabled) {
+            m_triggerIdSpin->setValue(kMonochromeTriggerId);
+            m_triggerIdSpin->setReadOnly(true);
+        } else {
+            m_triggerIdSpin->setReadOnly(false);
+            if (m_triggerIdSpin->value() >= kMonochromeTriggerId) {
+                m_triggerIdSpin->setValue(-1);
+            }
+        }
+    });
+    connect(m_triggerIdSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
+        if (!m_triggerMonochromeCheck || m_triggerMonochromeCheck->isChecked()) {
+            return;
+        }
+        if (value >= kMonochromeTriggerId) {
+            QSignalBlocker blockSpin(m_triggerIdSpin);
+            m_triggerIdSpin->setValue(kMonochromeTriggerId - 1);
+            value = kMonochromeTriggerId - 1;
+        }
+        const int frameCount = m_frameStore ? m_frameStore->count() : 0;
+        if (frameCount <= 0) {
+            return;
+        }
+        if (m_frameTriggerIds.size() < static_cast<std::size_t>(frameCount)) {
+            m_frameTriggerIds.resize(static_cast<std::size_t>(frameCount), 0xffffffffu);
+        }
+        const uint32_t triggerValue = (value < 0) ? 0xffffffffu : static_cast<uint32_t>(value);
+        const std::vector<int> targets = targetFrameIndices();
+        if (targets.empty()) {
+            return;
+        }
+        for (int row : targets) {
+            if (row < 0 || row >= static_cast<int>(m_frameTriggerIds.size())) {
+                continue;
+            }
+            m_frameTriggerIds[static_cast<std::size_t>(row)] = triggerValue;
+        }
+        if (m_hasLegacyRoundTrip) {
+            m_legacyRoundTrip.trigger_ids = m_frameTriggerIds;
         }
     });
     connect(m_spriteDetAreaCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
@@ -4751,6 +4840,7 @@ void MainWindow::openProjectFile(const QString& filename)
         m_spriteStore->clear();
         m_backgroundStore->clear();
         m_frameDurations.clear();
+        m_frameTriggerIds.clear();
         m_spriteNames.clear();
         m_spriteColored.clear();
         m_spriteColoredX.clear();
@@ -4814,6 +4904,15 @@ void MainWindow::openProjectFile(const QString& filename)
             }
         }
         m_frameDurations = legacy.frame_durations;
+        m_frameTriggerIds = legacy.trigger_ids;
+        if (m_frameTriggerIds.size() < legacy.frames.size()) {
+            m_frameTriggerIds.resize(legacy.frames.size(), 0xffffffffu);
+        } else if (m_frameTriggerIds.size() > legacy.frames.size()) {
+            m_frameTriggerIds.resize(legacy.frames.size());
+        }
+        if (m_hasLegacyRoundTrip) {
+            m_legacyRoundTrip.trigger_ids = m_frameTriggerIds;
+        }
         m_spriteNames = legacy.sprite_labels;
         if (!m_serumDataLoaded) {
             m_spriteColored = legacy.sprite_colored;
@@ -5118,11 +5217,14 @@ LegacyProject MainWindow::buildLegacyProject(const QString& baseName) const
     }
 
     const int frameCount = m_frameStore->count();
+    if (!m_frameTriggerIds.empty()) {
+        project.trigger_ids = m_frameTriggerIds;
+    }
     if (m_hasLegacyRoundTrip) {
         project.hash_codes.resize(static_cast<std::size_t>(frameCount), 0);
         project.active_frames.resize(static_cast<std::size_t>(frameCount), 0);
-        project.trigger_ids.resize(static_cast<std::size_t>(frameCount), 0xffffffffu);
     }
+    project.trigger_ids.resize(static_cast<std::size_t>(frameCount), 0xffffffffu);
     project.frames.resize(static_cast<std::size_t>(frameCount));
     cv::Size baseSize(kDefaultFrameWidth, kDefaultFrameHeight);
     for (int i = 0; i < frameCount; ++i) {
@@ -5723,6 +5825,60 @@ void MainWindow::jumpPlayback(int index)
     }
 }
 
+void MainWindow::updatePlaybackIdleFrame(int index)
+{
+    if (!m_playbackCanvas || m_playbackActive) {
+        return;
+    }
+    if (index < 0) {
+        m_playbackCanvas->setTitle("Playback");
+        m_playbackCanvas->setImage(cv::Mat());
+        m_playbackCanvas->canvas()->setGridSegments(0, 0, 0);
+        m_playbackCanvas->canvas()->setGridScales(1, 1);
+        m_playbackCanvas->canvas()->setGridRegions(QRect(), QRect());
+        return;
+    }
+    const bool useHd = m_useHdFrame && hasHdFrame(index);
+    const cv::Mat composed = renderFrameWithSerum(index, useHd);
+    if (composed.empty()) {
+        m_playbackCanvas->setImage(cv::Mat());
+        m_playbackCanvas->canvas()->setGridSegments(0, 0, 0);
+        m_playbackCanvas->canvas()->setGridScales(1, 1);
+        m_playbackCanvas->canvas()->setGridRegions(QRect(), QRect());
+        return;
+    }
+    cv::Mat reference = buildOriginalPreviewForIndex(index);
+    cv::Mat original;
+    if (m_playbackShowOriginal && !reference.empty()) {
+        original = buildOriginalFrame(reference);
+    }
+    const QColor gap = m_playbackCanvas
+        ? m_playbackCanvas->palette().color(QPalette::Window)
+        : QApplication::palette().color(QPalette::Window);
+    const cv::Scalar gapColor(gap.blue(), gap.green(), gap.red());
+    const cv::Mat combined = (!original.empty())
+        ? buildCombinedFrame(composed, original, gapColor)
+        : EnsureBgr(composed);
+    m_playbackCanvas->setTitle(QString("Playback (frame %1)").arg(index + 1));
+    m_playbackCanvas->setImage(combined);
+    if (!original.empty()) {
+        const int gapPixels = FrameGapForWidth(composed.cols);
+        m_playbackCanvas->canvas()->setGridSegments(composed.rows, gapPixels, original.rows);
+        m_playbackCanvas->canvas()->setGridScales(1, 1);
+        FrameLayout layout = BuildFrameLayout(composed, original);
+        const QRect topRegion(layout.topX, 0, layout.topWidth, layout.topHeight);
+        const QRect bottomRegion(layout.bottomX,
+                                 layout.topHeight + gapPixels,
+                                 layout.bottomWidth,
+                                 layout.bottomHeight);
+        m_playbackCanvas->canvas()->setGridRegions(topRegion, bottomRegion);
+    } else {
+        m_playbackCanvas->canvas()->setGridSegments(0, 0, 0);
+        m_playbackCanvas->canvas()->setGridScales(1, 1);
+        m_playbackCanvas->canvas()->setGridRegions(QRect(), QRect());
+    }
+}
+
 void MainWindow::renderPlaybackFrame()
 {
     if (!m_playbackActive || m_playbackFrames.empty() || !m_playbackCanvas) {
@@ -5867,7 +6023,7 @@ void MainWindow::advancePlaybackFrame()
 
 void MainWindow::updatePlaybackButtons()
 {
-    const bool hasFrames = !m_frameDurations.empty();
+    const bool hasFrames = m_frameStore && m_frameStore->count() > 0;
     if (m_previewPlayButton) {
         m_previewPlayButton->setEnabled(hasFrames);
     }
@@ -9474,6 +9630,12 @@ void MainWindow::ensureMaskDataSize()
         m_frameDynamicCopyButton->setEnabled(hasFrames);
     }
     m_shapeCompToggle->setEnabled(hasFrames);
+    if (m_triggerIdSpin) {
+        m_triggerIdSpin->setEnabled(hasFrames);
+    }
+    if (m_triggerMonochromeCheck) {
+        m_triggerMonochromeCheck->setEnabled(hasFrames);
+    }
     if (m_framesCanvas) {
         m_framesCanvas->setMaskButtonsEnabled(hasFrames);
         m_framesCanvas->setBackgroundMaskEnabled(hasFrames);
@@ -14539,8 +14701,8 @@ void MainWindow::refreshFrameSpriteLists()
         const QColor gap = m_spritesList->palette().color(QPalette::Window);
         const QStringList spriteNames = m_state->sprites();
         for (int i = 0; i < spriteNames.size(); ++i) {
-            const cv::Mat* image = m_spriteStore->at(i);
-            if (!image || image->empty()) {
+            const cv::Mat image = m_spriteStore->loadCopy(i);
+            if (image.empty()) {
                 continue;
             }
             cv::Mat hd;
@@ -14549,7 +14711,7 @@ void MainWindow::refreshFrameSpriteLists()
                     hd = *hdSprite;
                 }
             }
-            cv::Mat previewMat = BuildBackgroundPreview(*image,
+            cv::Mat previewMat = BuildBackgroundPreview(image,
                                                         hd,
                                                         cv::Scalar(gap.blue(), gap.green(), gap.red()));
             if (previewMat.empty()) {
@@ -15151,6 +15313,7 @@ void MainWindow::showFrameAtIndex(int index)
     if (image && !image->empty()) {
         m_framesCanvas->canvas()->clearPreviewImage();
         updateFrameCanvasImage(index);
+        updatePlaybackIdleFrame(index);
         if (index == 0 && m_drawPointEnabled == false) {
             QTimer::singleShot(0, this, [this]() {
                 m_framesCanvas->canvas()->requestFitOnResize(true);
@@ -15176,6 +15339,31 @@ void MainWindow::showFrameAtIndex(int index)
             const uint8_t value = m_frameShapeCompModes[static_cast<std::size_t>(index)];
             m_shapeCompToggle->setChecked(value != 0);
         }
+        if (m_triggerIdSpin && m_triggerMonochromeCheck) {
+            QSignalBlocker blockSpin(m_triggerIdSpin);
+            QSignalBlocker blockCheck(m_triggerMonochromeCheck);
+            if (index >= 0 && index < static_cast<int>(m_frameTriggerIds.size())) {
+                const uint32_t trigger = m_frameTriggerIds[static_cast<std::size_t>(index)];
+                const bool isMono = trigger == static_cast<uint32_t>(kMonochromeTriggerId);
+                m_triggerMonochromeCheck->setChecked(isMono);
+                m_triggerMonochromeCheck->setEnabled(true);
+                m_triggerIdSpin->setEnabled(true);
+                m_triggerIdSpin->setReadOnly(isMono);
+                if (isMono) {
+                    m_triggerIdSpin->setValue(kMonochromeTriggerId);
+                } else if (trigger == 0xffffffffu) {
+                    m_triggerIdSpin->setValue(-1);
+                } else {
+                    m_triggerIdSpin->setValue(static_cast<int>(trigger));
+                }
+            } else {
+                m_triggerMonochromeCheck->setChecked(false);
+                m_triggerMonochromeCheck->setEnabled(false);
+                m_triggerIdSpin->setEnabled(false);
+                m_triggerIdSpin->setReadOnly(false);
+                m_triggerIdSpin->setValue(-1);
+            }
+        }
         const bool hasHd = hasHdFrame(index);
         if (!hasHd && m_useHdFrame) {
             m_useHdFrame = false;
@@ -15194,11 +15382,23 @@ void MainWindow::showFrameAtIndex(int index)
         refreshDynamicPaletteButtons();
         refreshRotationEditor();
         updateFrameUsageHighlights(index);
+        updatePlaybackButtons();
     } else {
         updateFrameCanvasImage(-1);
+        updatePlaybackIdleFrame(-1);
+        if (m_triggerIdSpin && m_triggerMonochromeCheck) {
+            QSignalBlocker blockSpin(m_triggerIdSpin);
+            QSignalBlocker blockCheck(m_triggerMonochromeCheck);
+            m_triggerMonochromeCheck->setChecked(false);
+            m_triggerMonochromeCheck->setEnabled(false);
+            m_triggerIdSpin->setEnabled(false);
+            m_triggerIdSpin->setReadOnly(false);
+            m_triggerIdSpin->setValue(-1);
+        }
         refreshFrameSpriteSlotCombo();
         refreshRotationEditor();
         updateFrameUsageHighlights(-1);
+        updatePlaybackButtons();
     }
 }
 

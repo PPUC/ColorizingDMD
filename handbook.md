@@ -35,6 +35,7 @@ This handbook captures editor behaviors and workflows that differ from the legac
 - **HD toggle** switches between SD and HD for frames, sprites, and backgrounds.
 - The status bar shows pixel coordinates for the canvas under the cursor.
 - The Playback canvas shows the rendered output from libserum while playing.
+- When playback is idle, the Playback canvas mirrors the currently selected frame.
 
 ## Drawing Tools
 
@@ -50,6 +51,7 @@ This handbook captures editor behaviors and workflows that differ from the legac
 - Dynamic mask edits apply to the current dynamic set for all selected frames.
 - Background assignment and background mask edits apply to all selected frames.
 - Frame history supports back/forward navigation per canvas.
+- Trigger ID is per frame in Tools → Inspector. “Switch to Monochrome” sets ID 65432 and locks the field; manual IDs must be < 65432.
 
 ## Masks (Comparison Masks)
 
