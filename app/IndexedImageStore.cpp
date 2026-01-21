@@ -115,6 +115,23 @@ const cv::Mat* IndexedImageStore::peek(int index) const
     return &m_images[index];
 }
 
+cv::Mat IndexedImageStore::loadCopy(int index) const
+{
+    if (index < 0 || index >= count()) {
+        return cv::Mat();
+    }
+    if (m_loader) {
+        if (const cv::Mat* cached = peek(index)) {
+            return cached->clone();
+        }
+        return loadFromAdapter(index);
+    }
+    if (index < 0 || index >= m_images.size()) {
+        return cv::Mat();
+    }
+    return m_images[index].clone();
+}
+
 bool IndexedImageStore::isDirty(int index) const
 {
     if (!m_loader) {

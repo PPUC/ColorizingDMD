@@ -18,6 +18,7 @@ public:
     const cv::Mat* at(int index) const;
     cv::Mat* atMutable(int index);
     const cv::Mat* peek(int index) const;
+    cv::Mat loadCopy(int index) const;
     bool isDirty(int index) const;
     int count() const;
     void setAdapter(std::function<int()> countFn,

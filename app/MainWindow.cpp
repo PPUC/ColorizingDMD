@@ -13930,8 +13930,8 @@ void MainWindow::refreshBackgroundList()
     }
 
     for (int i = 0; i < count; ++i) {
-        const cv::Mat* image = m_backgroundStore->at(i);
-        if (!image || image->empty()) {
+        const cv::Mat image = m_backgroundStore->loadCopy(i);
+        if (image.empty()) {
             continue;
         }
         cv::Mat rgb;
@@ -13943,7 +13943,7 @@ void MainWindow::refreshBackgroundList()
             }
         }
         const QColor gap = m_backgroundList->palette().color(QPalette::Window);
-        cv::Mat previewMat = BuildBackgroundPreview(*image,
+        cv::Mat previewMat = BuildBackgroundPreview(image,
                                                     hd,
                                                     cv::Scalar(gap.blue(), gap.green(), gap.red()));
         cv::cvtColor(previewMat, rgb, cv::COLOR_BGR2RGB);
