@@ -80,7 +80,11 @@ jobs:
           export HOMEBREW_NO_ENV_HINTS=1
           export HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1
           brew install --force-bottle qt opencv
-          echo "CMAKE_PREFIX_PATH=$(brew --prefix qt)" >> "$GITHUB_ENV"
+          QT_PREFIX=$(brew --prefix qt 2>/dev/null || brew --prefix qt@6 2>/dev/null || true)
+          if [ -n "$QT_PREFIX" ]; then
+            echo "CMAKE_PREFIX_PATH=$QT_PREFIX" >> "$GITHUB_ENV"
+            echo "Qt6_DIR=$QT_PREFIX/lib/cmake/Qt6" >> "$GITHUB_ENV"
+          fi
           echo "OpenCV_DIR=$(brew --prefix opencv)/lib/cmake/opencv4" >> "$GITHUB_ENV"
 
       - if: matrix.platform == 'macos'

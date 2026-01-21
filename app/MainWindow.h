@@ -591,6 +591,8 @@ private:
     class QToolButton* m_previewNextButton = nullptr;
     class QToolButton* m_previewRewindButton = nullptr;
     class QToolButton* m_previewFastForwardButton = nullptr;
+    class QCheckBox* m_playbackOverrideDurationCheck = nullptr;
+    class QSpinBox* m_playbackOverrideDurationSpin = nullptr;
     bool m_playbackActive = false;
     bool m_playbackPaused = false;
     bool m_playbackUseHd = false;

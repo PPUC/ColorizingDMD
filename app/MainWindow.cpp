@@ -1544,6 +1544,13 @@ MainWindow::MainWindow(QWidget* parent)
     m_previewFastForwardButton = new QToolButton(playbackControls);
     m_previewFastForwardButton->setText("Fwd");
     m_previewFastForwardButton->setToolTip("Jump forward 10 frames while playing");
+    m_playbackOverrideDurationCheck = new QCheckBox("Fixed", playbackControls);
+    m_playbackOverrideDurationCheck->setToolTip("Override frame duration during playback");
+    m_playbackOverrideDurationSpin = new QSpinBox(playbackControls);
+    m_playbackOverrideDurationSpin->setRange(1, 10000);
+    m_playbackOverrideDurationSpin->setValue(33);
+    m_playbackOverrideDurationSpin->setSuffix(" ms");
+    m_playbackOverrideDurationSpin->setEnabled(false);
     playbackControlsLayout->addStretch(1);
     playbackControlsLayout->addWidget(m_previewRewindButton);
     playbackControlsLayout->addWidget(m_previewPrevButton);
@@ -1552,6 +1559,9 @@ MainWindow::MainWindow(QWidget* parent)
     playbackControlsLayout->addWidget(m_previewStopButton);
     playbackControlsLayout->addWidget(m_previewNextButton);
     playbackControlsLayout->addWidget(m_previewFastForwardButton);
+    playbackControlsLayout->addSpacing(12);
+    playbackControlsLayout->addWidget(m_playbackOverrideDurationCheck);
+    playbackControlsLayout->addWidget(m_playbackOverrideDurationSpin);
     playbackControlsLayout->addStretch(1);
     playbackControls->setLayout(playbackControlsLayout);
     playbackLayout->addWidget(playbackControls, 0, Qt::AlignHCenter);
@@ -4355,6 +4365,35 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_previewFastForwardButton, &QToolButton::clicked, this, [this]() {
         stepPlayback(10);
     });
+    connect(m_playbackOverrideDurationCheck, &QCheckBox::toggled, this, [this](bool enabled) {
+        if (!m_playbackOverrideDurationSpin) {
+            return;
+        }
+        m_playbackOverrideDurationSpin->setEnabled(enabled);
+        if (m_playbackActive) {
+            if (enabled) {
+                m_playbackFrameDurationMs = m_playbackOverrideDurationSpin->value();
+            } else if (m_playbackFrameIndex >= 0 &&
+                       m_playbackFrameIndex < static_cast<int>(m_frameDurations.size()) &&
+                       m_frameDurations[m_playbackFrameIndex] > 0) {
+                m_playbackFrameDurationMs = static_cast<int>(m_frameDurations[m_playbackFrameIndex]);
+            } else {
+                m_playbackFrameDurationMs = 30;
+            }
+            m_playbackFrameClock.restart();
+            schedulePlaybackTick();
+        }
+    });
+    connect(m_playbackOverrideDurationSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
+        if (!m_playbackOverrideDurationCheck || !m_playbackOverrideDurationCheck->isChecked()) {
+            return;
+        }
+        if (m_playbackActive) {
+            m_playbackFrameDurationMs = value;
+            m_playbackFrameClock.restart();
+            schedulePlaybackTick();
+        }
+    });
     connect(m_previewRefreshButton, &QToolButton::clicked, this, [this]() {
         refreshAllPreviews();
     });
@@ -5896,6 +5935,10 @@ void MainWindow::renderPlaybackFrame()
             m_playbackFrameDurationMs = duration;
         }
     }
+    if (m_playbackOverrideDurationCheck && m_playbackOverrideDurationCheck->isChecked() &&
+        m_playbackOverrideDurationSpin) {
+        m_playbackFrameDurationMs = m_playbackOverrideDurationSpin->value();
+    }
     m_playbackUseHd = m_useHdFrame && hasHdFrame(frameIndex);
     m_playbackRotationData = rotationBlockForRead(frameIndex, m_playbackUseHd);
     m_playbackBase565.clear();
@@ -6044,6 +6087,14 @@ void MainWindow::updatePlaybackButtons()
     }
     if (m_previewFastForwardButton) {
         m_previewFastForwardButton->setEnabled(hasFrames);
+    }
+    if (m_playbackOverrideDurationCheck) {
+        m_playbackOverrideDurationCheck->setEnabled(hasFrames);
+    }
+    if (m_playbackOverrideDurationSpin) {
+        const bool enabled = hasFrames && m_playbackOverrideDurationCheck &&
+            m_playbackOverrideDurationCheck->isChecked();
+        m_playbackOverrideDurationSpin->setEnabled(enabled);
     }
 }
 
