@@ -2543,9 +2543,11 @@ MainWindow::MainWindow(QWidget* parent)
     viewMenu->addAction(previewDock->toggleViewAction());
 
     auto* handbookAction = new QAction("&Handbook", this);
+    auto* licensesAction = new QAction("&Dependencies && Licenses", this);
     auto* copyLogAction = new QAction("&Copy Log", this);
     auto* aboutAction = new QAction("&About", this);
     helpMenu->addAction(handbookAction);
+    helpMenu->addAction(licensesAction);
     helpMenu->addAction(copyLogAction);
     helpMenu->addAction(aboutAction);
     connect(handbookAction, &QAction::triggered, this, [this]() {
@@ -2578,6 +2580,32 @@ MainWindow::MainWindow(QWidget* parent)
         }
         QGuiApplication::clipboard()->setText(QString::fromUtf8(file.readAll()));
         logLine("Log copied from Help menu");
+    });
+    connect(licensesAction, &QAction::triggered, this, [this]() {
+        const QString appName = QCoreApplication::applicationName().isEmpty()
+            ? QString("PPUC-Serum-Colorizer")
+            : QCoreApplication::applicationName();
+        auto* dialog = new QDialog(this);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setWindowTitle("Dependencies & Licenses");
+        dialog->resize(720, 520);
+        auto* layout = new QVBoxLayout(dialog);
+        auto* viewer = new QTextBrowser(dialog);
+        viewer->setOpenExternalLinks(true);
+        const QString text = QStringLiteral(
+            "# Dependencies & Licenses\n"
+            "\n"
+            "This build of %1 includes the following third‑party components:\n"
+            "\n"
+            "- **Qt 6** (LGPL/GPL; dynamic linking)\n"
+            "- **OpenCV** (BSD‑3‑Clause)\n"
+            "- **libserum** (GPLv2+)\n"
+            "\n"
+            "License texts are shipped in the `licenses/` folder next to the application.\n");
+        viewer->setMarkdown(text.arg(appName));
+        layout->addWidget(viewer);
+        dialog->setLayout(layout);
+        dialog->show();
     });
     connect(aboutAction, &QAction::triggered, this, [this]() {
         const QString appName = QCoreApplication::applicationName().isEmpty()
@@ -6058,8 +6086,7 @@ void MainWindow::advancePlaybackFrame()
     }
     m_playbackPos += 1;
     if (m_playbackPos >= static_cast<int>(m_playbackFrames.size())) {
-        stopPlayback();
-        return;
+        m_playbackPos = 0;
     }
     renderPlaybackFrame();
 }
