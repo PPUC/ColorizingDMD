@@ -37,7 +37,7 @@ jobs:
         run: |
           rm -rf libserum
           git clone https://github.com/PPUC/libserum.git libserum
-          (cd libserum && git checkout d2616536ea90fe6bf83bb48dc4655dc3fb3e25fd)
+          (cd libserum && git checkout 542c3a7687d17f53ddf954ca7b1a0b4bdafe0002)
 
       - if: matrix.platform == 'linux'
         name: Install dependencies (linux)
