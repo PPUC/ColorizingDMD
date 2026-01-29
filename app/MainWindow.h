@@ -133,12 +133,14 @@ private:
     void commitFrameToSerum(int index, const cv::Mat& image, bool useHd);
     void commitFrameFromStore(int index, bool useHd);
     void refreshFramePreviews();
+    void refreshFramePreviewsForRotation();
     void updateFramePreviewAt(int index);
     void refreshFramePreviewSelection();
     void updatePreviewSelectionStyles();
     void schedulePreviewSelectionUpdate();
     void clearPreviewSelection();
     std::vector<int> selectedPreviewFrameIndices() const;
+    void updatePlaybackPreviewHighlight(int frameIndex);
     std::vector<int> targetFrameIndices() const;
     void updatePreviewsForMaskId(int maskId);
     int previewRowForFrame(int index) const;
@@ -581,6 +583,8 @@ private:
     QElapsedTimer m_rotationClock;
     QElapsedTimer m_previewRotationClock;
     SerumEditorRotationState m_rotationState;
+    mutable std::unordered_map<int, SerumEditorRotationState> m_previewRotationStates;
+    mutable std::unordered_map<int, SerumEditorRotationState> m_previewRotationStatesX;
     class QTimer* m_previewRotationTimer;
     class QTimer* m_previewSelectionTimer = nullptr;
     class QTimer* m_playbackTimer = nullptr;

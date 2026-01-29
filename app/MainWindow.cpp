@@ -149,6 +149,7 @@ constexpr int kSpriteZoneIndexRole = Qt::UserRole + 6;
 constexpr int kPreviewUsageRole = Qt::UserRole + 7;
 constexpr int kSpriteZoneSlotRole = Qt::UserRole + 8;
 constexpr int kSpriteZoneSpriteIndexRole = Qt::UserRole + 9;
+constexpr int kPreviewPlaybackRole = Qt::UserRole + 10;
 
 cv::Mat EnsureBgr(const cv::Mat& source);
 uint16_t BgrToRgb565(const cv::Vec3b& color);
@@ -432,6 +433,7 @@ public:
         QStyle* style = opt.widget ? opt.widget->style() : QApplication::style();
 
         const bool secondarySelected = index.data(kPreviewSecondarySelectedRole).toBool();
+        const bool playbackActive = index.data(kPreviewPlaybackRole).toBool();
         const bool primarySelected = opt.state.testFlag(QStyle::State_Selected) && !secondarySelected;
         opt.state &= ~QStyle::State_Selected;
         style->drawPrimitive(QStyle::PE_PanelItemViewItem, &opt, painter, opt.widget);
@@ -439,6 +441,12 @@ public:
             painter->fillRect(opt.rect, opt.palette.highlight().color());
         } else if (secondarySelected) {
             painter->fillRect(opt.rect, QColor(140, 190, 255, 160));
+        }
+        if (playbackActive) {
+            const QPen pen(QColor(255, 210, 0), 3);
+            painter->setPen(pen);
+            painter->setBrush(Qt::NoBrush);
+            painter->drawRect(opt.rect.adjusted(2, 2, -2, -2));
         }
         painter->setClipRect(opt.rect);
 
@@ -4359,6 +4367,8 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_previewRotateButton, &QToolButton::toggled, this, [this](bool enabled) {
         m_previewRotateEnabled = enabled;
         if (enabled) {
+            m_previewRotationStates.clear();
+            m_previewRotationStatesX.clear();
             m_previewRotationClock.restart();
             schedulePreviewRotationUpdate();
         } else if (m_previewRotationTimer) {
@@ -4433,7 +4443,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_previewRotationTimer = new QTimer(this);
     m_previewRotationTimer->setSingleShot(true);
     connect(m_previewRotationTimer, &QTimer::timeout, this, [this]() {
-        refreshFramePreviews();
+        refreshFramePreviewsForRotation();
         schedulePreviewRotationUpdate();
     });
     m_playbackTimer = new QTimer(this);
@@ -5712,6 +5722,31 @@ std::vector<int> MainWindow::selectedPreviewFrameIndices() const
     return indices;
 }
 
+void MainWindow::updatePlaybackPreviewHighlight(int frameIndex)
+{
+    if (!m_framePreviewList) {
+        return;
+    }
+    QSignalBlocker blocker(m_framePreviewList);
+    QListWidgetItem* target = nullptr;
+    for (int row = 0; row < m_framePreviewList->count(); ++row) {
+        QListWidgetItem* item = m_framePreviewList->item(row);
+        if (!item) {
+            continue;
+        }
+        const int itemFrame = item->data(kFrameIndexRole).toInt();
+        const bool active = (frameIndex >= 0 && itemFrame == frameIndex);
+        item->setData(kPreviewPlaybackRole, active);
+        if (active) {
+            target = item;
+        }
+    }
+    m_framePreviewList->viewport()->update();
+    if (target) {
+        m_framePreviewList->scrollToItem(target, QAbstractItemView::PositionAtCenter);
+    }
+}
+
 std::vector<int> MainWindow::targetFrameIndices() const
 {
     std::vector<int> indices = selectedPreviewFrameIndices();
@@ -5822,6 +5857,7 @@ void MainWindow::stopPlayback()
     m_playbackRotationMask.clear();
     m_playbackStaticFrame.release();
     m_playbackOriginalPreview.release();
+    updatePlaybackPreviewHighlight(-1);
     updatePlaybackButtons();
 }
 
@@ -5956,6 +5992,7 @@ void MainWindow::renderPlaybackFrame()
     }
     const int frameIndex = m_playbackFrames[static_cast<std::size_t>(m_playbackPos)];
     m_playbackFrameIndex = frameIndex;
+    updatePlaybackPreviewHighlight(frameIndex);
     m_playbackFrameDurationMs = 30;
     if (frameIndex >= 0 && frameIndex < static_cast<int>(m_frameDurations.size())) {
         const int duration = static_cast<int>(m_frameDurations[frameIndex]);
@@ -6509,6 +6546,9 @@ void MainWindow::refreshFramePreviews()
         if (!selectedLookup.empty() && selectedLookup.count(i) > 0) {
             item->setSelected(true);
         }
+        if (m_playbackActive && i == m_playbackFrameIndex) {
+            item->setData(kPreviewPlaybackRole, true);
+        }
         m_framePreviewList->addItem(item);
     }
 
@@ -6521,7 +6561,64 @@ void MainWindow::refreshFramePreviews()
     if (m_previewRotateEnabled && m_previewRotationTimer && !m_previewRotationTimer->isActive()) {
         schedulePreviewRotationUpdate();
     }
+    if (m_playbackActive && m_playbackFrameIndex >= 0) {
+        updatePlaybackPreviewHighlight(m_playbackFrameIndex);
+    }
     updatePlaybackButtons();
+}
+
+void MainWindow::refreshFramePreviewsForRotation()
+{
+    if (m_isLoadingProject || !m_framePreviewList) {
+        return;
+    }
+    const std::vector<int> indices = buildPreviewFrameIndices();
+    if (indices.empty()) {
+        return;
+    }
+    QSignalBlocker blocker(m_framePreviewList);
+    QSignalBlocker selectionBlocker(m_framePreviewList->selectionModel());
+    for (int i : indices) {
+        const int row = previewRowForFrame(i);
+        if (row < 0 || row >= m_framePreviewList->count()) {
+            continue;
+        }
+        QListWidgetItem* item = m_framePreviewList->item(row);
+        if (!item) {
+            continue;
+        }
+        cv::Mat reference = buildOriginalPreviewForIndex(i);
+        cv::Mat hdFrame;
+        if (i >= 0 && i < static_cast<int>(m_frameExtraFrames.size())) {
+            hdFrame = m_frameExtraFrames[static_cast<std::size_t>(i)];
+        }
+        cv::Mat composed = renderFrameWithSerum(i, false);
+        if (composed.empty()) {
+            continue;
+        }
+        cv::Mat hdComposed;
+        if (!hdFrame.empty()) {
+            hdComposed = renderFrameWithSerum(i, true);
+        }
+        cv::Mat previewMat = buildPreviewFrame(i, composed, reference, hdComposed);
+        cv::Mat rgb;
+        cv::cvtColor(previewMat, rgb, cv::COLOR_BGR2RGB);
+        QImage previewImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888);
+        const QSize iconSize = hasHdFrame(i)
+            ? QSize(kPreviewIconWidthHd, kPreviewIconHeightHd)
+            : QSize(kPreviewIconWidth, kPreviewIconHeight);
+        QPixmap pixmap = QPixmap::fromImage(previewImage.copy());
+        pixmap = pixmap.scaled(iconSize, Qt::KeepAspectRatio, Qt::FastTransformation);
+        item->setIcon(QIcon(pixmap));
+        item->setData(kPreviewIconSizeRole, iconSize);
+        item->setSizeHint(PreviewItemSizeForIcon(iconSize, m_framePreviewList->font()));
+        if (m_playbackActive && i == m_playbackFrameIndex) {
+            item->setData(kPreviewPlaybackRole, true);
+        } else {
+            item->setData(kPreviewPlaybackRole, false);
+        }
+    }
+    m_framePreviewList->doItemsLayout();
 }
 
 void MainWindow::updateFramePreviewAt(int index)
@@ -6565,6 +6662,11 @@ void MainWindow::updateFramePreviewAt(int index)
     item->setIcon(QIcon(pixmap));
     item->setData(kPreviewIconSizeRole, iconSize);
     item->setSizeHint(PreviewItemSizeForIcon(iconSize, m_framePreviewList->font()));
+    if (m_playbackActive && index == m_playbackFrameIndex) {
+        item->setData(kPreviewPlaybackRole, true);
+    } else {
+        item->setData(kPreviewPlaybackRole, false);
+    }
     m_framePreviewList->doItemsLayout();
 }
 
@@ -6582,8 +6684,17 @@ cv::Mat MainWindow::buildPreviewFrame(int index,
         }
     }
     cv::Mat original = buildOriginalFrame(reference);
-    if (m_previewMaskOverlayEnabled && m_maskMode != MaskMode::None && !original.empty()) {
-        if (m_maskMode == MaskMode::Comparison) {
+    if (m_previewMaskOverlayEnabled && !original.empty()) {
+        MaskMode overlayMode = m_maskMode;
+        if (overlayMode == MaskMode::None) {
+            const PreviewFilterKind filterKind = currentPreviewFilterKind();
+            if (filterKind == PreviewFilterKind::DynamicMask) {
+                overlayMode = MaskMode::Dynamic;
+            } else {
+                overlayMode = MaskMode::Comparison;
+            }
+        }
+        if (overlayMode == MaskMode::Comparison) {
             uint8_t maskId = 255;
             const uint32_t frameId = static_cast<uint32_t>(index);
             if (m_serumDataLoaded && index >= 0 && index < static_cast<int>(m_serumData.nframes) &&
@@ -6609,7 +6720,7 @@ cv::Mat MainWindow::buildPreviewFrame(int index,
                     original = buildMaskPreview(original, mask, cv::Vec3b(200, 0, 200));
                 }
             }
-        } else if (m_maskMode == MaskMode::Dynamic) {
+        } else if (overlayMode == MaskMode::Dynamic) {
             const int setId = currentFrameDynamicMaskId();
             cv::Mat map;
             if (m_serumDataLoaded && index >= 0 && index < static_cast<int>(m_serumData.nframes) &&
@@ -6652,6 +6763,15 @@ cv::Mat MainWindow::applyRotationPreview(const cv::Mat& colorized,
         return EnsureBgr(colorized);
     }
 
+    const uint32_t elapsed = m_previewRotationClock.isValid()
+        ? static_cast<uint32_t>(m_previewRotationClock.elapsed())
+        : 0;
+    auto& stateMap = useHd ? m_previewRotationStatesX : m_previewRotationStates;
+    auto [it, inserted] = stateMap.emplace(frameIndex, SerumEditorRotationState{});
+    SerumEditorRotationState& state = it->second;
+    if (inserted) {
+        SerumEditor_InitRotationState(rotationsData, &state, elapsed);
+    }
     std::vector<uint16_t> base565;
     std::vector<uint16_t> rotationsInFrame;
     int width = 0;
@@ -6661,18 +6781,12 @@ cv::Mat MainWindow::applyRotationPreview(const cv::Mat& colorized,
         base565.empty()) {
         return EnsureBgr(colorized);
     }
-
-    const uint32_t elapsed = m_previewRotationClock.isValid()
-        ? static_cast<uint32_t>(m_previewRotationClock.elapsed())
-        : 0;
-    SerumEditorRotationState state{};
-    SerumEditor_InitRotationState(rotationsData, &state, elapsed);
     std::vector<uint16_t> rotated(base565.size(), 0);
-    SerumEditor_ApplyRotationsMasked(rotationsData, base565.data(),
-                                     rotated.data(), rotationsInFrame.data(),
+    SerumEditor_ApplyRotationsMasked(rotationsData, base565.data(), rotated.data(),
+                                     rotationsInFrame.data(),
                                      static_cast<uint32_t>(width),
-                                     static_cast<uint32_t>(height), &state,
-                                     elapsed);
+                                     static_cast<uint32_t>(height),
+                                     &state, elapsed);
     return ConvertRgb565ToBgrMat(rotated.data(), width, height);
 }
 
@@ -6753,6 +6867,8 @@ void MainWindow::resetCanvasRotationState()
     if (m_rotationTimer) {
         m_rotationTimer->stop();
     }
+    m_previewRotationStates.clear();
+    m_previewRotationStatesX.clear();
     if (m_canvasRotateEnabled) {
         m_rotationClock.restart();
         updateCanvasRotationFrame();

@@ -23,6 +23,7 @@ This handbook captures editor behaviors and workflows that differ from the legac
 - Use the rotate toggle to preview color rotations in the preview row.
 - Use the refresh button to rebuild previews after bulk edits.
 - Use Play/Pause/Stop/Prev/Next/Rew/Fwd in the Playback tab to test-play the selected frames (or the whole ROM if none or only one frame is selected). A single selected frame becomes the start point. Playback loops back to the first selected frame when it reaches the end.
+- During playback, the current frame is highlighted in the preview row and the row scrolls to keep it centered when possible.
 - Playback can override per-frame durations using the `Fixed` control (milliseconds) in the Playback tab.
 
 ## Canvas Controls

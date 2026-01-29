@@ -8,7 +8,7 @@ if [ -z "${BUILD_TYPE}" ]; then
    BUILD_TYPE="Release"
 fi
 
-LIBSERUM_SHA=542c3a7687d17f53ddf954ca7b1a0b4bdafe0002
+LIBSERUM_SHA=8ad632aac0d438c0ed6bc5b12b3241215356c4c2
 
 if [ -z "${PLATFORM}" ]; then
    PLATFORM="unknown"
