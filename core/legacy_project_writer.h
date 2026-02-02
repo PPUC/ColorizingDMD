@@ -14,6 +14,11 @@ bool SaveConcentrateProject(const std::string& cromc_path,
                             const LegacyProject& project,
                             std::string* error);
 
+bool SaveConcentrateProjectWithSeed(const std::string& cromc_path,
+                                    const LegacyProject& project,
+                                    const SerumData* seed,
+                                    std::string* error);
+
 bool BuildConcentrateData(const LegacyProject& project,
                           SerumData& out,
                           std::string* error);

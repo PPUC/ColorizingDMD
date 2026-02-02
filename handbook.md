@@ -5,6 +5,7 @@ This handbook captures editor behaviors and workflows that differ from the legac
 ## Performance Notes
 
 - Large projects load frame data on demand; the first time you open a frame or run a full save, expect a short delay while data is decoded.
+- Autosave can be enabled in Settings; it writes to separate `*.autosave.cRP` / `*.autosave.cROMc` files.
 
 ## Navigation and Selection
 
@@ -25,6 +26,8 @@ This handbook captures editor behaviors and workflows that differ from the legac
 - Use Play/Pause/Stop/Prev/Next/Rew/Fwd in the Playback tab to test-play the selected frames (or the whole ROM if none or only one frame is selected). A single selected frame becomes the start point. Playback loops back to the first selected frame when it reaches the end.
 - During playback, the current frame is highlighted in the preview row and the row scrolls to keep it centered when possible.
 - Playback can override per-frame durations using the `Fixed` control (milliseconds) in the Playback tab.
+- Playback uses libserum’s runtime pipeline, so scene triggers and scene timing behave like in production.
+- Playback triggers an autosave and uses the autosaved files for rendering.
 
 ## Canvas Controls
 

@@ -12,6 +12,87 @@
 #include "serum_constants.h"
 
 namespace {
+template <typename T, typename U = T>
+void MergeSparseFromSeed(SparseVector<T>& target,
+                         const SparseVector<T>& seed,
+                         std::size_t element_size_override = 0,
+                         SparseVector<U>* parent = nullptr)
+{
+    const std::size_t element_size =
+        element_size_override > 0 ? element_size_override : seed.elementCount();
+    if (element_size == 0) {
+        return;
+    }
+    const std::vector<uint32_t> ids = seed.elementIds();
+    for (const uint32_t id : ids) {
+        if (target.hasData(id)) {
+            continue;
+        }
+        const T* values = seed[id];
+        if (target.isIndexStorage()) {
+            target.setIndex(id, values, element_size);
+        } else {
+            target.set(id, values, element_size, parent);
+        }
+    }
+}
+
+void MergeSerumDataFromSeed(SerumData& data, const SerumData& seed)
+{
+    MergeSparseFromSeed(data.hashcodes, seed.hashcodes, 1);
+    MergeSparseFromSeed(data.shapecompmode, seed.shapecompmode, 1);
+    MergeSparseFromSeed(data.compmaskID, seed.compmaskID, 1);
+    MergeSparseFromSeed(data.movrctID, seed.movrctID, 1);
+    MergeSparseFromSeed(data.isextraframe, seed.isextraframe, 1);
+    MergeSparseFromSeed(data.isextrasprite, seed.isextrasprite, 1);
+    MergeSparseFromSeed(data.isextrabackground, seed.isextrabackground, 1);
+    MergeSparseFromSeed(data.activeframes, seed.activeframes, 1);
+    MergeSparseFromSeed(data.triggerIDs, seed.triggerIDs, 1);
+    MergeSparseFromSeed(data.backgroundIDs, seed.backgroundIDs, 1);
+    MergeSparseFromSeed(data.sprshapemode, seed.sprshapemode, 1);
+
+    MergeSparseFromSeed(data.compmasks, seed.compmasks);
+    MergeSparseFromSeed(data.movrcts, seed.movrcts);
+    MergeSparseFromSeed(data.cpal, seed.cpal);
+    MergeSparseFromSeed(data.cframes, seed.cframes);
+    MergeSparseFromSeed(data.cframes_v2, seed.cframes_v2);
+    MergeSparseFromSeed(data.dynamasks, seed.dynamasks);
+    MergeSparseFromSeed(data.dyna4cols, seed.dyna4cols);
+    MergeSparseFromSeed(data.dyna4cols_v2, seed.dyna4cols_v2);
+    MergeSparseFromSeed(data.framesprites, seed.framesprites);
+    MergeSparseFromSeed(data.spritedescriptionso, seed.spritedescriptionso);
+    MergeSparseFromSeed(data.spritedescriptionsc, seed.spritedescriptionsc);
+    MergeSparseFromSeed(data.spriteoriginal, seed.spriteoriginal);
+    MergeSparseFromSeed(data.spritecolored, seed.spritecolored);
+    MergeSparseFromSeed(data.colorrotations, seed.colorrotations);
+    MergeSparseFromSeed(data.colorrotations_v2, seed.colorrotations_v2);
+    MergeSparseFromSeed(data.spritedetdwords, seed.spritedetdwords);
+    MergeSparseFromSeed(data.spritedetdwordpos, seed.spritedetdwordpos);
+    MergeSparseFromSeed(data.spritedetareas, seed.spritedetareas);
+    MergeSparseFromSeed(data.backgroundframes, seed.backgroundframes);
+    MergeSparseFromSeed(data.backgroundframes_v2, seed.backgroundframes_v2);
+    MergeSparseFromSeed(data.backgroundBB, seed.backgroundBB, 0, &data.backgroundIDs);
+    MergeSparseFromSeed(data.backgroundmask, seed.backgroundmask, 0, &data.backgroundIDs);
+    MergeSparseFromSeed(data.dynashadowsdir, seed.dynashadowsdir);
+    MergeSparseFromSeed(data.dynashadowscol, seed.dynashadowscol);
+    MergeSparseFromSeed(data.dynasprite4cols, seed.dynasprite4cols);
+    MergeSparseFromSeed(data.dynaspritemasks, seed.dynaspritemasks);
+
+    MergeSparseFromSeed(data.cframes_v2_extra, seed.cframes_v2_extra, 0, &data.isextraframe);
+    MergeSparseFromSeed(data.dynamasks_extra, seed.dynamasks_extra, 0, &data.isextraframe);
+    MergeSparseFromSeed(data.dyna4cols_v2_extra, seed.dyna4cols_v2_extra, 0, &data.isextraframe);
+    MergeSparseFromSeed(data.colorrotations_v2_extra, seed.colorrotations_v2_extra, 0, &data.isextraframe);
+    MergeSparseFromSeed(data.dynashadowsdir_extra, seed.dynashadowsdir_extra, 0, &data.isextraframe);
+    MergeSparseFromSeed(data.dynashadowscol_extra, seed.dynashadowscol_extra, 0, &data.isextraframe);
+    MergeSparseFromSeed(data.dynasprite4cols_extra, seed.dynasprite4cols_extra, 0, &data.isextraframe);
+    MergeSparseFromSeed(data.dynaspritemasks_extra, seed.dynaspritemasks_extra, 0, &data.isextraframe);
+    MergeSparseFromSeed(data.spritemask_extra, seed.spritemask_extra, 0, &data.isextrasprite);
+    MergeSparseFromSeed(data.spritecolored_extra, seed.spritecolored_extra, 0, &data.isextrasprite);
+    MergeSparseFromSeed(data.framespriteBB, seed.framespriteBB, 0, &data.framesprites);
+    MergeSparseFromSeed(data.backgroundframes_v2_extra, seed.backgroundframes_v2_extra, 0,
+                        &data.isextrabackground);
+    MergeSparseFromSeed(data.backgroundmask_extra, seed.backgroundmask_extra, 0, &data.backgroundIDs);
+}
 bool WriteExact(std::ofstream& file, const void* src, std::size_t size)
 {
     return static_cast<bool>(file.write(reinterpret_cast<const char*>(src), static_cast<std::streamsize>(size)));
@@ -748,6 +829,37 @@ bool SaveConcentrateProject(const std::string& cromc_path,
     SerumData data;
     if (!BuildConcentrateData(project, data, error)) {
         return false;
+    }
+    if (data.rname[0] == '\0') {
+        const std::string baseName = BaseName(cromc_path);
+        const std::size_t nameCopy = std::min(baseName.size(), sizeof(data.rname) - 1);
+        std::memset(data.rname, 0, sizeof(data.rname));
+        std::memcpy(data.rname, baseName.data(), nameCopy);
+    }
+    if (!data.SaveToFile(cromc_path.c_str())) {
+        if (error) {
+            *error = "Failed to write .cROMc file";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool SaveConcentrateProjectWithSeed(const std::string& cromc_path,
+                                    const LegacyProject& project,
+                                    const SerumData* seed,
+                                    std::string* error)
+{
+    SerumData data;
+    if (!BuildConcentrateData(project, data, error)) {
+        return false;
+    }
+    if (seed) {
+        MergeSerumDataFromSeed(data, *seed);
+    }
+    if (seed && seed->sceneGenerator && data.sceneGenerator) {
+        data.sceneGenerator->setSceneData(seed->sceneGenerator->getSceneData());
+        data.sceneGenerator->setDepth(data.nocolors == 16 ? 4 : 2);
     }
     if (data.rname[0] == '\0') {
         const std::string baseName = BaseName(cromc_path);

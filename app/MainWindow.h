@@ -23,6 +23,7 @@
 
 class QListWidget;
 class QStackedWidget;
+typedef struct _Serum_Frame_Struc Serum_Frame_Struc;
 
 class MainWindow : public QMainWindow
 {
@@ -124,8 +125,23 @@ private:
     void openProjectFile(const QString& filename);
     bool saveProjectToPath(const QString& filename);
     bool saveLegacyProject(const QString& filename);
-    LegacyProject buildLegacyProject(const QString& baseName) const;
+    LegacyProject buildLegacyProject(const QString& baseName, bool preferSerumMasks = false) const;
     bool setupSerumData(const QString& cromcPath, const LegacyProject& legacy, std::string* error);
+    bool ensureSerumRuntime();
+    void disposeSerumRuntime();
+    bool saveLegacyProjectToPaths(const QString& rpPath,
+                                  const QString& cromcPath,
+                                  const QString& baseName,
+                                  bool updateState,
+                                  bool showErrors,
+                                  bool preferSerumMasks = false);
+    bool autosaveProject(bool showProgress);
+    void updateAutosaveTimer();
+    void setSerumRuntimePathsForPlayback(bool useAutosave);
+    bool autosaveFilesDiffer(const QString& rpPath,
+                             const QString& cromcPath,
+                             const QString& autoRp,
+                             const QString& autoCromc) const;
     void configureFrameStoreAdapter();
     void configureSpriteStoreAdapter();
     void configureBackgroundStoreAdapter();
@@ -191,6 +207,7 @@ private:
     void initLogging();
     void shutdownLogging();
     void logLine(const QString& message);
+    void markProjectDirty();
     std::uint64_t currentRssBytes() const;
     void showCrashLogDialog();
     void pushPaletteUndoSnapshot();
@@ -375,6 +392,8 @@ private:
         std::vector<uint16_t> dynashadow_col_x;
         std::vector<uint32_t> active_col_sets;
         std::vector<char> mask_names;
+        std::vector<uint8_t> frame_comp_mask_ids;
+        std::vector<uint8_t> frame_shape_comp_modes;
         uint32_t draw_col_mode = 0;
         uint8_t draw_mode = 0;
         int32_t mask_sel_mode = 0;
@@ -468,6 +487,7 @@ private:
     class QLabel* m_frameMetaLabel;
     class QLabel* m_spriteMetaLabel;
     bool m_hasLegacyRoundTrip = false;
+    bool m_projectDirty = false;
     LegacyRoundTripData m_legacyRoundTrip;
     class QLabel* m_coordLabel;
     class QToolButton* m_currentColorButton;
@@ -543,6 +563,14 @@ private:
     std::unordered_map<int, std::vector<uint16_t>> m_frameRotationsLocalX;
     SerumData m_serumData;
     bool m_serumDataLoaded = false;
+    Serum_Frame_Struc* m_serumRuntimeFrame = nullptr;
+    QString m_serumRuntimeAltDir;
+    QString m_serumRuntimeRomName;
+    QString m_projectDir;
+    QString m_projectBaseName;
+    bool m_autosaveEnabled = true;
+    int m_autosaveIntervalMinutes = 1;
+    class QTimer* m_autosaveTimer = nullptr;
 
     bool m_drawPointEnabled = false;
     MaskMode m_maskMode = MaskMode::None;
@@ -600,6 +628,7 @@ private:
     bool m_playbackActive = false;
     bool m_playbackPaused = false;
     bool m_playbackUseHd = false;
+    bool m_playbackUsesSerumRuntime = false;
     bool m_playbackShowOriginal = true;
     int m_playbackFrameIndex = -1;
     int m_playbackFrameDurationMs = 0;
@@ -614,6 +643,7 @@ private:
     std::vector<uint16_t> m_playbackRotationMask;
     cv::Mat m_playbackStaticFrame;
     cv::Mat m_playbackOriginalPreview;
+    std::vector<uint8_t> m_playbackOriginalBuffer;
     std::vector<int> m_playbackFrames;
     std::vector<int> m_previewSelectedFrames;
     bool m_restorePreviewSelection = false;

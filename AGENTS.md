@@ -64,3 +64,7 @@
 - `IndexedImageStore::at()` returns a raw pointer to a cached `cv::Mat` that can be evicted on subsequent cache activity.
 - When building UI previews or iterating through many items, use `loadCopy()` (or copy immediately) instead of holding a raw pointer.
 - Avoid storing `const cv::Mat*` across calls that can trigger cache eviction (`at()`, `add/remove`, cache limit changes).
+
+## Save correctness (cROMc)
+- Any saved `.cROMc` must be complete and correct: masks, dynamic masks, sprites, backgrounds, rotations/scenes, and metadata must round-trip without loss.
+- If a field lives only in `SerumData` (e.g. scenes), saving must preserve it (seed or serialize it) rather than dropping it.

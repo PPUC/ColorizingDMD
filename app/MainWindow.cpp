@@ -10,6 +10,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QLabel>
+#include <QProgressDialog>
 #include <QFile>
 #include <QFileDialog>
 #include <QCheckBox>
@@ -73,6 +74,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
 #include <QFileInfo>
 #include <QSignalBlocker>
 #include <QStyledItemDelegate>
@@ -157,6 +159,66 @@ cv::Vec3b Rgb565ToBgr(uint16_t value);
 std::vector<uint16_t> ConvertBgrMatToRgb565(const cv::Mat& source);
 cv::Mat ConvertRgb565ToBgrMat(const uint16_t* data, int width, int height);
 cv::Mat Scale2xBgr(const cv::Mat& source);
+
+bool LoadReferenceFramesFromRp(const QString& rpPath,
+                               int width,
+                               int height,
+                               int frameCount,
+                               std::vector<cv::Mat>& out,
+                               QString* error)
+{
+    if (rpPath.isEmpty()) {
+        if (error) {
+            *error = "Missing .cRP path";
+        }
+        return false;
+    }
+    QFile file(rpPath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        if (error) {
+            *error = QString("Could not open .cRP file: %1").arg(rpPath);
+        }
+        return false;
+    }
+    if (width <= 0 || height <= 0 || frameCount <= 0) {
+        if (error) {
+            *error = "Invalid frame dimensions";
+        }
+        return false;
+    }
+    char header[64] = {};
+    if (file.read(header, sizeof(header)) != static_cast<qint64>(sizeof(header))) {
+        if (error) {
+            *error = "Invalid .cRP header";
+        }
+        return false;
+    }
+    const std::size_t pixelCount = static_cast<std::size_t>(frameCount) *
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    if (pixelCount == 0) {
+        if (error) {
+            *error = "Invalid .cRP frame size";
+        }
+        return false;
+    }
+    QByteArray data = file.read(static_cast<qint64>(pixelCount));
+    if (data.size() != static_cast<qint64>(pixelCount)) {
+        if (error) {
+            *error = "Unexpected end of .cRP reference frames";
+        }
+        return false;
+    }
+    out.clear();
+    out.reserve(static_cast<std::size_t>(frameCount));
+    const uint8_t* src = reinterpret_cast<const uint8_t*>(data.constData());
+    const std::size_t framePixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    for (int i = 0; i < frameCount; ++i) {
+        cv::Mat ref(height, width, CV_8UC1);
+        std::memcpy(ref.data, src + static_cast<std::size_t>(i) * framePixels, framePixels);
+        out.push_back(ref);
+    }
+    return true;
+}
 
 struct FrameLayout {
     int topWidth = 0;
@@ -1218,6 +1280,8 @@ MainWindow::MainWindow(QWidget* parent)
         m_frameDynamicMaskMapsX.clear();
         m_frameShapeCompModes.clear();
         m_noColors = 64;
+        m_projectDir.clear();
+        m_projectBaseName.clear();
         resetUndoStacks();
         resetNavigationHistory();
         updateMetadataForFrame(-1);
@@ -1267,6 +1331,18 @@ MainWindow::MainWindow(QWidget* parent)
             return;
         }
         if (saveProjectToPath(filename)) {
+            QFileInfo info(filename);
+            QString suffix = info.suffix().toLower();
+            QString base = info.completeBaseName();
+            QString dir = info.absolutePath();
+            if (suffix != "cromc" && suffix != "crp" && suffix != "crom") {
+                suffix = "crp";
+                base = info.fileName();
+            }
+            m_projectDir = dir;
+            m_projectBaseName = base;
+            m_serumRuntimeAltDir = dir;
+            m_serumRuntimeRomName = base;
             updateWindowTitle();
             persistRecentFiles();
             statusBar()->showMessage(QString("Save As: %1").arg(filename), 5000);
@@ -1284,6 +1360,7 @@ MainWindow::MainWindow(QWidget* parent)
             }
             m_imageStore->addImage(filename, image);
             m_state->addImportedImage(filename);
+            markProjectDirty();
             m_imagesCanvas->setTitle(QString("Imported: %1").arg(filename));
             m_imagesCanvas->setStatusText(QString("Imported %1").arg(filename));
             m_imagesCanvas->setImage(image);
@@ -1306,6 +1383,7 @@ MainWindow::MainWindow(QWidget* parent)
             m_serumData.nframes = static_cast<uint32_t>(m_frameStore->count());
         }
         m_state->addFrame();
+        markProjectDirty();
         m_frameTriggerIds.push_back(0xffffffffu);
         if (m_hasLegacyRoundTrip) {
             m_legacyRoundTrip.trigger_ids = m_frameTriggerIds;
@@ -1328,6 +1406,7 @@ MainWindow::MainWindow(QWidget* parent)
         }
         m_spriteStore->add(spriteImage);
         m_state->addSprite();
+        markProjectDirty();
         ensureUndoStacksSize();
         if (m_spritesList->count() > 0) {
             m_spritesList->setCurrentRow(m_spritesList->count() - 1);
@@ -1399,6 +1478,7 @@ MainWindow::MainWindow(QWidget* parent)
                 m_serumData.nframes = static_cast<uint32_t>(m_frameStore->count());
             }
             m_state->removeFrame(row);
+            markProjectDirty();
             if (row >= 0 && row < static_cast<int>(m_frameRefs.size())) {
                 m_frameRefs.erase(m_frameRefs.begin() + row);
             }
@@ -1425,6 +1505,7 @@ MainWindow::MainWindow(QWidget* parent)
             const int row = m_spritesList->currentRow();
             m_spriteStore->removeAt(row);
             m_state->removeSprite(row);
+            markProjectDirty();
             if (row >= 0 && row < static_cast<int>(m_spriteNames.size())) {
                 m_spriteNames.erase(m_spriteNames.begin() + row);
             }
@@ -1476,6 +1557,7 @@ MainWindow::MainWindow(QWidget* parent)
             if (row >= 0 && row < m_state->images().size()) {
                 const QString path = m_state->images().at(row);
                 m_state->removeImage(row);
+                markProjectDirty();
                 m_imageStore->removeByPath(path);
             }
         }
@@ -1583,6 +1665,22 @@ MainWindow::MainWindow(QWidget* parent)
     connect(tabs, &QTabWidget::currentChanged, this, [this](int) {
         updateUndoActions();
         updateHdControlsForContext();
+        if (m_canvasTabs && m_canvasTabs->currentWidget() == m_framesCanvas) {
+            const int previewRow = m_framePreviewList ? m_framePreviewList->currentRow() : -1;
+            if (m_framePreviewList && previewRow >= 0 && previewRow < m_framePreviewList->count()) {
+                const QListWidgetItem* item = m_framePreviewList->item(previewRow);
+                if (item) {
+                    const int frameIndex = item->data(kFrameIndexRole).toInt();
+                    if (frameIndex >= 0 && frameIndex < m_framesList->count()) {
+                        QSignalBlocker blocker(m_framesList);
+                        m_framesList->setCurrentRow(frameIndex);
+                        showFrameAtIndex(frameIndex);
+                    }
+                }
+            } else if (m_framesList && m_framesList->currentRow() >= 0) {
+                showFrameAtIndex(m_framesList->currentRow());
+            }
+        }
     });
 
     auto* toolDock = new QDockWidget("Components", this);
@@ -4707,6 +4805,8 @@ MainWindow::MainWindow(QWidget* parent)
     m_frameCacheLimit = std::clamp(settings.value("frameCacheLimit", 16).toInt(), 1, 256);
     m_spriteCacheLimit = std::clamp(settings.value("spriteCacheLimit", 8).toInt(), 1, 256);
     m_backgroundCacheLimit = std::clamp(settings.value("backgroundCacheLimit", 4).toInt(), 1, 256);
+    m_autosaveEnabled = settings.value("autosaveEnabled", true).toBool();
+    m_autosaveIntervalMinutes = std::clamp(settings.value("autosaveIntervalMinutes", 1).toInt(), 1, 120);
     const bool wasCleanShutdown = settings.value("lastShutdownClean", true).toBool();
     m_loggingEnabled = settings.value("loggingEnabled", true).toBool();
     const QString defaultLogDir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
@@ -4721,6 +4821,13 @@ MainWindow::MainWindow(QWidget* parent)
     if (!wasCleanShutdown) {
         QTimer::singleShot(0, this, [this]() { showCrashLogDialog(); });
     }
+    if (!m_autosaveTimer) {
+        m_autosaveTimer = new QTimer(this);
+        connect(m_autosaveTimer, &QTimer::timeout, this, [this]() {
+            autosaveProject(false);
+        });
+    }
+    updateAutosaveTimer();
     resetNavigationHistory();
     m_uiReady = true;
 }
@@ -4757,6 +4864,7 @@ void MainWindow::openProjectFile(const QString& filename)
         return;
     }
     logLine(QString("Open project: %1").arg(filename));
+    disposeSerumRuntime();
     stopPlayback();
     QScopedValueRollback<bool> loadGuard(m_isLoadingProject, true);
     const QFileInfo info(filename);
@@ -4821,6 +4929,7 @@ void MainWindow::openProjectFile(const QString& filename)
             if (LoadProjectJson(*m_state, filename, &error)) {
                 resetUndoStacks();
                 resetNavigationHistory();
+                m_projectDirty = false;
                 statusBar()->showMessage(QString("Open: %1").arg(filename), 5000);
                 persistRecentFiles();
                 QTimer::singleShot(0, this, [this]() {
@@ -4866,9 +4975,56 @@ void MainWindow::openProjectFile(const QString& filename)
             }
             cromPath = filename;
         }
-        const QString base = suffix == "cromc" ? info.completeBaseName() : QFileInfo(cromPath).completeBaseName();
-        const QString dir = suffix == "cromc" ? info.absolutePath() : QFileInfo(cromPath).absolutePath();
-        const QString cromcPath = dir + "/" + base + ".cROMc";
+        QString base;
+        QString dir;
+        if (suffix == "cromc") {
+            base = info.completeBaseName();
+            dir = info.absolutePath();
+        } else if (!cromPath.isEmpty()) {
+            base = QFileInfo(cromPath).completeBaseName();
+            dir = QFileInfo(cromPath).absolutePath();
+        } else {
+            base = info.completeBaseName();
+            dir = info.absolutePath();
+        }
+        QString cromcPath = dir + "/" + base + ".cROMc";
+        const QString projectCromcPath = cromcPath;
+        m_projectDir = dir;
+        m_projectBaseName = base;
+        m_serumRuntimeAltDir = dir;
+        m_serumRuntimeRomName = base;
+        const QString autoBase = base + ".autosave";
+        const QString autoRp = QDir(dir).filePath(autoBase + ".cRP");
+        const QString autoCromc = QDir(dir).filePath(autoBase + ".cROMc");
+        if (autosaveFilesDiffer(rpPath, cromcPath, autoRp, autoCromc)) {
+            QMessageBox box(this);
+            box.setWindowTitle("Autosave Found");
+            box.setText("An autosaved project differs from the project files.");
+            box.setInformativeText("Do you want to use the autosaved data?");
+            auto* useButton = box.addButton("Use Autosave", QMessageBox::AcceptRole);
+            auto* discardButton = box.addButton("Discard Autosave", QMessageBox::DestructiveRole);
+            auto* exportButton = box.addButton("Export Autosave...", QMessageBox::ActionRole);
+            box.addButton(QMessageBox::Cancel);
+            box.exec();
+            if (box.clickedButton() == useButton) {
+                rpPath = autoRp;
+                cromcPath = autoCromc;
+            } else if (box.clickedButton() == discardButton) {
+                QFile::remove(autoRp);
+                QFile::remove(autoCromc);
+            } else if (box.clickedButton() == exportButton) {
+                const QString destDir = QFileDialog::getExistingDirectory(
+                    this, "Export Autosave", dir);
+                if (!destDir.isEmpty()) {
+                    QFile::copy(autoRp, QDir(destDir).filePath(autoBase + ".cRP"));
+                    QFile::copy(autoCromc, QDir(destDir).filePath(autoBase + ".cROMc"));
+                    QFile::remove(autoRp);
+                    QFile::remove(autoCromc);
+                }
+            } else {
+                return;
+            }
+        }
         LegacyProject legacy;
         std::string error;
         QString detail;
@@ -4884,6 +5040,19 @@ void MainWindow::openProjectFile(const QString& filename)
             statusBar()->showMessage(QString("Open failed: %1").arg(QString::fromStdString(error)), 5000);
             return;
         }
+        if (!rpPath.isEmpty() && !legacy.frames.empty() && !legacy.frame_refs.empty()) {
+            QString refError;
+            const int refWidth = legacy.frame_width > 0 ? legacy.frame_width : kDefaultFrameWidth;
+            const int refHeight = legacy.frame_height > 0 ? legacy.frame_height : kDefaultFrameHeight;
+            if (!LoadReferenceFramesFromRp(rpPath,
+                                           refWidth,
+                                           refHeight,
+                                           static_cast<int>(legacy.frames.size()),
+                                           legacy.frame_refs,
+                                           &refError)) {
+                statusBar()->showMessage(QString("Open warning: %1").arg(refError), 5000);
+            }
+        }
         m_hasLegacyRoundTrip = true;
         m_legacyRoundTrip = LegacyRoundTripData{};
         m_legacyRoundTrip.name = legacy.name;
@@ -4898,6 +5067,8 @@ void MainWindow::openProjectFile(const QString& filename)
         m_legacyRoundTrip.dynashadow_col_x = legacy.dynashadow_col_x;
         m_legacyRoundTrip.active_col_sets = legacy.active_col_sets;
         m_legacyRoundTrip.mask_names = legacy.mask_names;
+        m_legacyRoundTrip.frame_comp_mask_ids = legacy.frame_comp_mask_ids;
+        m_legacyRoundTrip.frame_shape_comp_modes = legacy.frame_shape_comp_modes;
         m_legacyRoundTrip.draw_col_mode = legacy.draw_col_mode;
         m_legacyRoundTrip.draw_mode = legacy.draw_mode;
         m_legacyRoundTrip.mask_sel_mode = legacy.mask_sel_mode;
@@ -5050,6 +5221,40 @@ void MainWindow::openProjectFile(const QString& filename)
         m_backgroundExtraFlags = legacy.background_extra_flags;
         m_frameBackgroundIds = legacy.background_ids;
         if (m_serumDataLoaded) {
+            const std::size_t frameCount = legacy.frames.size();
+            const std::size_t totalSlots = frameCount * MAX_SPRITES_PER_FRAME;
+            const std::size_t totalBBoxes = totalSlots * 4;
+            m_frameSpriteAssignments.assign(totalSlots, 255);
+            m_frameSpriteBBoxes.assign(totalBBoxes, 0);
+            for (std::size_t i = 0; i < frameCount; ++i) {
+                const uint32_t idx = static_cast<uint32_t>(i);
+                const std::size_t base = i * MAX_SPRITES_PER_FRAME;
+                const std::size_t bboxBase = base * 4;
+                const uint8_t* spriteData = m_serumData.framesprites.hasData(idx)
+                    ? m_serumData.framesprites[idx]
+                    : nullptr;
+                if (spriteData) {
+                    std::memcpy(m_frameSpriteAssignments.data() + base,
+                                spriteData,
+                                MAX_SPRITES_PER_FRAME);
+                }
+                const uint16_t* bboxData = m_serumData.framespriteBB.hasData(idx)
+                    ? m_serumData.framespriteBB[idx]
+                    : nullptr;
+                if (bboxData) {
+                    std::memcpy(m_frameSpriteBBoxes.data() + bboxBase,
+                                bboxData,
+                                MAX_SPRITES_PER_FRAME * 4 * sizeof(uint16_t));
+                }
+            }
+            if (m_frameSpriteZoneFlags.size() != totalSlots) {
+                m_frameSpriteZoneFlags.assign(totalSlots, 0);
+            }
+            for (std::size_t i = 0; i < totalSlots; ++i) {
+                if (m_frameSpriteAssignments[i] != 255) {
+                    m_frameSpriteZoneFlags[i] = 1;
+                }
+            }
             const std::size_t spriteCount = legacy.sprites.size();
             m_spriteColoredX.assign(spriteCount, cv::Mat());
             m_spriteMasksX.assign(spriteCount, cv::Mat());
@@ -5115,10 +5320,11 @@ void MainWindow::openProjectFile(const QString& filename)
         {
             QSignalBlocker blocker(m_state);
             m_state->newProject();
-        m_state->openProject(cromcPath);
+        m_state->openProject(projectCromcPath);
             m_state->setFramesAndSprites(frames, sprites);
         }
         resetUndoStacks();
+        m_projectDirty = false;
         updateWindowTitle();
         m_projectLabel->setText(cromcPath);
         updateProjectLabelHeight();
@@ -5229,10 +5435,6 @@ bool MainWindow::saveLegacyProject(const QString& filename)
         statusBar()->showMessage("Save failed: no frames", 5000);
         return false;
     }
-    if (m_frameStore) {
-        m_frameStore->flush();
-    }
-    ensureMaskDataSize();
     QFileInfo info(filename);
     const QString suffix = info.suffix().toLower();
     const QString dir = info.absolutePath();
@@ -5242,24 +5444,169 @@ bool MainWindow::saveLegacyProject(const QString& filename)
         rpPath = filename;
     }
     const QString cromcPath = dir + "/" + base + ".cROMc";
+    return saveLegacyProjectToPaths(rpPath, cromcPath, base, true, true, false);
+}
 
-    LegacyProject project = buildLegacyProject(base);
+bool MainWindow::saveLegacyProjectToPaths(const QString& rpPath,
+                                          const QString& cromcPath,
+                                          const QString& baseName,
+                                          bool updateState,
+                                          bool showErrors,
+                                          bool preferSerumMasks)
+{
+    const int frameCount = m_frameStore ? m_frameStore->count() : 0;
+    if (frameCount <= 0) {
+        if (showErrors) {
+            statusBar()->showMessage(frameCount < 0
+                                         ? "Save failed: frames not ready"
+                                         : "Save failed: no frames",
+                                     5000);
+        }
+        return false;
+    }
+    if (m_frameStore) {
+        m_frameStore->flush();
+    }
+    ensureMaskDataSize();
+    if (m_serumDataLoaded) {
+        std::size_t missingRefs = 0;
+        for (const auto& ref : m_frameRefs) {
+            if (ref.empty()) {
+                ++missingRefs;
+            }
+        }
+        if (missingRefs > 0) {
+            const QString message = QString("Save aborted: missing %1 original frame(s) from .cRP. "
+                                            "Open the project with its .cRP to preserve originals.")
+                                        .arg(missingRefs);
+            if (showErrors) {
+                statusBar()->showMessage(message, 7000);
+            }
+            logLine(message);
+            return false;
+        }
+    }
+    LegacyProject project = buildLegacyProject(baseName, preferSerumMasks);
     std::string error;
     if (!SaveLegacyProjectRp(rpPath.toStdString(), project, &error)) {
-        statusBar()->showMessage(QString("Save failed: %1").arg(QString::fromStdString(error)), 5000);
+        if (showErrors) {
+            statusBar()->showMessage(QString("Save failed: %1").arg(QString::fromStdString(error)), 5000);
+        }
         return false;
     }
     std::string cromcError;
-    if (!SaveConcentrateProject(cromcPath.toStdString(), project, &cromcError)) {
-        statusBar()->showMessage(QString("Saved, but .cROMc failed: %1").arg(QString::fromStdString(cromcError)),
-                                 5000);
+    if (!SaveConcentrateProjectWithSeed(cromcPath.toStdString(),
+                                        project,
+                                        m_serumDataLoaded ? &m_serumData : nullptr,
+                                        &cromcError)) {
+        if (showErrors) {
+            statusBar()->showMessage(QString("Saved, but .cROMc failed: %1").arg(QString::fromStdString(cromcError)),
+                                     5000);
+        }
     }
-
-    m_state->saveProject(cromcPath);
+    if (updateState) {
+        m_state->saveProject(cromcPath);
+        m_projectDirty = false;
+    }
     return true;
 }
 
-LegacyProject MainWindow::buildLegacyProject(const QString& baseName) const
+bool MainWindow::autosaveProject(bool showProgress)
+{
+    if (!m_autosaveEnabled || m_projectDir.isEmpty() || m_projectBaseName.isEmpty()) {
+        return false;
+    }
+    if (m_drawPointEnabled) {
+        return false;
+    }
+    if (!m_projectDirty) {
+        return false;
+    }
+    if (m_isLoadingProject) {
+        return false;
+    }
+    if (!m_frameStore || m_frameStore->count() <= 0) {
+        return false;
+    }
+    const QString autoBase = m_projectBaseName + ".autosave";
+    const QString autoRp = QDir(m_projectDir).filePath(autoBase + ".cRP");
+    const QString autoCromc = QDir(m_projectDir).filePath(autoBase + ".cROMc");
+    std::unique_ptr<QProgressDialog> progress;
+    if (showProgress) {
+        progress.reset(new QProgressDialog("Autosaving...", QString(), 0, 0, this));
+        progress->setWindowModality(Qt::ApplicationModal);
+        progress->setCancelButton(nullptr);
+        progress->setMinimumDuration(0);
+        progress->show();
+        QApplication::processEvents();
+    }
+    const bool ok = saveLegacyProjectToPaths(autoRp, autoCromc, m_projectBaseName, false, false, false);
+    if (progress) {
+        progress->close();
+    }
+    if (!QFileInfo::exists(autoCromc)) {
+        logLine(QString("Autosave failed: missing %1").arg(autoCromc));
+        return false;
+    }
+    if (ok) {
+        logLine(QString("Autosave: %1").arg(autoCromc));
+    }
+    return ok;
+}
+
+void MainWindow::updateAutosaveTimer()
+{
+    if (!m_autosaveTimer) {
+        return;
+    }
+    if (!m_autosaveEnabled) {
+        m_autosaveTimer->stop();
+        return;
+    }
+    const int intervalMs = std::max(1, m_autosaveIntervalMinutes) * 60 * 1000;
+    m_autosaveTimer->start(intervalMs);
+}
+
+void MainWindow::setSerumRuntimePathsForPlayback(bool useAutosave)
+{
+    if (m_projectDir.isEmpty() || m_projectBaseName.isEmpty()) {
+        return;
+    }
+    if (useAutosave) {
+        m_serumRuntimeAltDir = m_projectDir;
+        m_serumRuntimeRomName = m_projectBaseName + ".autosave";
+    } else {
+        m_serumRuntimeAltDir = m_projectDir;
+        m_serumRuntimeRomName = m_projectBaseName;
+    }
+}
+
+bool MainWindow::autosaveFilesDiffer(const QString& rpPath,
+                                     const QString& cromcPath,
+                                     const QString& autoRp,
+                                     const QString& autoCromc) const
+{
+    const QFileInfo autoRpInfo(autoRp);
+    const QFileInfo autoCromcInfo(autoCromc);
+    if (!autoRpInfo.exists() || !autoCromcInfo.exists()) {
+        return false;
+    }
+    const QFileInfo rpInfo(rpPath);
+    const QFileInfo cromcInfo(cromcPath);
+    if (!rpInfo.exists() || !cromcInfo.exists()) {
+        return true;
+    }
+    if (rpInfo.size() != autoRpInfo.size() || cromcInfo.size() != autoCromcInfo.size()) {
+        return true;
+    }
+    if (autoRpInfo.lastModified() > rpInfo.lastModified() ||
+        autoCromcInfo.lastModified() > cromcInfo.lastModified()) {
+        return true;
+    }
+    return false;
+}
+
+LegacyProject MainWindow::buildLegacyProject(const QString& baseName, bool preferSerumMasks) const
 {
     LegacyProject project;
     project.name = baseName.toStdString();
@@ -5297,7 +5644,31 @@ LegacyProject MainWindow::buildLegacyProject(const QString& baseName) const
     if (!m_frameTriggerIds.empty()) {
         project.trigger_ids = m_frameTriggerIds;
     }
-    if (m_hasLegacyRoundTrip) {
+    if (m_serumDataLoaded && frameCount > 0) {
+        project.hash_codes.assign(static_cast<std::size_t>(frameCount), 0);
+        project.active_frames.assign(static_cast<std::size_t>(frameCount), 0);
+        for (int i = 0; i < frameCount; ++i) {
+            const uint32_t index = static_cast<uint32_t>(i);
+            bool haveHash = false;
+            bool haveActive = false;
+            if (m_serumData.hashcodes.hasData(index)) {
+                project.hash_codes[static_cast<std::size_t>(i)] = *m_serumData.hashcodes[index];
+                haveHash = true;
+            }
+            if (m_serumData.activeframes.hasData(index)) {
+                project.active_frames[static_cast<std::size_t>(i)] = *m_serumData.activeframes[index];
+                haveActive = true;
+            }
+            if (m_hasLegacyRoundTrip) {
+                if (!haveHash && i < static_cast<int>(m_legacyRoundTrip.hash_codes.size())) {
+                    project.hash_codes[static_cast<std::size_t>(i)] = m_legacyRoundTrip.hash_codes[static_cast<std::size_t>(i)];
+                }
+                if (!haveActive && i < static_cast<int>(m_legacyRoundTrip.active_frames.size())) {
+                    project.active_frames[static_cast<std::size_t>(i)] = m_legacyRoundTrip.active_frames[static_cast<std::size_t>(i)];
+                }
+            }
+        }
+    } else if (m_hasLegacyRoundTrip) {
         project.hash_codes.resize(static_cast<std::size_t>(frameCount), 0);
         project.active_frames.resize(static_cast<std::size_t>(frameCount), 0);
     }
@@ -5305,19 +5676,17 @@ LegacyProject MainWindow::buildLegacyProject(const QString& baseName) const
     project.frames.resize(static_cast<std::size_t>(frameCount));
     cv::Size baseSize(kDefaultFrameWidth, kDefaultFrameHeight);
     for (int i = 0; i < frameCount; ++i) {
-        if (const cv::Mat* frame = m_frameStore->at(i)) {
-            if (!frame->empty()) {
-                baseSize = frame->size();
-                break;
-            }
+        const cv::Mat frame = m_frameStore->loadCopy(i);
+        if (!frame.empty()) {
+            baseSize = frame.size();
+            break;
         }
     }
     for (int i = 0; i < frameCount; ++i) {
-        if (const cv::Mat* frame = m_frameStore->at(i)) {
-            if (!frame->empty()) {
-                project.frames[static_cast<std::size_t>(i)] = frame->clone();
-                continue;
-            }
+        const cv::Mat frame = m_frameStore->loadCopy(i);
+        if (!frame.empty()) {
+            project.frames[static_cast<std::size_t>(i)] = frame;
+            continue;
         }
         project.frames[static_cast<std::size_t>(i)] =
             cv::Mat(baseSize, CV_8UC3, cv::Scalar(0, 0, 0));
@@ -5326,10 +5695,9 @@ LegacyProject MainWindow::buildLegacyProject(const QString& baseName) const
     const int spriteCount = m_spriteStore->count();
     project.sprites.resize(static_cast<std::size_t>(spriteCount));
     for (int i = 0; i < spriteCount; ++i) {
-        if (const cv::Mat* sprite = m_spriteStore->at(i)) {
-            if (!sprite->empty()) {
-                project.sprites[static_cast<std::size_t>(i)] = sprite->clone();
-            }
+        const cv::Mat sprite = m_spriteStore->loadCopy(i);
+        if (!sprite.empty()) {
+            project.sprites[static_cast<std::size_t>(i)] = sprite;
         }
     }
     if (!m_spriteColored.empty()) {
@@ -5466,6 +5834,60 @@ LegacyProject MainWindow::buildLegacyProject(const QString& baseName) const
     project.sprite_col_from_frame = m_spriteColFromFrame;
     project.sprite_rects = m_spriteRects;
     project.sprite_rect_mirror = m_spriteRectMirror;
+    if (m_serumDataLoaded && frameCount > 0) {
+        const std::size_t totalSlots = static_cast<std::size_t>(frameCount) * MAX_SPRITES_PER_FRAME;
+        const std::size_t totalBBoxes = totalSlots * 4;
+        if (project.frame_sprites.size() != totalSlots) {
+            project.frame_sprites.assign(totalSlots, 255);
+        }
+        if (project.frame_sprite_bboxes.size() != totalBBoxes) {
+            project.frame_sprite_bboxes.assign(totalBBoxes, 0);
+        }
+        auto allDefaultSprites = [&]() {
+            for (uint8_t v : project.frame_sprites) {
+                if (v != 255) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        const bool needSprites = allDefaultSprites();
+        int spriteFramesCopied = 0;
+        int spriteBBoxesCopied = 0;
+        int serumFramesWithSprites = 0;
+        for (int i = 0; i < frameCount; ++i) {
+            const uint32_t idx = static_cast<uint32_t>(i);
+            const std::size_t base = static_cast<std::size_t>(i) * MAX_SPRITES_PER_FRAME;
+            const std::size_t bboxBase = base * 4;
+            const uint8_t* spriteData = m_serumData.framesprites[idx];
+            bool hasSprite = false;
+            for (int slot = 0; slot < MAX_SPRITES_PER_FRAME; ++slot) {
+                if (spriteData && spriteData[slot] != 255) {
+                    hasSprite = true;
+                    break;
+                }
+            }
+            if (hasSprite) {
+                ++serumFramesWithSprites;
+            }
+            if (needSprites && hasSprite && spriteData) {
+                std::memcpy(project.frame_sprites.data() + base, spriteData, MAX_SPRITES_PER_FRAME);
+                ++spriteFramesCopied;
+            }
+            const uint16_t* bboxData = m_serumData.framespriteBB[idx];
+            if (bboxData && (hasSprite || m_serumData.framespriteBB.hasData(idx))) {
+                std::memcpy(project.frame_sprite_bboxes.data() + bboxBase,
+                            bboxData,
+                            MAX_SPRITES_PER_FRAME * 4 * sizeof(uint16_t));
+                ++spriteBBoxesCopied;
+            }
+        }
+        const_cast<MainWindow*>(this)->logLine(
+            QString("Save: sprites from serum frames=%1 bboxes=%2 serumFramesWithSprites=%3")
+                .arg(spriteFramesCopied)
+                .arg(spriteBBoxesCopied)
+                .arg(serumFramesWithSprites));
+    }
 
     project.frame_durations.assign(static_cast<std::size_t>(frameCount), 30);
     for (int i = 0; i < frameCount && i < static_cast<int>(m_frameDurations.size()); ++i) {
@@ -5476,11 +5898,19 @@ LegacyProject MainWindow::buildLegacyProject(const QString& baseName) const
     project.section_names = m_sectionNames;
     project.frame_refs = m_frameRefs;
     project.no_colors = m_noColors > 0 ? m_noColors : 64;
-    project.comp_masks = m_compMasks;
-    project.frame_comp_mask_ids = m_frameCompMaskIds;
-    project.frame_shape_comp_modes = m_frameShapeCompModes;
-    project.frame_dynamic_mask_maps = m_frameDynamicMaskMaps;
-    project.frame_dynamic_mask_maps_x = m_frameDynamicMaskMapsX;
+    if (!preferSerumMasks) {
+        project.comp_masks = m_compMasks;
+        project.frame_comp_mask_ids = m_frameCompMaskIds;
+        project.frame_shape_comp_modes = m_frameShapeCompModes;
+        project.frame_dynamic_mask_maps = m_frameDynamicMaskMaps;
+        project.frame_dynamic_mask_maps_x = m_frameDynamicMaskMapsX;
+    } else {
+        project.comp_masks.clear();
+        project.frame_comp_mask_ids.clear();
+        project.frame_shape_comp_modes.clear();
+        project.frame_dynamic_mask_maps.clear();
+        project.frame_dynamic_mask_maps_x.clear();
+    }
     if (!m_serumDataLoaded) {
         project.frame_dynamic_colors = m_frameDynamicColors;
         project.frame_rotations = m_frameRotations;
@@ -5490,19 +5920,33 @@ LegacyProject MainWindow::buildLegacyProject(const QString& baseName) const
         const int stride = serumDynamicStride();
         const std::size_t size =
             static_cast<std::size_t>(MAX_DYNA_SETS_PER_FRAMEN) * static_cast<std::size_t>(stride);
+        int dynColorsCopied = 0;
         for (int i = 0; i < frameCount; ++i) {
             const std::size_t idx = static_cast<std::size_t>(i);
+            bool useLocal = false;
             if (idx < m_frameDynamicColors.size() && !m_frameDynamicColors[idx].empty()) {
+                const auto& local = m_frameDynamicColors[idx];
+                for (uint16_t v : local) {
+                    if (v != 0) {
+                        useLocal = true;
+                        break;
+                    }
+                }
+            }
+            if (useLocal) {
                 project.frame_dynamic_colors[idx] = m_frameDynamicColors[idx];
                 continue;
             }
             const uint16_t* data = frameDynamicColorsData(i, false, nullptr);
             if (data) {
                 project.frame_dynamic_colors[idx].assign(data, data + size);
+                ++dynColorsCopied;
             } else {
                 project.frame_dynamic_colors[idx].assign(size, 0);
             }
         }
+        const_cast<MainWindow*>(this)->logLine(
+            QString("Save: dyn colors from serum=%1").arg(dynColorsCopied));
         const std::size_t blockSize = rotationBlockSize();
         project.frame_rotations.assign(static_cast<std::size_t>(frameCount) * blockSize, 0);
         project.frame_rotations_x.assign(static_cast<std::size_t>(frameCount) * blockSize, 0);
@@ -5526,15 +5970,234 @@ LegacyProject MainWindow::buildLegacyProject(const QString& baseName) const
             project.frame_extra_flags[idx] = m_frameExtraFlags[idx];
         }
     }
+    if (m_serumDataLoaded && frameCount > 0) {
+        const int width = m_serumData.fwidth > 0 ? static_cast<int>(m_serumData.fwidth) : kDefaultFrameWidth;
+        const int height = m_serumData.fheight > 0 ? static_cast<int>(m_serumData.fheight) : kDefaultFrameHeight;
+        const int widthX = m_serumData.fwidth_extra > 0 ? static_cast<int>(m_serumData.fwidth_extra) : width;
+        const int heightX = m_serumData.fheight_extra > 0 ? static_cast<int>(m_serumData.fheight_extra) : height;
+        const std::size_t pixels = static_cast<std::size_t>(width) * height;
+        const std::size_t pixelsX = static_cast<std::size_t>(widthX) * heightX;
+
+        if (project.comp_masks.size() != MAX_MASKS) {
+            project.comp_masks.resize(MAX_MASKS);
+        }
+        for (int i = 0; i < MAX_MASKS; ++i) {
+            if (!m_serumData.compmasks.hasData(static_cast<uint32_t>(i))) {
+                continue;
+            }
+            const uint8_t* data = m_serumData.compmasks[static_cast<uint32_t>(i)];
+            if (!data || pixels == 0) {
+                continue;
+            }
+            const std::size_t idx = static_cast<std::size_t>(i);
+            const cv::Mat& existing = project.comp_masks[idx];
+            bool shouldOverride = existing.empty();
+            if (!shouldOverride && existing.type() == CV_8UC1) {
+                if (cv::countNonZero(existing) == 0) {
+                    cv::Mat serumMask(height, width, CV_8UC1, cv::Scalar(0));
+                    std::memcpy(serumMask.data, data, pixels);
+                    if (cv::countNonZero(serumMask) > 0) {
+                        project.comp_masks[idx] = serumMask;
+                        continue;
+                    }
+                }
+                continue;
+            }
+            if (shouldOverride) {
+                cv::Mat mask(height, width, CV_8UC1, cv::Scalar(0));
+                std::memcpy(mask.data, data, pixels);
+                project.comp_masks[idx] = mask;
+            }
+        }
+        if (project.frame_comp_mask_ids.empty()) {
+            project.frame_comp_mask_ids.assign(static_cast<std::size_t>(frameCount), 255);
+            for (int i = 0; i < frameCount; ++i) {
+                bool set = false;
+                if (m_serumData.compmaskID.hasData(static_cast<uint32_t>(i))) {
+                    project.frame_comp_mask_ids[static_cast<std::size_t>(i)] =
+                        *m_serumData.compmaskID[static_cast<uint32_t>(i)];
+                    set = true;
+                }
+                if (!set && m_hasLegacyRoundTrip &&
+                    i < static_cast<int>(m_legacyRoundTrip.frame_comp_mask_ids.size())) {
+                    project.frame_comp_mask_ids[static_cast<std::size_t>(i)] =
+                        m_legacyRoundTrip.frame_comp_mask_ids[static_cast<std::size_t>(i)];
+                }
+            }
+        }
+        if (project.frame_shape_comp_modes.empty()) {
+            project.frame_shape_comp_modes.assign(static_cast<std::size_t>(frameCount), 0);
+            for (int i = 0; i < frameCount; ++i) {
+                bool set = false;
+                if (m_serumData.shapecompmode.hasData(static_cast<uint32_t>(i))) {
+                    project.frame_shape_comp_modes[static_cast<std::size_t>(i)] =
+                        *m_serumData.shapecompmode[static_cast<uint32_t>(i)];
+                    set = true;
+                }
+                if (!set && m_hasLegacyRoundTrip &&
+                    i < static_cast<int>(m_legacyRoundTrip.frame_shape_comp_modes.size())) {
+                    project.frame_shape_comp_modes[static_cast<std::size_t>(i)] =
+                        m_legacyRoundTrip.frame_shape_comp_modes[static_cast<std::size_t>(i)];
+                }
+            }
+        }
+        if (!project.hash_codes.empty() &&
+            project.frame_comp_mask_ids.size() == static_cast<std::size_t>(frameCount) &&
+            project.frame_shape_comp_modes.size() == static_cast<std::size_t>(frameCount) &&
+            project.comp_masks.size() >= MAX_MASKS &&
+            project.frame_refs.size() == static_cast<std::size_t>(frameCount)) {
+            int hashComputed = 0;
+            for (int i = 0; i < frameCount; ++i) {
+                if (project.hash_codes[static_cast<std::size_t>(i)] != 0) {
+                    continue;
+                }
+                const cv::Mat& ref = project.frame_refs[static_cast<std::size_t>(i)];
+                if (ref.empty() || ref.type() != CV_8UC1) {
+                    continue;
+                }
+                const uint8_t maskId =
+                    project.frame_comp_mask_ids[static_cast<std::size_t>(i)];
+                const uint8_t shape =
+                    project.frame_shape_comp_modes[static_cast<std::size_t>(i)];
+                const uint8_t* mask = nullptr;
+                if (maskId < project.comp_masks.size()) {
+                    const cv::Mat& maskMat = project.comp_masks[maskId];
+                    if (!maskMat.empty() && maskMat.type() == CV_8UC1) {
+                        mask = maskMat.data;
+                    }
+                }
+                project.hash_codes[static_cast<std::size_t>(i)] =
+                    Serum_CalcFrameHash(ref.data,
+                                        mask,
+                                        static_cast<uint32_t>(ref.total()),
+                                        shape);
+                if (project.hash_codes[static_cast<std::size_t>(i)] != 0) {
+                    ++hashComputed;
+                }
+            }
+            int hashZero = 0;
+            for (const uint32_t h : project.hash_codes) {
+                if (h == 0) {
+                    ++hashZero;
+                }
+            }
+            const_cast<MainWindow*>(this)->logLine(
+                QString("Save: hashes computed=%1 zeros=%2")
+                    .arg(hashComputed)
+                    .arg(hashZero));
+        }
+        if (project.frame_dynamic_mask_maps.size() != static_cast<std::size_t>(frameCount)) {
+            project.frame_dynamic_mask_maps.resize(static_cast<std::size_t>(frameCount));
+        }
+        int dynMaskCopied = 0;
+        for (int i = 0; i < frameCount; ++i) {
+            cv::Mat& map = project.frame_dynamic_mask_maps[static_cast<std::size_t>(i)];
+            if (!m_serumData.dynamasks.hasData(static_cast<uint32_t>(i))) {
+                continue;
+            }
+            const uint8_t* data = m_serumData.dynamasks[static_cast<uint32_t>(i)];
+            if (data && pixels > 0) {
+                bool shouldOverride = map.empty();
+                if (!shouldOverride && map.type() == CV_8UC1) {
+                    if (cv::countNonZero(map != 255) == 0) {
+                        shouldOverride = true;
+                    }
+                }
+                if (shouldOverride) {
+                    map = cv::Mat(height, width, CV_8UC1, cv::Scalar(255));
+                    std::memcpy(map.data, data, pixels);
+                    ++dynMaskCopied;
+                }
+            }
+        }
+        const_cast<MainWindow*>(this)->logLine(
+            QString("Save: dyn masks sd copied=%1").arg(dynMaskCopied));
+        if (project.frame_dynamic_mask_maps_x.size() != static_cast<std::size_t>(frameCount)) {
+            project.frame_dynamic_mask_maps_x.resize(static_cast<std::size_t>(frameCount));
+        }
+        int dynMaskXCopied = 0;
+        for (int i = 0; i < frameCount; ++i) {
+            if (!project.frame_extra_flags.empty() &&
+                project.frame_extra_flags[static_cast<std::size_t>(i)] == 0) {
+                continue;
+            }
+            cv::Mat& mapX = project.frame_dynamic_mask_maps_x[static_cast<std::size_t>(i)];
+            if (!m_serumData.dynamasks_extra.hasData(static_cast<uint32_t>(i))) {
+                continue;
+            }
+            const uint8_t* data = m_serumData.dynamasks_extra[static_cast<uint32_t>(i)];
+            if (data && pixelsX > 0) {
+                bool shouldOverride = mapX.empty();
+                if (!shouldOverride && mapX.type() == CV_8UC1) {
+                    if (cv::countNonZero(mapX != 255) == 0) {
+                        shouldOverride = true;
+                    }
+                }
+                if (shouldOverride) {
+                    mapX = cv::Mat(heightX, widthX, CV_8UC1, cv::Scalar(255));
+                    std::memcpy(mapX.data, data, pixelsX);
+                    ++dynMaskXCopied;
+                }
+            }
+        }
+        const_cast<MainWindow*>(this)->logLine(
+            QString("Save: dyn masks hd copied=%1").arg(dynMaskXCopied));
+        if (project.background_ids.empty()) {
+            project.background_ids.assign(static_cast<std::size_t>(frameCount), 0xffff);
+            for (int i = 0; i < frameCount; ++i) {
+                if (m_serumData.backgroundIDs.hasData(static_cast<uint32_t>(i))) {
+                    project.background_ids[static_cast<std::size_t>(i)] =
+                        *m_serumData.backgroundIDs[static_cast<uint32_t>(i)];
+                }
+            }
+        }
+        if (project.background_masks.size() != static_cast<std::size_t>(frameCount)) {
+            project.background_masks.resize(static_cast<std::size_t>(frameCount));
+        }
+        for (int i = 0; i < frameCount; ++i) {
+            cv::Mat& mask = project.background_masks[static_cast<std::size_t>(i)];
+            if (!mask.empty()) {
+                continue;
+            }
+            if (!m_serumData.backgroundmask.hasData(static_cast<uint32_t>(i))) {
+                continue;
+            }
+            const uint8_t* data = m_serumData.backgroundmask[static_cast<uint32_t>(i)];
+            if (data && pixels > 0) {
+                mask = cv::Mat(height, width, CV_8UC1, cv::Scalar(0));
+                std::memcpy(mask.data, data, pixels);
+            }
+        }
+        if (project.background_masks_x.size() != static_cast<std::size_t>(frameCount)) {
+            project.background_masks_x.resize(static_cast<std::size_t>(frameCount));
+        }
+        for (int i = 0; i < frameCount; ++i) {
+            if (!project.frame_extra_flags.empty() &&
+                project.frame_extra_flags[static_cast<std::size_t>(i)] == 0) {
+                continue;
+            }
+            cv::Mat& maskX = project.background_masks_x[static_cast<std::size_t>(i)];
+            if (!maskX.empty()) {
+                continue;
+            }
+            if (!m_serumData.backgroundmask_extra.hasData(static_cast<uint32_t>(i))) {
+                continue;
+            }
+            const uint8_t* data = m_serumData.backgroundmask_extra[static_cast<uint32_t>(i)];
+            if (data && pixelsX > 0) {
+                maskX = cv::Mat(heightX, widthX, CV_8UC1, cv::Scalar(0));
+                std::memcpy(maskX.data, data, pixelsX);
+            }
+        }
+    }
     const int backgroundCount = m_backgroundStore ? m_backgroundStore->count() : 0;
     project.background_frames.resize(static_cast<std::size_t>(backgroundCount));
     if (m_backgroundStore) {
         for (int i = 0; i < backgroundCount; ++i) {
-            if (const cv::Mat* bg = m_backgroundStore->at(i)) {
-                if (!bg->empty()) {
-                    project.background_frames[static_cast<std::size_t>(i)] = bg->clone();
-                    continue;
-                }
+            const cv::Mat bg = m_backgroundStore->loadCopy(i);
+            if (!bg.empty()) {
+                project.background_frames[static_cast<std::size_t>(i)] = bg;
+                continue;
             }
             project.background_frames[static_cast<std::size_t>(i)] =
                 cv::Mat(baseSize, CV_8UC3, cv::Scalar(0, 0, 0));
@@ -5772,7 +6435,10 @@ std::vector<int> MainWindow::playbackFrameIndices() const
     if (indices.size() >= 2) {
         return indices;
     }
-    const int count = static_cast<int>(m_frameDurations.size());
+    int count = static_cast<int>(m_frameDurations.size());
+    if (count <= 0 && m_frameStore) {
+        count = m_frameStore->count();
+    }
     if (count <= 0) {
         return {};
     }
@@ -5786,6 +6452,30 @@ std::vector<int> MainWindow::playbackFrameIndices() const
 void MainWindow::startPlayback()
 {
     stopPlayback();
+    bool useAutosave = false;
+    std::unique_ptr<QProgressDialog> progress;
+    if (m_autosaveEnabled && !m_isLoadingProject && m_projectDirty) {
+        progress.reset(new QProgressDialog("Preparing playback...", QString(), 0, 0, this));
+        progress->setWindowModality(Qt::ApplicationModal);
+        progress->setCancelButton(nullptr);
+        progress->setMinimumDuration(0);
+        progress->show();
+        QApplication::processEvents();
+        useAutosave = autosaveProject(false);
+        if (!useAutosave) {
+            if (progress) {
+                progress->close();
+            }
+            logLine("Playback failed: autosave did not complete.");
+            return;
+        }
+    }
+    setSerumRuntimePathsForPlayback(useAutosave);
+    disposeSerumRuntime();
+    m_playbackUsesSerumRuntime = ensureSerumRuntime();
+    if (progress) {
+        progress->close();
+    }
     const std::vector<int> selected = selectedPreviewFrameIndices();
     const std::vector<int> fallbackSelected = selected.empty() ? m_previewSelectedFrames : selected;
     const bool multiSelect = fallbackSelected.size() >= 2;
@@ -5797,10 +6487,24 @@ void MainWindow::startPlayback()
     if (m_playbackFrames.empty()) {
         return;
     }
+    int currentPreview = -1;
+    if (m_framePreviewList) {
+        if (QListWidgetItem* currentItem = m_framePreviewList->currentItem()) {
+            currentPreview = currentItem->data(kFrameIndexRole).toInt();
+        }
+    }
     const int current = m_framesList ? m_framesList->currentRow() : -1;
+    const int selectedSingle = (selected.size() == 1) ? selected.front() : -1;
     int startIndex = m_playbackFrames.front();
-    if (!fallbackSelected.empty() && fallbackSelected.size() == 1) {
+    if (selectedSingle >= 0) {
+        startIndex = selectedSingle;
+    } else if (!fallbackSelected.empty() && fallbackSelected.size() == 1) {
         startIndex = fallbackSelected.front();
+    } else if (currentPreview >= 0) {
+        const auto it = std::find(m_playbackFrames.begin(), m_playbackFrames.end(), currentPreview);
+        if (it != m_playbackFrames.end()) {
+            startIndex = currentPreview;
+        }
     } else if (current >= 0) {
         const auto it = std::find(m_playbackFrames.begin(), m_playbackFrames.end(), current);
         if (it != m_playbackFrames.end()) {
@@ -5849,6 +6553,9 @@ void MainWindow::stopPlayback()
     }
     m_playbackActive = false;
     m_playbackPaused = false;
+    if (m_playbackUsesSerumRuntime) {
+        Serum_Scene_Reset();
+    }
     m_playbackFrames.clear();
     m_playbackPos = -1;
     m_playbackFrameIndex = -1;
@@ -5857,6 +6564,8 @@ void MainWindow::stopPlayback()
     m_playbackRotationMask.clear();
     m_playbackStaticFrame.release();
     m_playbackOriginalPreview.release();
+    m_playbackOriginalBuffer.clear();
+    m_playbackUsesSerumRuntime = false;
     updatePlaybackPreviewHighlight(-1);
     updatePlaybackButtons();
 }
@@ -6010,42 +6719,84 @@ void MainWindow::renderPlaybackFrame()
     m_playbackRotationMask.clear();
     m_playbackStaticFrame.release();
     m_playbackOriginalPreview.release();
+    m_playbackOriginalBuffer.clear();
     m_playbackWidth = 0;
     m_playbackHeight = 0;
     m_playbackFrameClock.restart();
 
-    bool hasRotations = m_playbackRotationData != nullptr;
-    if (hasRotations) {
-        m_playbackRotationClock.restart();
-        SerumEditor_InitRotationState(m_playbackRotationData, &m_playbackRotationState, 0);
-        std::vector<uint16_t> base565;
-        std::vector<uint16_t> rotationsInFrame;
-        int width = 0;
-        int height = 0;
-        if (renderFrameWithSerumRaw(frameIndex, m_playbackUseHd, cv::Mat(), base565, width,
-                                    height, &rotationsInFrame, nullptr) &&
-            !base565.empty() && !rotationsInFrame.empty()) {
-            m_playbackBase565 = std::move(base565);
-            m_playbackRotationMask = std::move(rotationsInFrame);
-            m_playbackWidth = width;
-            m_playbackHeight = height;
-            std::vector<uint16_t> rotated(m_playbackBase565.size(), 0);
-            SerumEditor_ApplyRotationsMasked(m_playbackRotationData, m_playbackBase565.data(),
-                                             rotated.data(), m_playbackRotationMask.data(),
-                                             static_cast<uint32_t>(width),
-                                             static_cast<uint32_t>(height),
-                                             &m_playbackRotationState, 0);
-            m_playbackStaticFrame = ConvertRgb565ToBgrMat(rotated.data(), width, height);
+    cv::Mat reference = buildOriginalPreviewForIndex(frameIndex);
+    const bool hasReference = frameIndex >= 0 &&
+        frameIndex < static_cast<int>(m_frameRefs.size()) &&
+        !m_frameRefs[static_cast<std::size_t>(frameIndex)].empty();
+    if (m_playbackUsesSerumRuntime && !hasReference) {
+        const QString message = QString("Playback failed: missing original frame %1 for libserum runtime.")
+                                    .arg(frameIndex);
+        logLine(message);
+        statusBar()->showMessage(message, 7000);
+        stopPlayback();
+        return;
+    }
+    if (m_playbackUsesSerumRuntime && m_serumRuntimeFrame) {
+        cv::Mat referenceForSerum = reference;
+        if (referenceForSerum.type() != CV_8UC1 && !referenceForSerum.empty()) {
+            cv::Mat gray;
+            cv::cvtColor(EnsureBgr(referenceForSerum), gray, cv::COLOR_BGR2GRAY);
+            referenceForSerum = gray;
+        }
+        const int targetW = m_serumData.fwidth > 0 ? static_cast<int>(m_serumData.fwidth) : referenceForSerum.cols;
+        const int targetH = m_serumData.fheight > 0 ? static_cast<int>(m_serumData.fheight) : referenceForSerum.rows;
+        if (!referenceForSerum.empty() &&
+            (referenceForSerum.cols != targetW || referenceForSerum.rows != targetH)) {
+            cv::resize(referenceForSerum, referenceForSerum, cv::Size(targetW, targetH), 0.0, 0.0, cv::INTER_NEAREST);
+        }
+        if (!referenceForSerum.empty()) {
+            m_playbackOriginalBuffer.assign(referenceForSerum.data,
+                                            referenceForSerum.data + referenceForSerum.total());
+            const uint32_t colorizeResult = Serum_Colorize(m_playbackOriginalBuffer.data());
+            if (m_serumRuntimeFrame->frameID == IDENTIFY_NO_FRAME) {
+                const QString message = QString("Playback failed: Serum_Colorize could not identify frame %1 (result=%2).")
+                                            .arg(frameIndex)
+                                            .arg(colorizeResult);
+                logLine(message);
+                statusBar()->showMessage(message, 7000);
+                stopPlayback();
+                return;
+            }
+            const bool useHdRuntime = m_playbackUseHd &&
+                m_serumRuntimeFrame->frame64 && m_serumRuntimeFrame->width64 > 0;
+            const uint16_t* framePtr = useHdRuntime ? m_serumRuntimeFrame->frame64 : m_serumRuntimeFrame->frame32;
+            const int width = useHdRuntime
+                ? static_cast<int>(m_serumRuntimeFrame->width64)
+                : static_cast<int>(m_serumRuntimeFrame->width32);
+            const int height = useHdRuntime
+                ? (m_serumData.fheight_extra > 0 ? static_cast<int>(m_serumData.fheight_extra) : 64)
+                : (m_serumData.fheight > 0 ? static_cast<int>(m_serumData.fheight) : 32);
+            if (framePtr && width > 0 && height > 0) {
+                m_playbackStaticFrame = ConvertRgb565ToBgrMat(framePtr, width, height);
+            } else {
+                const QString message = QString("Playback failed: libserum returned invalid frame buffer for %1.")
+                                            .arg(frameIndex);
+                logLine(message);
+                statusBar()->showMessage(message, 7000);
+                stopPlayback();
+                return;
+            }
         } else {
-            hasRotations = false;
-            m_playbackRotationData = nullptr;
+            const QString message = QString("Playback failed: missing reference buffer for %1.")
+                                        .arg(frameIndex);
+            logLine(message);
+            statusBar()->showMessage(message, 7000);
+            stopPlayback();
+            return;
         }
     }
-    if (!hasRotations) {
-        const cv::Mat composed = renderFrameWithSerum(frameIndex, m_playbackUseHd);
-        m_playbackStaticFrame = EnsureBgr(composed);
+    if (!m_playbackUsesSerumRuntime) {
+        const QString message = QString("Playback failed: libserum runtime unavailable.");
+        logLine(message);
+        statusBar()->showMessage(message, 7000);
+        stopPlayback();
+        return;
     }
-    cv::Mat reference = buildOriginalPreviewForIndex(frameIndex);
     if (m_playbackShowOriginal && !reference.empty()) {
         m_playbackOriginalPreview = buildOriginalFrame(reference);
     }
@@ -6090,26 +6841,41 @@ void MainWindow::schedulePlaybackTick()
         advancePlaybackFrame();
         return;
     }
-    if (m_playbackRotationData && !m_playbackBase565.empty() && !m_playbackRotationMask.empty()) {
-        const uint32_t nowMs = static_cast<uint32_t>(m_playbackRotationClock.elapsed());
-        std::vector<uint16_t> rotated(m_playbackBase565.size(), 0);
-        const uint32_t nextDelay = SerumEditor_ApplyRotationsMasked(
-            m_playbackRotationData, m_playbackBase565.data(), rotated.data(),
-            m_playbackRotationMask.data(), static_cast<uint32_t>(m_playbackWidth),
-            static_cast<uint32_t>(m_playbackHeight), &m_playbackRotationState, nowMs);
-        if (m_playbackCanvas) {
-            const cv::Mat rotatedMat = ConvertRgb565ToBgrMat(rotated.data(), m_playbackWidth, m_playbackHeight);
-            const QColor gap = m_playbackCanvas
-                ? m_playbackCanvas->palette().color(QPalette::Window)
-                : QApplication::palette().color(QPalette::Window);
-            const cv::Scalar gapColor(gap.blue(), gap.green(), gap.red());
-            const cv::Mat combined = (!m_playbackOriginalPreview.empty())
-                ? buildCombinedFrame(rotatedMat, m_playbackOriginalPreview, gapColor)
-                : rotatedMat;
-            m_playbackCanvas->setImage(combined);
+    if (m_playbackUsesSerumRuntime && m_serumRuntimeFrame) {
+        const uint32_t rotationResult = Serum_Rotate();
+        const uint32_t nextDelay = rotationResult & 0xffff;
+        if (rotationResult & (FLAG_RETURNED_V2_ROTATED32 | FLAG_RETURNED_V2_ROTATED64 | FLAG_RETURNED_V2_SCENE)) {
+            const bool useHdRuntime = m_playbackUseHd &&
+                m_serumRuntimeFrame->frame64 && m_serumRuntimeFrame->width64 > 0;
+            const uint16_t* framePtr = useHdRuntime ? m_serumRuntimeFrame->frame64 : m_serumRuntimeFrame->frame32;
+            const int width = useHdRuntime
+                ? static_cast<int>(m_serumRuntimeFrame->width64)
+                : static_cast<int>(m_serumRuntimeFrame->width32);
+            const int height = useHdRuntime
+                ? (m_serumData.fheight_extra > 0 ? static_cast<int>(m_serumData.fheight_extra) : 64)
+                : (m_serumData.fheight > 0 ? static_cast<int>(m_serumData.fheight) : 32);
+            if (framePtr && width > 0 && height > 0) {
+                const cv::Mat rotatedMat = ConvertRgb565ToBgrMat(framePtr, width, height);
+                if (m_playbackCanvas) {
+                    const QColor gap = m_playbackCanvas
+                        ? m_playbackCanvas->palette().color(QPalette::Window)
+                        : QApplication::palette().color(QPalette::Window);
+                    const cv::Scalar gapColor(gap.blue(), gap.green(), gap.red());
+                    const cv::Mat combined = (!m_playbackOriginalPreview.empty())
+                        ? buildCombinedFrame(rotatedMat, m_playbackOriginalPreview, gapColor)
+                        : rotatedMat;
+                    m_playbackCanvas->setImage(combined);
+                }
+            }
         }
-        const int delay = std::min<int>(remaining, static_cast<int>(std::max<uint32_t>(nextDelay, 16)));
+        const int delay = (nextDelay > 0)
+            ? std::min<int>(remaining, static_cast<int>(std::max<uint32_t>(nextDelay, 16)))
+            : remaining;
         m_playbackTimer->start(delay);
+        return;
+    }
+    if (!m_playbackUsesSerumRuntime) {
+        m_playbackTimer->stop();
         return;
     }
     m_playbackTimer->start(remaining);
@@ -6619,6 +7385,9 @@ void MainWindow::refreshFramePreviewsForRotation()
         }
     }
     m_framePreviewList->doItemsLayout();
+    if (m_previewRotateEnabled && m_previewRotationTimer) {
+        schedulePreviewRotationUpdate();
+    }
 }
 
 void MainWindow::updateFramePreviewAt(int index)
@@ -9666,6 +10435,7 @@ cv::Mat ConvertRgb565ToBgrMat(const uint16_t* data, int width, int height)
     }
     return output;
 }
+
 }
 
 void MainWindow::ensureMaskDataSize()
@@ -11620,12 +12390,22 @@ void MainWindow::showSettingsDialog()
     backgroundCacheSpin->setValue(m_backgroundCacheLimit);
     auto* loggingCheck = new QCheckBox(&dialog);
     loggingCheck->setChecked(m_loggingEnabled);
+    auto* autosaveCheck = new QCheckBox(&dialog);
+    autosaveCheck->setChecked(m_autosaveEnabled);
+    auto* autosaveSpin = new QSpinBox(&dialog);
+    autosaveSpin->setRange(1, 120);
+    autosaveSpin->setValue(m_autosaveIntervalMinutes);
+    autosaveSpin->setSuffix(" min");
+    autosaveSpin->setEnabled(m_autosaveEnabled);
+    connect(autosaveCheck, &QCheckBox::toggled, autosaveSpin, &QSpinBox::setEnabled);
     layout->addRow("History depth", historySpin);
     layout->addRow("Undo depth", undoSpin);
     layout->addRow("Frame cache size", frameCacheSpin);
     layout->addRow("Sprite cache size", spriteCacheSpin);
     layout->addRow("Background cache size", backgroundCacheSpin);
     layout->addRow("Enable logging", loggingCheck);
+    layout->addRow("Enable autosave", autosaveCheck);
+    layout->addRow("Autosave interval", autosaveSpin);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     layout->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
@@ -11639,6 +12419,8 @@ void MainWindow::showSettingsDialog()
     m_spriteCacheLimit = std::clamp(spriteCacheSpin->value(), 1, 256);
     m_backgroundCacheLimit = std::clamp(backgroundCacheSpin->value(), 1, 256);
     m_loggingEnabled = loggingCheck->isChecked();
+    m_autosaveEnabled = autosaveCheck->isChecked();
+    m_autosaveIntervalMinutes = std::clamp(autosaveSpin->value(), 1, 120);
     const auto trimHistory = [this](NavigationHistory& history) {
         while (history.back.size() > m_maxHistoryDepth) {
             history.back.pop_front();
@@ -11667,6 +12449,7 @@ void MainWindow::showSettingsDialog()
     } else {
         shutdownLogging();
     }
+    updateAutosaveTimer();
     QSettings settings("PPUC", "PPUC-Serum-Colorizer");
     settings.setValue("maxHistoryDepth", m_maxHistoryDepth);
     settings.setValue("maxUndoDepth", m_maxUndoDepth);
@@ -11675,6 +12458,8 @@ void MainWindow::showSettingsDialog()
     settings.setValue("backgroundCacheLimit", m_backgroundCacheLimit);
     settings.setValue("loggingEnabled", m_loggingEnabled);
     settings.setValue("logPath", m_logPath);
+    settings.setValue("autosaveEnabled", m_autosaveEnabled);
+    settings.setValue("autosaveIntervalMinutes", m_autosaveIntervalMinutes);
     settings.sync();
 }
 
@@ -11683,7 +12468,10 @@ void MainWindow::closeEvent(QCloseEvent* event)
     logLine("Shutdown: clean");
     QSettings settings("PPUC", "PPUC-Serum-Colorizer");
     settings.setValue("lastShutdownClean", true);
+    settings.setValue("autosaveEnabled", m_autosaveEnabled);
+    settings.setValue("autosaveIntervalMinutes", m_autosaveIntervalMinutes);
     settings.sync();
+    disposeSerumRuntime();
     shutdownLogging();
     QMainWindow::closeEvent(event);
 }
@@ -11757,6 +12545,11 @@ void MainWindow::logLine(const QString& message)
     const QByteArray line = QString("[%1] %2%3\n").arg(stamp, message, mem).toUtf8();
     m_logFile->write(line);
     m_logFile->flush();
+}
+
+void MainWindow::markProjectDirty()
+{
+    m_projectDirty = true;
 }
 
 std::uint64_t MainWindow::currentRssBytes() const
@@ -11847,6 +12640,7 @@ void MainWindow::pushUndoSnapshot(bool isFrame, int index)
     if (!image || image->empty()) {
         return;
     }
+    markProjectDirty();
     UndoStack& stack = (*stacks)[static_cast<std::size_t>(index)];
     UndoState state;
     state.image = image->clone();
@@ -11896,6 +12690,7 @@ void MainWindow::pushMaskUndoSnapshot(MaskMode mode, int index)
     if (state.mask.empty()) {
         return;
     }
+    markProjectDirty();
     stack.undo.push_back(std::move(state));
     if (stack.undo.size() > m_maxUndoDepth) {
         stack.undo.erase(stack.undo.begin());
@@ -11922,6 +12717,7 @@ void MainWindow::pushBackgroundUndoSnapshot(int index)
     if (!image || image->empty()) {
         return;
     }
+    markProjectDirty();
     UndoStack& stack = (*stacks)[static_cast<std::size_t>(index)];
     UndoState state;
     state.image = image->clone();
@@ -11945,6 +12741,7 @@ void MainWindow::pushSpriteDynamicMaskUndoSnapshot(int index)
     if (map.empty()) {
         return;
     }
+    markProjectDirty();
     UndoStack& stack = m_spriteUndoStacks[static_cast<std::size_t>(index)];
     UndoState state;
     state.mask = map.clone();
@@ -11967,6 +12764,7 @@ void MainWindow::pushSpriteDetAreaUndoSnapshot(int index)
     if (base + MAX_SPRITE_DETECT_AREAS * 4 > m_spriteDetAreas.size()) {
         return;
     }
+    markProjectDirty();
     cv::Mat snapshot(1, MAX_SPRITE_DETECT_AREAS * 4, CV_16UC1);
     std::memcpy(snapshot.data,
                 m_spriteDetAreas.data() + base,
@@ -11993,6 +12791,7 @@ void MainWindow::pushBackgroundMaskUndoSnapshot(int index)
     if (!mask || mask->empty()) {
         return;
     }
+    markProjectDirty();
     UndoStack& stack = m_backgroundMaskUndoStacks[static_cast<std::size_t>(index)];
     UndoState state;
     state.mask = mask->clone();
@@ -13035,6 +13834,7 @@ void MainWindow::pushPaletteUndoSnapshot()
     if (m_paletteSetIndex < 0 || m_paletteSetIndex >= m_fullPalettes.size()) {
         return;
     }
+    markProjectDirty();
     PaletteUndoState state;
     state.kind = PaletteUndoState::Kind::Full;
     state.palette_index = m_paletteSetIndex;
@@ -13055,6 +13855,7 @@ void MainWindow::pushReducedUndoSnapshot(int setIndex)
     if (m_reducedPaletteIndices.size() < static_cast<std::size_t>(kReducedPaletteCount * 16)) {
         return;
     }
+    markProjectDirty();
     PaletteUndoState state;
     state.kind = PaletteUndoState::Kind::Reduced;
     state.set_index = setIndex;
@@ -13080,6 +13881,7 @@ void MainWindow::pushDynamicUndoSnapshot(int frameIndex, int setIndex)
     if (!colorsPtr) {
         return;
     }
+    markProjectDirty();
     const std::vector<uint16_t>& colors = *colorsPtr;
     const int stride = dynamicColorsPerSet(colors);
     if (stride <= 0) {
@@ -13111,6 +13913,7 @@ void MainWindow::pushRotationUndoSnapshot(int frameIndex, int setIndex, bool use
     if (frameIndex < 0) {
         return;
     }
+    markProjectDirty();
     const uint16_t* rotations = rotationBlockForRead(frameIndex, useHd);
     if (!rotations) {
         rotations = nullptr;
@@ -14522,14 +15325,14 @@ void MainWindow::refreshSpriteZoneList()
                 if (thumbX < padding) {
                     break;
                 }
-                const cv::Mat* sprite = (spriteIndex >= 0 && spriteIndex < m_spriteStore->count())
-                    ? m_spriteStore->at(spriteIndex)
-                    : nullptr;
-                if (!sprite || sprite->empty()) {
+                const cv::Mat sprite = (spriteIndex >= 0 && spriteIndex < m_spriteStore->count())
+                    ? m_spriteStore->loadCopy(spriteIndex)
+                    : cv::Mat();
+                if (sprite.empty()) {
                     continue;
                 }
                 cv::Mat spriteRgb;
-                cv::Mat spriteBgr = EnsureBgr(*sprite);
+                cv::Mat spriteBgr = EnsureBgr(sprite);
                 cv::cvtColor(spriteBgr, spriteRgb, cv::COLOR_BGR2RGB);
                 QImage spriteImage(spriteRgb.data,
                                    spriteRgb.cols,
@@ -14633,11 +15436,11 @@ void MainWindow::refreshSpriteZoneSpritesList()
         if (spriteIndex < 0 || spriteIndex == 255) {
             continue;
         }
-        const cv::Mat* sprite = (spriteIndex >= 0 && m_spriteStore &&
+        const cv::Mat sprite = (spriteIndex >= 0 && m_spriteStore &&
                                  spriteIndex < m_spriteStore->count())
-            ? m_spriteStore->at(spriteIndex)
-            : nullptr;
-        if (!sprite || sprite->empty()) {
+            ? m_spriteStore->loadCopy(spriteIndex)
+            : cv::Mat();
+        if (sprite.empty()) {
             continue;
         }
         cv::Mat hd;
@@ -14646,7 +15449,7 @@ void MainWindow::refreshSpriteZoneSpritesList()
                 hd = *hdSprite;
             }
         }
-        cv::Mat previewMat = BuildBackgroundPreview(*sprite,
+        cv::Mat previewMat = BuildBackgroundPreview(sprite,
                                                     hd,
                                                     cv::Scalar(gap.blue(), gap.green(), gap.red()));
         if (previewMat.empty()) {
@@ -15724,6 +16527,38 @@ bool MainWindow::setupSerumData(const QString& cromcPath,
     return true;
 }
 
+bool MainWindow::ensureSerumRuntime()
+{
+    if (m_serumRuntimeFrame) {
+        return true;
+    }
+    if (m_serumRuntimeAltDir.isEmpty() || m_serumRuntimeRomName.isEmpty()) {
+        return false;
+    }
+    Serum_SetGenerateCRomC(false);
+    const uint8_t flags = FLAG_REQUEST_32P_FRAMES |
+                          FLAG_REQUEST_64P_FRAMES |
+                          FLAG_REQUEST_FILL_MODIFIED_ELEMENTS;
+    m_serumRuntimeFrame = Serum_Load(m_serumRuntimeAltDir.toUtf8().constData(),
+                                     m_serumRuntimeRomName.toUtf8().constData(),
+                                     flags);
+    if (!m_serumRuntimeFrame) {
+        logLine(QString("Playback: Serum_Load failed (altcolor=%1 rom=%2)")
+                    .arg(m_serumRuntimeAltDir, m_serumRuntimeRomName));
+        return false;
+    }
+    return true;
+}
+
+void MainWindow::disposeSerumRuntime()
+{
+    if (!m_serumRuntimeFrame) {
+        return;
+    }
+    Serum_Dispose();
+    m_serumRuntimeFrame = nullptr;
+}
+
 void MainWindow::configureFrameStoreAdapter()
 {
     if (!m_frameStore) {
@@ -15737,6 +16572,9 @@ void MainWindow::configureFrameStoreAdapter()
     m_frameStore->setCacheLimit(m_frameCacheLimit);
     m_frameStore->setAdapter({}, [this](int index) -> cv::Mat {
         if (!m_serumDataLoaded || index < 0 || index >= static_cast<int>(m_serumData.nframes)) {
+            return cv::Mat();
+        }
+        if (!m_serumData.cframes_v2.hasData(static_cast<uint32_t>(index))) {
             return cv::Mat();
         }
         const uint16_t* data = m_serumData.cframes_v2[static_cast<uint32_t>(index)];
