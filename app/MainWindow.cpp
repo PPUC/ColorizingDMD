@@ -5514,18 +5514,23 @@ bool MainWindow::saveLegacyProjectToPaths(const QString& rpPath,
 bool MainWindow::autosaveProject(bool showProgress)
 {
     if (!m_autosaveEnabled || m_projectDir.isEmpty() || m_projectBaseName.isEmpty()) {
+        logLine("Autosave skipped: disabled or missing project path");
         return false;
     }
-    if (m_drawPointEnabled) {
+    if (m_frameHasStart || m_spriteHasStart) {
+        logLine("Autosave skipped: drawing in progress");
         return false;
     }
     if (!m_projectDirty) {
+        logLine("Autosave skipped: project clean");
         return false;
     }
     if (m_isLoadingProject) {
+        logLine("Autosave skipped: loading project");
         return false;
     }
     if (!m_frameStore || m_frameStore->count() <= 0) {
+        logLine("Autosave skipped: no frames");
         return false;
     }
     const QString autoBase = m_projectBaseName + ".autosave";
@@ -6454,7 +6459,14 @@ void MainWindow::startPlayback()
     stopPlayback();
     bool useAutosave = false;
     std::unique_ptr<QProgressDialog> progress;
-    if (m_autosaveEnabled && !m_isLoadingProject && m_projectDirty) {
+    const bool shouldAutosave = m_autosaveEnabled && !m_isLoadingProject && m_projectDirty;
+    if (!shouldAutosave) {
+        logLine(QString("Playback start: autosave skipped (enabled=%1 dirty=%2 loading=%3)")
+                    .arg(m_autosaveEnabled ? "true" : "false")
+                    .arg(m_projectDirty ? "true" : "false")
+                    .arg(m_isLoadingProject ? "true" : "false"));
+    }
+    if (shouldAutosave) {
         progress.reset(new QProgressDialog("Preparing playback...", QString(), 0, 0, this));
         progress->setWindowModality(Qt::ApplicationModal);
         progress->setCancelButton(nullptr);
@@ -6520,6 +6532,11 @@ void MainWindow::startPlayback()
     if (m_canvasTabs && m_playbackTab) {
         m_canvasTabs->setCurrentWidget(m_playbackTab);
     }
+    logLine(QString("Playback start: frames=%1 start=%2 autosave=%3 serum=%4")
+                .arg(m_playbackFrames.size())
+                .arg(startIndex)
+                .arg(useAutosave ? "true" : "false")
+                .arg(m_playbackUsesSerumRuntime ? "true" : "false"));
     renderPlaybackFrame();
     updatePlaybackButtons();
 }
@@ -8168,8 +8185,14 @@ bool MainWindow::renderFrameWithSerumRaw(int index,
     const cv::Mat* frameImage = nullptr;
     cv::Mat hdFrame;
     const bool hasOverride = !overrideColorized.empty();
-    const bool useSerumData = m_serumDataLoaded && !hasOverride &&
+    const bool useSerumData = m_serumDataLoaded &&
         index >= 0 && index < static_cast<int>(m_serumData.nframes);
+    const_cast<MainWindow*>(this)->logLine(
+        QString("renderFrameWithSerum: index=%1 hd=%2 override=%3 serum=%4")
+            .arg(index)
+            .arg(useHd ? "true" : "false")
+            .arg(hasOverride ? "true" : "false")
+            .arg(useSerumData ? "true" : "false"));
     const uint16_t* serumFrame = nullptr;
     const uint16_t* serumFrameExtra = nullptr;
     if (useSerumData) {
@@ -8710,7 +8733,7 @@ cv::Mat MainWindow::renderFrameWithSerum(int index, bool useHd, const cv::Mat& o
     const cv::Mat* frameImage = nullptr;
     cv::Mat hdFrame;
     const bool hasOverride = !overrideColorized.empty();
-    const bool useSerumData = m_serumDataLoaded && !hasOverride &&
+    const bool useSerumData = m_serumDataLoaded &&
         index >= 0 && index < static_cast<int>(m_serumData.nframes);
     const uint16_t* serumFrame = nullptr;
     const uint16_t* serumFrameExtra = nullptr;
@@ -8737,10 +8760,19 @@ cv::Mat MainWindow::renderFrameWithSerum(int index, bool useHd, const cv::Mat& o
         }
     }
     if (!frameImage && !serumFrame) {
+        const_cast<MainWindow*>(this)->logLine(
+            QString("renderFrameWithSerum: missing frame data index=%1 hd=%2 override=%3")
+                .arg(index)
+                .arg(useHd ? "true" : "false")
+                .arg(hasOverride ? "true" : "false"));
         frameImage = m_frameStore->at(index);
     }
     const bool useLocalColorized = hasOverride || (frameImage && !frameImage->empty());
     if (!useLocalColorized && !serumFrame) {
+        const_cast<MainWindow*>(this)->logLine(
+            QString("renderFrameWithSerum: no colorized data index=%1 hd=%2")
+                .arg(index)
+                .arg(useHd ? "true" : "false"));
         return cv::Mat();
     }
 
@@ -8751,6 +8783,10 @@ cv::Mat MainWindow::renderFrameWithSerum(int index, bool useHd, const cv::Mat& o
         reference = gray;
     }
     if (reference.empty()) {
+        const_cast<MainWindow*>(this)->logLine(
+            QString("renderFrameWithSerum: empty original index=%1 hd=%2")
+                .arg(index)
+                .arg(useHd ? "true" : "false"));
         return EnsureBgr(*frameImage);
     }
     if (m_noColors > 0 && m_noColors < 64) {
@@ -9217,7 +9253,7 @@ cv::Mat MainWindow::renderFrameWithSerum(int index, bool useHd, const cv::Mat& o
         return cv::Mat();
     }
     cv::Mat output = ConvertRgb565ToBgrMat(out565.data(), outWidth, outHeight);
-    if (m_showBackgroundLayer && backgroundId != 0xffff) {
+    if (m_showBackgroundLayer && backgroundId != 0xffff && !hasOverride) {
         const uint8_t* bgMaskData = useHd ? frameView.background_mask_extra : frameView.background_mask;
         if (bgMaskData) {
             cv::Mat maskView(outHeight, outWidth, CV_8UC1, const_cast<uint8_t*>(bgMaskData));
@@ -9810,15 +9846,51 @@ void MainWindow::updateFrameCanvasImage(int index)
     }
     const cv::Mat* image = activeFrameImage(index, false);
     if (!image || image->empty()) {
+        logLine(QString("Frame canvas: missing image index=%1").arg(index));
         m_framesCanvas->setImage(cv::Mat());
         m_framesCanvas->canvas()->clearTertiaryOutline();
         return;
     }
     if (m_canvasRotateEnabled) {
+        logLine(QString("Frame canvas: rotation enabled index=%1").arg(index));
         updateCanvasRotationFrame();
         return;
     }
-    const cv::Mat composed = renderFrameWithSerum(index, m_useHdFrame);
+    const cv::Mat* overrideFrame = nullptr;
+    const bool dirty = m_frameStore && m_frameStore->isDirty(index);
+    if (m_frameCanvasOverrideIndex == index && !m_frameCanvasOverrideImage.empty()) {
+        overrideFrame = &m_frameCanvasOverrideImage;
+    }
+    if (overrideFrame && !overrideFrame->empty()) {
+        int nonzero = 0;
+        for (int y = 0; y < overrideFrame->rows; ++y) {
+            const cv::Vec3b* row = overrideFrame->ptr<cv::Vec3b>(y);
+            for (int x = 0; x < overrideFrame->cols; ++x) {
+                const cv::Vec3b px = row[x];
+                if (px[0] || px[1] || px[2]) {
+                    ++nonzero;
+                }
+            }
+        }
+        logLine(QString("Frame canvas: override stats index=%1 size=%2x%3 nonzero=%4")
+                    .arg(index)
+                    .arg(overrideFrame->cols)
+                    .arg(overrideFrame->rows)
+                    .arg(nonzero));
+    }
+    logLine(QString("Frame canvas: render index=%1 hd=%2 dirty=%3 override=%4")
+                .arg(index)
+                .arg(m_useHdFrame ? "true" : "false")
+                .arg(dirty ? "true" : "false")
+                .arg(overrideFrame ? "true" : "false"));
+    const cv::Mat composed = overrideFrame
+        ? renderFrameWithSerum(index, m_useHdFrame, *overrideFrame)
+        : renderFrameWithSerum(index, m_useHdFrame);
+    if (composed.empty()) {
+        logLine(QString("Frame canvas: composed empty index=%1 hd=%2")
+                    .arg(index)
+                    .arg(m_useHdFrame ? "true" : "false"));
+    }
     setFrameCanvasFromComposed(index, composed);
 }
 
@@ -10866,6 +10938,7 @@ cv::Mat MainWindow::buildMaskPreview(const cv::Mat& frame, const cv::Mat& mask, 
 void MainWindow::updateMaskPreviewForFrame(int index)
 {
     if (index < 0 || index >= m_frameStore->count()) {
+        logLine(QString("Mask preview: invalid index=%1").arg(index));
         m_framesCanvas->canvas()->clearPreviewImage();
         m_framesCanvas->canvas()->clearMaskOutline();
         m_framesCanvas->canvas()->clearTertiaryOutline();
@@ -10873,6 +10946,7 @@ void MainWindow::updateMaskPreviewForFrame(int index)
     }
     const cv::Mat* frame = activeFrameImage(index, false);
     if (!frame || frame->empty()) {
+        logLine(QString("Mask preview: empty frame index=%1").arg(index));
         m_framesCanvas->canvas()->clearMaskOutline();
         m_framesCanvas->canvas()->clearTertiaryOutline();
         return;
@@ -10938,6 +11012,9 @@ void MainWindow::updateMaskPreviewForFrame(int index)
         }
         return;
     }
+    if (!m_showOriginalFrame && m_maskMode == MaskMode::None && !hasTopMask) {
+        logLine(QString("Mask preview: cleared (no masks) index=%1").arg(index));
+    }
 
     cv::Mat bottomPreview;
     cv::Mat dynamicMask;
@@ -10985,7 +11062,11 @@ void MainWindow::updateMaskPreviewForFrame(int index)
                              layout.bottomWidth,
                              layout.bottomHeight);
         cv::Mat combined = buildCombinedFrame(topPreview, displayOriginal, gapColor);
-        m_framesCanvas->canvas()->setPreviewImage(combined);
+        if (hasTopMask || hasBottomMask) {
+            m_framesCanvas->canvas()->setPreviewImage(combined);
+        } else {
+            m_framesCanvas->canvas()->clearPreviewImage();
+        }
     } else {
         if (hasTopMask) {
             m_framesCanvas->canvas()->setPreviewImage(topPreview);
@@ -13518,7 +13599,18 @@ cv::Mat* MainWindow::activeFrameImage(int index, bool forEdit)
         return ensureHdFrameLocal(index);
     }
     if (forEdit) {
-        return m_frameStore->atMutable(index);
+        cv::Mat* image = m_frameStore->atMutable(index);
+        if (image && image->empty()) {
+            const cv::Mat base = renderFrameWithSerum(index, m_useHdFrame);
+            if (!base.empty()) {
+                *image = EnsureBgr(base);
+                logLine(QString("Frame edit seed: index=%1 size=%2x%3")
+                            .arg(index)
+                            .arg(image->cols)
+                            .arg(image->rows));
+            }
+        }
+        return image;
     }
     const cv::Mat* image = m_frameStore->at(index);
     return image ? const_cast<cv::Mat*>(image) : nullptr;
@@ -16306,6 +16398,10 @@ void MainWindow::showFrameAtIndex(int index)
     if (m_isLoadingProject) {
         return;
     }
+    if (m_frameCanvasOverrideIndex >= 0 && m_frameCanvasOverrideIndex != index) {
+        m_frameCanvasOverrideImage.release();
+        m_frameCanvasOverrideIndex = -1;
+    }
     const cv::Mat* image = m_frameStore->at(index);
     if (image && !image->empty()) {
         m_framesCanvas->canvas()->clearPreviewImage();
@@ -18408,9 +18504,37 @@ void MainWindow::handleToolRelease(bool isFrame,
             commitFrameFromStore(frameIndex, m_useHdFrame);
             updateFramePreviewAt(frameIndex);
         }
+        if (targets.size() == 1) {
+            const int editedIndex = targets.front();
+            const cv::Mat* edited = activeFrameImage(editedIndex, false);
+            if (edited && !edited->empty()) {
+                m_frameCanvasOverrideIndex = editedIndex;
+                m_frameCanvasOverrideImage = edited->clone();
+                int nonzero = 0;
+                for (int y = 0; y < m_frameCanvasOverrideImage.rows; ++y) {
+                    const cv::Vec3b* row = m_frameCanvasOverrideImage.ptr<cv::Vec3b>(y);
+                    for (int x = 0; x < m_frameCanvasOverrideImage.cols; ++x) {
+                        const cv::Vec3b px = row[x];
+                        if (px[0] || px[1] || px[2]) {
+                            ++nonzero;
+                        }
+                    }
+                }
+                logLine(QString("Draw commit: override stats index=%1 size=%2x%3 nonzero=%4")
+                            .arg(editedIndex)
+                            .arg(m_frameCanvasOverrideImage.cols)
+                            .arg(m_frameCanvasOverrideImage.rows)
+                            .arg(nonzero));
+            }
+        }
         m_framesCanvas->canvas()->clearPreviewImage();
         updateFrameCanvasImage(m_framesList->currentRow());
         updateMaskPreviewForFrame(m_framesList->currentRow());
+        logLine(QString("Draw commit: frame index=%1 tool=%2 targets=%3 hd=%4")
+                    .arg(m_framesList->currentRow())
+                    .arg(static_cast<int>(m_drawTool))
+                    .arg(targets.size())
+                    .arg(m_useHdFrame ? "true" : "false"));
         m_frameUndoActive = false;
     } else {
         applyToolToImage(*image, m_drawTool, start, QPoint(x, y), erase);

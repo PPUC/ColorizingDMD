@@ -646,6 +646,8 @@ private:
     std::vector<uint8_t> m_playbackOriginalBuffer;
     std::vector<int> m_playbackFrames;
     std::vector<int> m_previewSelectedFrames;
+    int m_frameCanvasOverrideIndex = -1;
+    cv::Mat m_frameCanvasOverrideImage;
     bool m_restorePreviewSelection = false;
     bool m_previewSelectionClearRequested = false;
     bool m_isLoadingProject = false;
