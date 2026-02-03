@@ -43,6 +43,7 @@
 - libserum is the source of truth; the editor must not render differently.
 - Every feature addition, modification, or removal must be reflected in `handbook.md`.
 - libserum is the source of truth; the editor must not render differently.
+- The Help → Run Debug Check action must be updated alongside new features (add checks relevant to new systems).
 
 ## Editor mask behavior
 - Frame uses exactly one comparison mask and one dynamic mask assignment.

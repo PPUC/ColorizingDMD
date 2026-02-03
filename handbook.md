@@ -2,6 +2,17 @@
 
 This handbook captures editor behaviors and workflows that differ from the legacy app. It is meant to be updated as new features land.
 
+## Stability Checklist (Quick Regression Test)
+
+Run this checklist after changes that touch rendering, saving, or playback:
+
+- Drawing on frames/sprites shows immediately and remains visible after mouse release.
+- Switching frames away and back keeps the drawing intact.
+- Playback starts from the selected frame and loops correctly.
+- Autosave runs only when the project is dirty and playback uses autosaved files.
+- Save/Save As/Autosave produce a valid `.cROMc` (no missing masks/dynamics/sprites; sizes close to the source file).
+- Preview row renders with rotations enabled.
+
 ## Performance Notes
 
 - Large projects load frame data on demand; the first time you open a frame or run a full save, expect a short delay while data is decoded.
@@ -28,6 +39,16 @@ This handbook captures editor behaviors and workflows that differ from the legac
 - Playback can override per-frame durations using the `Fixed` control (milliseconds) in the Playback tab.
 - Playback uses libserum’s runtime pipeline, so scene triggers and scene timing behave like in production.
 - Playback triggers an autosave and uses the autosaved files for rendering.
+
+## Debug Check (Help → Run Debug Check)
+
+Use this when something feels off or after a risky change. It will:
+
+- Log the current project state (frame/sprite/background counts).
+- Render frame 0 and the current frame via libserum and log whether they are empty.
+- Attempt to initialize the libserum runtime for playback and log success/failure.
+
+The results are written to the log file (Help → Copy Log).
 
 ## Canvas Controls
 

@@ -2651,10 +2651,12 @@ MainWindow::MainWindow(QWidget* parent)
     auto* handbookAction = new QAction("&Handbook", this);
     auto* licensesAction = new QAction("&Dependencies && Licenses", this);
     auto* copyLogAction = new QAction("&Copy Log", this);
+    auto* debugCheckAction = new QAction("&Run Debug Check", this);
     auto* aboutAction = new QAction("&About", this);
     helpMenu->addAction(handbookAction);
     helpMenu->addAction(licensesAction);
     helpMenu->addAction(copyLogAction);
+    helpMenu->addAction(debugCheckAction);
     helpMenu->addAction(aboutAction);
     connect(handbookAction, &QAction::triggered, this, [this]() {
         QFile file(":/docs/handbook.md");
@@ -2686,6 +2688,9 @@ MainWindow::MainWindow(QWidget* parent)
         }
         QGuiApplication::clipboard()->setText(QString::fromUtf8(file.readAll()));
         logLine("Log copied from Help menu");
+    });
+    connect(debugCheckAction, &QAction::triggered, this, [this]() {
+        runDebugCheck();
     });
     connect(licensesAction, &QAction::triggered, this, [this]() {
         const QString appName = QCoreApplication::applicationName().isEmpty()
@@ -12694,6 +12699,47 @@ void MainWindow::showCrashLogDialog()
             logLine("Crash log copied to clipboard");
         }
     }
+}
+
+void MainWindow::runDebugCheck()
+{
+    logLine("Debug check: begin");
+    if (m_projectDir.isEmpty() || m_projectBaseName.isEmpty()) {
+        logLine("Debug check: no project loaded");
+        statusBar()->showMessage("Debug check: no project loaded.", 4000);
+        return;
+    }
+    const int frameCount = m_frameStore ? m_frameStore->count() : 0;
+    logLine(QString("Debug check: frames=%1 sprites=%2 backgrounds=%3")
+                .arg(frameCount)
+                .arg(m_spriteStore ? m_spriteStore->count() : 0)
+                .arg(m_backgroundStore ? m_backgroundStore->count() : 0));
+    const int currentIndex = m_framesList ? m_framesList->currentRow() : -1;
+    if (frameCount > 0) {
+        const cv::Mat first = renderFrameWithSerum(0, false);
+        logLine(QString("Debug check: render frame0 empty=%1 size=%2x%3")
+                    .arg(first.empty() ? "true" : "false")
+                    .arg(first.cols)
+                    .arg(first.rows));
+    }
+    if (currentIndex >= 0) {
+        const cv::Mat current = renderFrameWithSerum(currentIndex, m_useHdFrame);
+        logLine(QString("Debug check: render current=%1 hd=%2 empty=%3 size=%4x%5")
+                    .arg(currentIndex)
+                    .arg(m_useHdFrame ? "true" : "false")
+                    .arg(current.empty() ? "true" : "false")
+                    .arg(current.cols)
+                    .arg(current.rows));
+    }
+    setSerumRuntimePathsForPlayback(false);
+    disposeSerumRuntime();
+    const bool runtimeOk = ensureSerumRuntime();
+    logLine(QString("Debug check: serum runtime=%1").arg(runtimeOk ? "ok" : "failed"));
+    if (runtimeOk) {
+        disposeSerumRuntime();
+    }
+    statusBar()->showMessage("Debug check complete. See log for details.", 4000);
+    logLine("Debug check: end");
 }
 
 void MainWindow::pushUndoSnapshot(bool isFrame, int index)

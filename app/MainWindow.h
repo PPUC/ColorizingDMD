@@ -208,6 +208,7 @@ private:
     void shutdownLogging();
     void logLine(const QString& message);
     void markProjectDirty();
+    void runDebugCheck();
     std::uint64_t currentRssBytes() const;
     void showCrashLogDialog();
     void pushPaletteUndoSnapshot();
