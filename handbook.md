@@ -53,7 +53,8 @@ The results are written to the log file (Help → Copy Log).
 ## Canvas Controls
 
 - **Fit to View** fits the current frame/sprite/background to the canvas.
-- **Grid toggle** shows/hides the pixel grid.
+- Canvases auto-fit the first time they show content; subsequent user zoom/pan is preserved.
+- Pixels are rendered as circles. The diameter is adjustable in Settings (default 80%).
 - **Original toggle** shows/hides the original (orange) reference under the colorized frame.
 - **Mask/Dynamic buttons** select the mask mode for the original reference (only one active).
 - **Background Mask** is independent and edits the background mask on the colorized frame.
@@ -76,6 +77,7 @@ The results are written to the log file (Help → Copy Log).
 - Mask edits apply to the assigned mask, which is shared across all frames using it.
 - Dynamic mask edits apply to the current dynamic set for all selected frames.
 - Background assignment and background mask edits apply to all selected frames.
+- Dynamic-content regions are outlined in yellow on the frame canvas and are not paintable (same as sprites).
 - Frame history supports back/forward navigation per canvas.
 - Trigger ID is per frame in Tools → Inspector. “Switch to Monochrome” sets ID 65432 and locks the field; manual IDs must be < 65432.
 

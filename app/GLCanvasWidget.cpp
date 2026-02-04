@@ -57,6 +57,11 @@ cv::Mat ConvertToDisplayMat(const cv::Mat& image)
 void GLCanvasWidget::setImage(const cv::Mat& image)
 {
     m_image = ConvertToDisplayMat(image);
+    if (m_fitOncePending && !m_image.empty()) {
+        m_fitOncePending = false;
+        fitToImage();
+        return;
+    }
     update();
 }
 
@@ -104,6 +109,13 @@ void GLCanvasWidget::requestFitOnResize(bool enabled)
 void GLCanvasWidget::setGridEnabled(bool enabled)
 {
     m_gridEnabled = enabled;
+    update();
+}
+
+void GLCanvasWidget::setPixelDiameterPercent(int percent)
+{
+    const int clamped = std::clamp(percent, 10, 100);
+    m_pixelDiameter = static_cast<double>(clamped) / 100.0;
     update();
 }
 
@@ -246,106 +258,104 @@ void GLCanvasWidget::paintGL()
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
 
+    auto buildRegions = [&](int w, int h) {
+        QVector<QRect> regions;
+        if (m_gridTopHeight > 0 && m_gridBottomHeight > 0 &&
+            m_gridTopHeight + m_gridGap + m_gridBottomHeight <= h) {
+            QRect topRect(0, 0, w, m_gridTopHeight);
+            if (m_gridHasTopRegion) {
+                topRect = m_gridTopRegion.intersected(QRect(0, 0, w, h));
+            }
+            if (topRect.isValid() && !topRect.isEmpty()) {
+                regions.push_back(topRect);
+            }
+            QRect bottomRect(0, m_gridTopHeight + m_gridGap, w, m_gridBottomHeight);
+            if (m_gridHasBottomRegion) {
+                bottomRect = m_gridBottomRegion.intersected(QRect(0, 0, w, h));
+            }
+            if (bottomRect.isValid() && !bottomRect.isEmpty()) {
+                regions.push_back(bottomRect);
+            }
+        } else {
+            regions.push_back(QRect(0, 0, w, h));
+        }
+        return regions;
+    };
+
+    auto drawPixelCircles = [&](const cv::Mat& image, double opacity, const QVector<QRect>& regions) {
+        if (image.empty()) {
+            return;
+        }
+        const int w = image.cols;
+        const int h = image.rows;
+        const double radius = std::max(0.05, m_pixelDiameter / 2.0);
+        painter.save();
+        painter.setOpacity(opacity);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.translate(width() / 2.0 + m_pan.x(), height() / 2.0 + m_pan.y());
+        painter.scale(m_zoom, m_zoom);
+        painter.setPen(Qt::NoPen);
+        for (const QRect& region : regions) {
+            const int yStart = std::max(0, region.y());
+            const int yEnd = std::min(h, region.y() + region.height());
+            const int xStart = std::max(0, region.x());
+            const int xEnd = std::min(w, region.x() + region.width());
+            for (int y = yStart; y < yEnd; ++y) {
+                if (image.channels() == 4) {
+                    const cv::Vec4b* row = image.ptr<cv::Vec4b>(y);
+                    for (int x = xStart; x < xEnd; ++x) {
+                        const cv::Vec4b px = row[x];
+                        if (px[3] == 0) {
+                            continue;
+                        }
+                        painter.setBrush(QColor(px[0], px[1], px[2], px[3]));
+                        const double cx = x + 0.5 - w / 2.0;
+                        const double cy = y + 0.5 - h / 2.0;
+                        painter.drawEllipse(QRectF(cx - radius, cy - radius, radius * 2.0, radius * 2.0));
+                    }
+                } else {
+                    const cv::Vec3b* row = image.ptr<cv::Vec3b>(y);
+                    for (int x = xStart; x < xEnd; ++x) {
+                        const cv::Vec3b px = row[x];
+                        painter.setBrush(QColor(px[0], px[1], px[2]));
+                        const double cx = x + 0.5 - w / 2.0;
+                        const double cy = y + 0.5 - h / 2.0;
+                        painter.drawEllipse(QRectF(cx - radius, cy - radius, radius * 2.0, radius * 2.0));
+                    }
+                }
+            }
+        }
+        painter.restore();
+    };
+
     if (!m_image.empty()) {
-        QImage image;
-        if (m_image.channels() == 3) {
-            image = QImage(m_image.data, m_image.cols, m_image.rows, m_image.step, QImage::Format_RGB888);
-        } else if (m_image.channels() == 4) {
-            image = QImage(m_image.data, m_image.cols, m_image.rows, m_image.step, QImage::Format_RGBA8888);
+        const QVector<QRect> regions = buildRegions(m_image.cols, m_image.rows);
+        painter.save();
+        painter.translate(width() / 2.0 + m_pan.x(), height() / 2.0 + m_pan.y());
+        painter.scale(m_zoom, m_zoom);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(Qt::black);
+        for (const QRect& region : regions) {
+            if (region.isValid() && !region.isEmpty()) {
+                painter.drawRect(QRectF(region.x() - m_image.cols / 2.0,
+                                        region.y() - m_image.rows / 2.0,
+                                        region.width(),
+                                        region.height()));
+            }
         }
-        if (!image.isNull()) {
-            painter.save();
-            painter.translate(width() / 2.0 + m_pan.x(), height() / 2.0 + m_pan.y());
-            painter.scale(m_zoom, m_zoom);
-            QRectF target(-image.width() / 2.0, -image.height() / 2.0, image.width(), image.height());
-            painter.drawImage(target, image);
-            painter.restore();
-        }
+        painter.restore();
+        drawPixelCircles(m_image, 1.0, regions);
     } else {
         painter.setPen(QColor(220, 220, 220));
         painter.drawText(rect(), Qt::AlignCenter, m_overlayText);
     }
 
     if (!m_preview.empty()) {
-        QImage previewImage;
-        if (m_preview.channels() == 3) {
-            previewImage = QImage(m_preview.data, m_preview.cols, m_preview.rows, m_preview.step, QImage::Format_RGB888);
-        } else if (m_preview.channels() == 4) {
-            previewImage = QImage(m_preview.data, m_preview.cols, m_preview.rows, m_preview.step, QImage::Format_RGBA8888);
-        }
-        if (!previewImage.isNull()) {
-            painter.save();
-            painter.setOpacity(0.5);
-            painter.translate(width() / 2.0 + m_pan.x(), height() / 2.0 + m_pan.y());
-            painter.scale(m_zoom, m_zoom);
-            QRectF target(-previewImage.width() / 2.0, -previewImage.height() / 2.0,
-                          previewImage.width(), previewImage.height());
-            painter.drawImage(target, previewImage);
-            painter.restore();
-        }
+        const QVector<QRect> previewRegions = buildRegions(m_preview.cols, m_preview.rows);
+        drawPixelCircles(m_preview, 0.5, previewRegions);
     }
 
-    if (m_gridEnabled && !m_image.empty()) {
-        painter.save();
-        painter.setRenderHint(QPainter::Antialiasing, false);
-        painter.translate(width() / 2.0 + m_pan.x(), height() / 2.0 + m_pan.y());
-        painter.scale(m_zoom, m_zoom);
-        const int w = m_image.cols;
-        const int h = m_image.rows;
-        auto drawRegion = [&](int yStart, int yEnd, int scale, const QRect* regionOverride) {
-            if (yEnd <= yStart) {
-                return;
-            }
-            int xStart = 0;
-            int xEnd = w;
-            if (regionOverride && regionOverride->isValid() && !regionOverride->isEmpty()) {
-                xStart = std::clamp(regionOverride->x(), 0, w);
-                xEnd = std::clamp(regionOverride->x() + regionOverride->width(), 0, w);
-            }
-            if (xEnd <= xStart) {
-                return;
-            }
-            painter.save();
-            painter.setClipRect(QRectF(xStart - w / 2.0,
-                                       yStart - h / 2.0,
-                                       xEnd - xStart,
-                                       yEnd - yStart));
-            const double gapRatio = 0.5;
-            const double cell = std::max(1, scale);
-            const double screenStep = cell * m_zoom;
-            const double minSpacing = 4.0;
-            const int skip = (screenStep > 0.0 && screenStep < minSpacing)
-                ? static_cast<int>(std::ceil(minSpacing / screenStep))
-                : 1;
-            const int step = std::max(1, scale * skip);
-            const double lineWidth = 1.0 / 3.0;
-            QPen gridPen(QColor(0, 0, 0));
-            gridPen.setWidthF(lineWidth);
-            gridPen.setCapStyle(Qt::SquareCap);
-            painter.setPen(gridPen);
-            for (int x = xStart; x <= xEnd; x += step) {
-                painter.drawLine(QPointF(x - w / 2.0, yStart - h / 2.0),
-                                 QPointF(x - w / 2.0, yEnd - h / 2.0));
-            }
-            for (int y = yStart; y <= yEnd; y += step) {
-                painter.drawLine(QPointF(xStart - w / 2.0, y - h / 2.0),
-                                 QPointF(xEnd - w / 2.0, y - h / 2.0));
-            }
-            painter.restore();
-        };
-        if (m_gridTopHeight > 0 && m_gridBottomHeight > 0 &&
-            m_gridTopHeight + m_gridGap + m_gridBottomHeight <= h) {
-            drawRegion(0, m_gridTopHeight, m_gridTopScale,
-                       m_gridHasTopRegion ? &m_gridTopRegion : nullptr);
-            drawRegion(m_gridTopHeight + m_gridGap,
-                       m_gridTopHeight + m_gridGap + m_gridBottomHeight,
-                       m_gridBottomScale,
-                       m_gridHasBottomRegion ? &m_gridBottomRegion : nullptr);
-        } else {
-            drawRegion(0, h, 1, nullptr);
-        }
-        painter.restore();
-    }
+    (void)m_gridEnabled;
 
     auto drawOutline = [&](const cv::Mat& srcMask,
                            const QColor& color,
@@ -371,10 +381,9 @@ void GLCanvasWidget::paintGL()
         if (mask.cols != region.width() || mask.rows != region.height()) {
             cv::resize(mask, mask, cv::Size(region.width(), region.height()), 0.0, 0.0, cv::INTER_NEAREST);
         }
-        QPen outlinePen(color);
-        outlinePen.setWidthF(1.0 / 3.0);
-        outlinePen.setCapStyle(Qt::SquareCap);
-        painter.setPen(outlinePen);
+        const double outlineWidth = std::max(0.5, 1.0 / std::max(0.1, m_zoom));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(color);
         const int wMask = mask.cols;
         const int hMask = mask.rows;
         for (int y = 0; y < hMask; ++y) {
@@ -390,16 +399,28 @@ void GLCanvasWidget::paintGL()
                 const double left = (x + region.x()) - m_image.cols / 2.0;
                 const double top = (y + region.y()) - m_image.rows / 2.0;
                 if (leftEmpty) {
-                    painter.drawLine(QPointF(left, top), QPointF(left, top + 1.0));
+                    painter.drawRect(QRectF(left - outlineWidth / 2.0,
+                                            top,
+                                            outlineWidth,
+                                            1.0));
                 }
                 if (rightEmpty) {
-                    painter.drawLine(QPointF(left + 1.0, top), QPointF(left + 1.0, top + 1.0));
+                    painter.drawRect(QRectF(left + 1.0 - outlineWidth / 2.0,
+                                            top,
+                                            outlineWidth,
+                                            1.0));
                 }
                 if (upEmpty) {
-                    painter.drawLine(QPointF(left, top), QPointF(left + 1.0, top));
+                    painter.drawRect(QRectF(left,
+                                            top - outlineWidth / 2.0,
+                                            1.0,
+                                            outlineWidth));
                 }
                 if (downEmpty) {
-                    painter.drawLine(QPointF(left, top + 1.0), QPointF(left + 1.0, top + 1.0));
+                    painter.drawRect(QRectF(left,
+                                            top + 1.0 - outlineWidth / 2.0,
+                                            1.0,
+                                            outlineWidth));
                 }
             }
         }

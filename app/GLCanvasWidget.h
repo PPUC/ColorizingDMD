@@ -19,6 +19,7 @@ public:
     void fitToImage();
     void requestFitOnResize(bool enabled = true);
     void setGridEnabled(bool enabled);
+    void setPixelDiameterPercent(int percent);
     void setGridSegments(int topHeight, int gapHeight, int bottomHeight);
     void setGridScales(int topScale, int bottomScale);
     void setGridRegions(const QRect& topRegion, const QRect& bottomRegion);
@@ -60,7 +61,9 @@ private:
     bool m_panning;
     bool m_panningEnabled;
     bool m_fitOnResize;
+    bool m_fitOncePending = true;
     bool m_gridEnabled;
+    double m_pixelDiameter = 0.8;
     int m_gridTopHeight = 0;
     int m_gridBottomHeight = 0;
     int m_gridGap = 0;

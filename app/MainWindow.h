@@ -277,6 +277,7 @@ private:
                                  const uint32_t* rotationShifts) const;
     cv::Mat buildOriginalPreviewForIndex(int index) const;
     cv::Mat buildSpriteCoverageMask(int index, bool useHd) const;
+    cv::Mat buildDynamicCoverageMask(int index, bool useHd) const;
     void restoreSpriteCoverage(cv::Mat& target,
                                const cv::Mat& backup,
                                const cv::Mat& spriteMask) const;
@@ -722,6 +723,7 @@ private:
     int m_frameCacheLimit = 16;
     int m_spriteCacheLimit = 8;
     int m_backgroundCacheLimit = 4;
+    int m_pixelDiameterPercent = 80;
     bool m_loggingEnabled = true;
     QString m_logPath;
     class QFile* m_logFile = nullptr;

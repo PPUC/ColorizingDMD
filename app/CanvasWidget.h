@@ -47,7 +47,6 @@ signals:
     void fitRequested();
     void backRequested();
     void forwardRequested();
-    void gridToggled(bool enabled);
     void originalToggled(bool enabled);
     void backgroundToggled(bool enabled);
     void maskToggled(bool enabled);
@@ -65,7 +64,6 @@ private:
     QToolButton* m_fitButton;
     QToolButton* m_backButton;
     QToolButton* m_forwardButton;
-    QToolButton* m_gridButton;
     QToolButton* m_originalButton;
     QToolButton* m_backgroundButton;
     QToolButton* m_maskButton;

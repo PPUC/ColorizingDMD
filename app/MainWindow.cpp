@@ -4348,18 +4348,10 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_imagesCanvas, &CanvasWidget::forwardRequested, this, [this]() {
         navigateHistory(m_imageHistory, m_imagesList, true);
     });
-    connect(m_framesCanvas, &CanvasWidget::gridToggled, this, [this](bool enabled) {
-        m_framesCanvas->canvas()->setGridEnabled(enabled);
-    });
-    connect(m_spritesCanvas, &CanvasWidget::gridToggled, this, [this](bool enabled) {
-        m_spritesCanvas->canvas()->setGridEnabled(enabled);
-    });
-    connect(m_backgroundsCanvas, &CanvasWidget::gridToggled, this, [this](bool enabled) {
-        m_backgroundsCanvas->canvas()->setGridEnabled(enabled);
-    });
-    connect(m_playbackCanvas, &CanvasWidget::gridToggled, this, [this](bool enabled) {
-        m_playbackCanvas->canvas()->setGridEnabled(enabled);
-    });
+    m_framesCanvas->canvas()->setPixelDiameterPercent(m_pixelDiameterPercent);
+    m_spritesCanvas->canvas()->setPixelDiameterPercent(m_pixelDiameterPercent);
+    m_backgroundsCanvas->canvas()->setPixelDiameterPercent(m_pixelDiameterPercent);
+    m_playbackCanvas->canvas()->setPixelDiameterPercent(m_pixelDiameterPercent);
     connect(m_framesCanvas, &CanvasWidget::maskToggled, this, [this](bool enabled) {
         if (enabled) {
             setMaskMode(MaskMode::Comparison);
@@ -4810,6 +4802,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_frameCacheLimit = std::clamp(settings.value("frameCacheLimit", 16).toInt(), 1, 256);
     m_spriteCacheLimit = std::clamp(settings.value("spriteCacheLimit", 8).toInt(), 1, 256);
     m_backgroundCacheLimit = std::clamp(settings.value("backgroundCacheLimit", 4).toInt(), 1, 256);
+    m_pixelDiameterPercent = std::clamp(settings.value("pixelDiameterPercent", 80).toInt(), 10, 100);
     m_autosaveEnabled = settings.value("autosaveEnabled", true).toBool();
     m_autosaveIntervalMinutes = std::clamp(settings.value("autosaveIntervalMinutes", 1).toInt(), 1, 120);
     const bool wasCleanShutdown = settings.value("lastShutdownClean", true).toBool();
@@ -7948,7 +7941,18 @@ cv::Mat MainWindow::buildSpriteCoverageMask(int index, bool useHd) const
     } else if (m_frameStore) {
         frame = m_frameStore->at(index);
     }
-    if (!frame || frame->empty()) {
+    int frameWidth = 0;
+    int frameHeight = 0;
+    if (frame && !frame->empty()) {
+        frameWidth = frame->cols;
+        frameHeight = frame->rows;
+    } else if (useSerumData) {
+        frameWidth = useHd ? static_cast<int>(m_serumData.fwidth_extra)
+                           : static_cast<int>(m_serumData.fwidth);
+        frameHeight = useHd ? static_cast<int>(m_serumData.fheight_extra)
+                            : static_cast<int>(m_serumData.fheight);
+    }
+    if (frameWidth <= 0 || frameHeight <= 0) {
         return cv::Mat();
     }
     std::size_t spriteCount = m_spriteOriginals.size();
@@ -7958,12 +7962,25 @@ cv::Mat MainWindow::buildSpriteCoverageMask(int index, bool useHd) const
     if (spriteCount == 0) {
         return cv::Mat();
     }
+    const uint8_t* frameSprites = nullptr;
+    const uint16_t* frameSpriteBBoxes = nullptr;
     const std::size_t baseSlot = static_cast<std::size_t>(index) * MAX_SPRITES_PER_FRAME;
-    if (baseSlot + MAX_SPRITES_PER_FRAME > m_frameSpriteAssignments.size()) {
-        return cv::Mat();
+    if (baseSlot + MAX_SPRITES_PER_FRAME <= m_frameSpriteAssignments.size()) {
+        frameSprites = m_frameSpriteAssignments.data() + baseSlot;
     }
     const std::size_t spriteBbBase = static_cast<std::size_t>(index) * MAX_SPRITES_PER_FRAME * 4;
-    if (spriteBbBase + MAX_SPRITES_PER_FRAME * 4 > m_frameSpriteBBoxes.size()) {
+    if (spriteBbBase + MAX_SPRITES_PER_FRAME * 4 <= m_frameSpriteBBoxes.size()) {
+        frameSpriteBBoxes = m_frameSpriteBBoxes.data() + spriteBbBase;
+    }
+    if ((!frameSprites || !frameSpriteBBoxes) && useSerumData) {
+        if (!frameSprites && m_serumData.framesprites.hasData(static_cast<uint32_t>(index))) {
+            frameSprites = m_serumData.framesprites[static_cast<uint32_t>(index)];
+        }
+        if (!frameSpriteBBoxes && m_serumData.framespriteBB.hasData(static_cast<uint32_t>(index))) {
+            frameSpriteBBoxes = m_serumData.framespriteBB[static_cast<uint32_t>(index)];
+        }
+    }
+    if (!frameSprites || !frameSpriteBBoxes) {
         return cv::Mat();
     }
 
@@ -7979,7 +7996,7 @@ cv::Mat MainWindow::buildSpriteCoverageMask(int index, bool useHd) const
 
     std::vector<SerumEditorSpriteView> spriteViews(spriteCount);
     for (int slot = 0; slot < MAX_SPRITES_PER_FRAME; ++slot) {
-        const uint8_t spriteId = m_frameSpriteAssignments[baseSlot + static_cast<std::size_t>(slot)];
+        const uint8_t spriteId = frameSprites[static_cast<std::size_t>(slot)];
         if (spriteId == 255 || spriteId >= spriteCount) {
             continue;
         }
@@ -8019,16 +8036,16 @@ cv::Mat MainWindow::buildSpriteCoverageMask(int index, bool useHd) const
     SerumEditorDataView dataView;
     dataView.width = static_cast<uint32_t>(reference.cols);
     dataView.height = static_cast<uint32_t>(reference.rows);
-    dataView.width_extra = static_cast<uint32_t>(frame->cols);
-    dataView.height_extra = static_cast<uint32_t>(frame->rows);
+    dataView.width_extra = static_cast<uint32_t>(frameWidth);
+    dataView.height_extra = static_cast<uint32_t>(frameHeight);
     dataView.nocolors = m_noColors;
     dataView.nsprites = static_cast<uint32_t>(spriteCount);
     dataView.sprites = spriteViews.data();
 
     SerumEditorFrameView frameView;
     frameView.original = reference.data;
-    frameView.frame_sprites = m_frameSpriteAssignments.data() + baseSlot;
-    frameView.frame_sprite_bboxes = m_frameSpriteBBoxes.data() + spriteBbBase;
+    frameView.frame_sprites = frameSprites;
+    frameView.frame_sprite_bboxes = frameSpriteBBoxes;
 
     SerumEditorSpriteMatch matches[MAX_SPRITES_PER_FRAME];
     std::memset(matches, 0, sizeof(matches));
@@ -8038,7 +8055,7 @@ cv::Mat MainWindow::buildSpriteCoverageMask(int index, bool useHd) const
         return cv::Mat();
     }
 
-    cv::Mat mask(frame->rows, frame->cols, CV_8UC1, cv::Scalar(0));
+    cv::Mat mask(frameHeight, frameWidth, CV_8UC1, cv::Scalar(0));
     bool hasContent = false;
     const bool extraIs64 = dataView.height_extra == 64;
     for (uint8_t i = 0; i < matchCount; ++i) {
@@ -8123,6 +8140,79 @@ cv::Mat MainWindow::buildSpriteCoverageMask(int index, bool useHd) const
     }
     if (!hasContent) {
         return cv::Mat();
+    }
+    return mask;
+}
+
+cv::Mat MainWindow::buildDynamicCoverageMask(int index, bool useHd) const
+{
+    if (index < 0) {
+        return cv::Mat();
+    }
+    const bool useSerumData = m_serumDataLoaded &&
+        index >= 0 && index < static_cast<int>(m_serumData.nframes);
+
+    cv::Mat map;
+    if (useHd) {
+        if (index < static_cast<int>(m_frameDynamicMaskMapsX.size()) &&
+            !m_frameDynamicMaskMapsX[static_cast<std::size_t>(index)].empty()) {
+            map = m_frameDynamicMaskMapsX[static_cast<std::size_t>(index)];
+        } else if (useSerumData && m_serumData.dynamasks_extra.hasData(static_cast<uint32_t>(index)) &&
+                   m_serumData.fwidth_extra > 0 && m_serumData.fheight_extra > 0) {
+            map = cv::Mat(static_cast<int>(m_serumData.fheight_extra),
+                          static_cast<int>(m_serumData.fwidth_extra),
+                          CV_8UC1,
+                          const_cast<uint8_t*>(m_serumData.dynamasks_extra[static_cast<uint32_t>(index)]));
+        } else if (index < static_cast<int>(m_frameDynamicMaskMaps.size()) &&
+                   !m_frameDynamicMaskMaps[static_cast<std::size_t>(index)].empty()) {
+            map = m_frameDynamicMaskMaps[static_cast<std::size_t>(index)];
+        } else if (useSerumData && m_serumData.dynamasks.hasData(static_cast<uint32_t>(index))) {
+            map = cv::Mat(static_cast<int>(m_serumData.fheight),
+                          static_cast<int>(m_serumData.fwidth),
+                          CV_8UC1,
+                          const_cast<uint8_t*>(m_serumData.dynamasks[static_cast<uint32_t>(index)]));
+        }
+    } else {
+        if (index < static_cast<int>(m_frameDynamicMaskMaps.size()) &&
+            !m_frameDynamicMaskMaps[static_cast<std::size_t>(index)].empty()) {
+            map = m_frameDynamicMaskMaps[static_cast<std::size_t>(index)];
+        } else if (useSerumData && m_serumData.dynamasks.hasData(static_cast<uint32_t>(index))) {
+            map = cv::Mat(static_cast<int>(m_serumData.fheight),
+                          static_cast<int>(m_serumData.fwidth),
+                          CV_8UC1,
+                          const_cast<uint8_t*>(m_serumData.dynamasks[static_cast<uint32_t>(index)]));
+        }
+    }
+
+    if (map.empty()) {
+        return cv::Mat();
+    }
+
+    int targetWidth = map.cols;
+    int targetHeight = map.rows;
+    if (useSerumData) {
+        if (useHd && m_serumData.fwidth_extra > 0 && m_serumData.fheight_extra > 0) {
+            targetWidth = static_cast<int>(m_serumData.fwidth_extra);
+            targetHeight = static_cast<int>(m_serumData.fheight_extra);
+        } else if (!useHd && m_serumData.fwidth > 0 && m_serumData.fheight > 0) {
+            targetWidth = static_cast<int>(m_serumData.fwidth);
+            targetHeight = static_cast<int>(m_serumData.fheight);
+        }
+    }
+    if (targetWidth > 0 && targetHeight > 0 &&
+        (map.cols != targetWidth || map.rows != targetHeight)) {
+        cv::Mat resized;
+        cv::resize(map, resized, cv::Size(targetWidth, targetHeight), 0.0, 0.0, cv::INTER_NEAREST);
+        map = resized;
+    }
+
+    cv::Mat mask(map.size(), CV_8UC1, cv::Scalar(0));
+    for (int y = 0; y < map.rows; ++y) {
+        const uint8_t* src = map.ptr<uint8_t>(y);
+        uint8_t* dst = mask.ptr<uint8_t>(y);
+        for (int x = 0; x < map.cols; ++x) {
+            dst[x] = (src[x] == 255) ? 0 : 1;
+        }
     }
     return mask;
 }
@@ -9849,13 +9939,6 @@ void MainWindow::updateFrameCanvasImage(int index)
         m_framesCanvas->canvas()->clearTertiaryOutline();
         return;
     }
-    const cv::Mat* image = activeFrameImage(index, false);
-    if (!image || image->empty()) {
-        logLine(QString("Frame canvas: missing image index=%1").arg(index));
-        m_framesCanvas->setImage(cv::Mat());
-        m_framesCanvas->canvas()->clearTertiaryOutline();
-        return;
-    }
     if (m_canvasRotateEnabled) {
         logLine(QString("Frame canvas: rotation enabled index=%1").arg(index));
         updateCanvasRotationFrame();
@@ -9895,6 +9978,9 @@ void MainWindow::updateFrameCanvasImage(int index)
         logLine(QString("Frame canvas: composed empty index=%1 hd=%2")
                     .arg(index)
                     .arg(m_useHdFrame ? "true" : "false"));
+        m_framesCanvas->setImage(cv::Mat());
+        m_framesCanvas->canvas()->clearTertiaryOutline();
+        return;
     }
     setFrameCanvasFromComposed(index, composed);
 }
@@ -9911,12 +9997,7 @@ void MainWindow::setFrameCanvasFromComposed(int index, const cv::Mat& composed)
         m_framesCanvas->canvas()->setGridSegments(0, 0, 0);
         m_framesCanvas->canvas()->setGridScales(1, 1);
         m_framesCanvas->canvas()->setGridRegions(QRect(), QRect());
-        const cv::Mat spriteOutline = buildSpriteCoverageMask(index, m_useHdFrame);
-        if (!spriteOutline.empty()) {
-            m_framesCanvas->canvas()->setTertiaryMaskOutline(spriteOutline, QColor(255, 220, 0));
-        } else {
-            m_framesCanvas->canvas()->clearTertiaryOutline();
-        }
+        updateMaskPreviewForFrame(index);
         return;
     }
     cv::Mat displayOriginal = BuildDisplayOriginal(original, composed.size());
@@ -9938,12 +10019,7 @@ void MainWindow::setFrameCanvasFromComposed(int index, const cv::Mat& composed)
                              layout.bottomWidth,
                              layout.bottomHeight);
     m_framesCanvas->canvas()->setGridRegions(topRegion, bottomRegion);
-    const cv::Mat spriteOutline = buildSpriteCoverageMask(index, m_useHdFrame);
-    if (!spriteOutline.empty()) {
-        m_framesCanvas->canvas()->setTertiaryMaskOutline(spriteOutline, QColor(255, 220, 0), topRegion);
-    } else {
-        m_framesCanvas->canvas()->clearTertiaryOutline();
-    }
+    updateMaskPreviewForFrame(index);
 }
 
 void MainWindow::updateSpriteCanvasImage(int index)
@@ -10952,9 +11028,6 @@ void MainWindow::updateMaskPreviewForFrame(int index)
     const cv::Mat* frame = activeFrameImage(index, false);
     if (!frame || frame->empty()) {
         logLine(QString("Mask preview: empty frame index=%1").arg(index));
-        m_framesCanvas->canvas()->clearMaskOutline();
-        m_framesCanvas->canvas()->clearTertiaryOutline();
-        return;
     }
     ensureMaskDataSize();
     ensureBackgroundDataSize();
@@ -11009,9 +11082,17 @@ void MainWindow::updateMaskPreviewForFrame(int index)
         m_framesCanvas->canvas()->clearPreviewImage();
         m_framesCanvas->canvas()->clearMaskOutline();
         m_framesCanvas->canvas()->setSecondaryMaskOutline(cv::Mat(), QColor());
-        const cv::Mat spriteOutline = buildSpriteCoverageMask(index, m_useHdFrame);
-        if (!spriteOutline.empty()) {
-            m_framesCanvas->canvas()->setTertiaryMaskOutline(spriteOutline, QColor(255, 220, 0));
+        cv::Mat combinedOutline = buildSpriteCoverageMask(index, m_useHdFrame);
+        const cv::Mat dynamicOutline = buildDynamicCoverageMask(index, m_useHdFrame);
+        if (!dynamicOutline.empty()) {
+            if (combinedOutline.empty()) {
+                combinedOutline = dynamicOutline;
+            } else if (combinedOutline.size() == dynamicOutline.size()) {
+                cv::bitwise_or(combinedOutline, dynamicOutline, combinedOutline);
+            }
+        }
+        if (!combinedOutline.empty()) {
+            m_framesCanvas->canvas()->setTertiaryMaskOutline(combinedOutline, QColor(255, 220, 0));
         } else {
             m_framesCanvas->canvas()->clearTertiaryOutline();
         }
@@ -11106,7 +11187,25 @@ void MainWindow::updateMaskPreviewForFrame(int index)
     } else {
         m_framesCanvas->canvas()->clearPrimaryOutline();
     }
-    if (hasTopMask && m_backgroundMaskMode) {
+    const cv::Mat dynamicOutline = buildDynamicCoverageMask(index, m_useHdFrame);
+    cv::Mat spriteOutline = buildSpriteCoverageMask(index, m_useHdFrame);
+    const bool hasSpriteOutline = !spriteOutline.empty();
+    QRect colorizedRegion;
+    if (m_showOriginalFrame) {
+        cv::Mat baseOriginal = bottomPreview.empty() ? buildOriginalFrame(reference) : bottomPreview;
+        cv::Mat displayOriginal = BuildDisplayOriginal(baseOriginal, topPreview.size());
+        FrameLayout layout = BuildFrameLayout(topPreview, displayOriginal);
+        const int gap = FrameGapForWidth(layout.topWidth);
+        colorizedRegion = QRect(layout.topX, 0, layout.topWidth, layout.topHeight);
+        bottomRegion = QRect(layout.bottomX,
+                             layout.topHeight + gap,
+                             layout.bottomWidth,
+                             layout.bottomHeight);
+    }
+    if (hasSpriteOutline) {
+        m_framesCanvas->canvas()->setSecondaryMaskOutline(spriteOutline, QColor(120, 200, 255), colorizedRegion);
+    }
+    if (hasTopMask && m_backgroundMaskMode && !hasSpriteOutline) {
         cv::Mat* bgMask = activeBackgroundMask(index);
         cv::Mat fallbackMask;
         if ((!bgMask || bgMask->empty() || !MaskHasContent(*bgMask)) && m_useHdFrame &&
@@ -11118,25 +11217,21 @@ void MainWindow::updateMaskPreviewForFrame(int index)
             }
         }
         if (bgMask && MaskHasContent(*bgMask)) {
-            m_framesCanvas->canvas()->setSecondaryMaskOutline(*bgMask, QColor(120, 200, 60), topRegion);
+            m_framesCanvas->canvas()->setSecondaryMaskOutline(*bgMask, QColor(120, 200, 60), colorizedRegion);
+        } else if (!hasSpriteOutline) {
+            m_framesCanvas->canvas()->setSecondaryMaskOutline(cv::Mat(), QColor());
         }
-    }
-    if (!(hasTopMask && m_backgroundMaskMode)) {
+    } else if (!hasSpriteOutline) {
         m_framesCanvas->canvas()->setSecondaryMaskOutline(cv::Mat(), QColor());
     }
     if (!hasBottomMask && !(hasTopMask && m_backgroundMaskMode)) {
-        m_framesCanvas->canvas()->clearMaskOutline();
-    }
-    const cv::Mat spriteOutline = buildSpriteCoverageMask(index, m_useHdFrame);
-    if (!spriteOutline.empty()) {
-        QRect topRegion;
-        if (m_showOriginalFrame) {
-            cv::Mat baseOriginal = bottomPreview.empty() ? buildOriginalFrame(reference) : bottomPreview;
-            cv::Mat displayOriginal = BuildDisplayOriginal(baseOriginal, topPreview.size());
-            FrameLayout layout = BuildFrameLayout(topPreview, displayOriginal);
-            topRegion = QRect(layout.topX, 0, layout.topWidth, layout.topHeight);
+        m_framesCanvas->canvas()->clearPrimaryOutline();
+        if (!hasSpriteOutline) {
+            m_framesCanvas->canvas()->setSecondaryMaskOutline(cv::Mat(), QColor());
         }
-        m_framesCanvas->canvas()->setTertiaryMaskOutline(spriteOutline, QColor(255, 220, 0), topRegion);
+    }
+    if (!dynamicOutline.empty()) {
+        m_framesCanvas->canvas()->setTertiaryMaskOutline(dynamicOutline, QColor(255, 220, 0), colorizedRegion);
     } else {
         m_framesCanvas->canvas()->clearTertiaryOutline();
     }
@@ -12474,6 +12569,10 @@ void MainWindow::showSettingsDialog()
     auto* backgroundCacheSpin = new QSpinBox(&dialog);
     backgroundCacheSpin->setRange(1, 256);
     backgroundCacheSpin->setValue(m_backgroundCacheLimit);
+    auto* pixelDiameterSpin = new QSpinBox(&dialog);
+    pixelDiameterSpin->setRange(10, 100);
+    pixelDiameterSpin->setSuffix("%");
+    pixelDiameterSpin->setValue(m_pixelDiameterPercent);
     auto* loggingCheck = new QCheckBox(&dialog);
     loggingCheck->setChecked(m_loggingEnabled);
     auto* autosaveCheck = new QCheckBox(&dialog);
@@ -12489,6 +12588,7 @@ void MainWindow::showSettingsDialog()
     layout->addRow("Frame cache size", frameCacheSpin);
     layout->addRow("Sprite cache size", spriteCacheSpin);
     layout->addRow("Background cache size", backgroundCacheSpin);
+    layout->addRow("Pixel diameter", pixelDiameterSpin);
     layout->addRow("Enable logging", loggingCheck);
     layout->addRow("Enable autosave", autosaveCheck);
     layout->addRow("Autosave interval", autosaveSpin);
@@ -12504,6 +12604,7 @@ void MainWindow::showSettingsDialog()
     m_frameCacheLimit = std::clamp(frameCacheSpin->value(), 1, 256);
     m_spriteCacheLimit = std::clamp(spriteCacheSpin->value(), 1, 256);
     m_backgroundCacheLimit = std::clamp(backgroundCacheSpin->value(), 1, 256);
+    m_pixelDiameterPercent = std::clamp(pixelDiameterSpin->value(), 10, 100);
     m_loggingEnabled = loggingCheck->isChecked();
     m_autosaveEnabled = autosaveCheck->isChecked();
     m_autosaveIntervalMinutes = std::clamp(autosaveSpin->value(), 1, 120);
@@ -12530,6 +12631,18 @@ void MainWindow::showSettingsDialog()
     if (m_backgroundStore) {
         m_backgroundStore->setCacheLimit(m_backgroundCacheLimit);
     }
+    if (m_framesCanvas) {
+        m_framesCanvas->canvas()->setPixelDiameterPercent(m_pixelDiameterPercent);
+    }
+    if (m_spritesCanvas) {
+        m_spritesCanvas->canvas()->setPixelDiameterPercent(m_pixelDiameterPercent);
+    }
+    if (m_backgroundsCanvas) {
+        m_backgroundsCanvas->canvas()->setPixelDiameterPercent(m_pixelDiameterPercent);
+    }
+    if (m_playbackCanvas) {
+        m_playbackCanvas->canvas()->setPixelDiameterPercent(m_pixelDiameterPercent);
+    }
     if (m_loggingEnabled) {
         initLogging();
     } else {
@@ -12542,6 +12655,7 @@ void MainWindow::showSettingsDialog()
     settings.setValue("frameCacheLimit", m_frameCacheLimit);
     settings.setValue("spriteCacheLimit", m_spriteCacheLimit);
     settings.setValue("backgroundCacheLimit", m_backgroundCacheLimit);
+    settings.setValue("pixelDiameterPercent", m_pixelDiameterPercent);
     settings.setValue("loggingEnabled", m_loggingEnabled);
     settings.setValue("logPath", m_logPath);
     settings.setValue("autosaveEnabled", m_autosaveEnabled);
@@ -12556,6 +12670,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
     settings.setValue("lastShutdownClean", true);
     settings.setValue("autosaveEnabled", m_autosaveEnabled);
     settings.setValue("autosaveIntervalMinutes", m_autosaveIntervalMinutes);
+    settings.setValue("pixelDiameterPercent", m_pixelDiameterPercent);
     settings.sync();
     disposeSerumRuntime();
     shutdownLogging();
@@ -16448,61 +16563,60 @@ void MainWindow::showFrameAtIndex(int index)
         m_frameCanvasOverrideImage.release();
         m_frameCanvasOverrideIndex = -1;
     }
-    const cv::Mat* image = m_frameStore->at(index);
-    if (image && !image->empty()) {
-        m_framesCanvas->canvas()->clearPreviewImage();
-        updateFrameCanvasImage(index);
-        updatePlaybackIdleFrame(index);
-        if (index == 0 && m_drawPointEnabled == false) {
-            QTimer::singleShot(0, this, [this]() {
-                m_framesCanvas->canvas()->requestFitOnResize(true);
-            });
-        }
-        if (m_frameMaskAssign && index >= 0 && index < static_cast<int>(m_frameCompMaskIds.size())) {
-            QSignalBlocker blockAssign(m_frameMaskAssign);
-            const int maskId = m_frameCompMaskIds[static_cast<std::size_t>(index)];
-            m_frameMaskAssign->setCurrentIndex(maskId == 255 ? 0 : maskId + 1);
-        }
-        if (m_frameDynamicMaskAssign) {
-            QSignalBlocker blockAssign(m_frameDynamicMaskAssign);
-            const int selected = currentFrameDynamicMaskId();
-            m_frameDynamicMaskAssign->setCurrentIndex(selected >= 0 ? selected + 1 : 0);
-        }
-        if (m_frameBackgroundAssign && index >= 0 && index < static_cast<int>(m_frameBackgroundIds.size())) {
-            QSignalBlocker blockAssign(m_frameBackgroundAssign);
-            const uint16_t bgId = m_frameBackgroundIds[static_cast<std::size_t>(index)];
-            m_frameBackgroundAssign->setCurrentIndex(bgId == 0xffff ? 0 : static_cast<int>(bgId) + 1);
-        }
-        if (m_shapeCompToggle && index >= 0 && index < static_cast<int>(m_frameShapeCompModes.size())) {
-            QSignalBlocker blockShape(m_shapeCompToggle);
-            const uint8_t value = m_frameShapeCompModes[static_cast<std::size_t>(index)];
-            m_shapeCompToggle->setChecked(value != 0);
-        }
-        if (m_triggerIdSpin && m_triggerMonochromeCheck) {
-            QSignalBlocker blockSpin(m_triggerIdSpin);
-            QSignalBlocker blockCheck(m_triggerMonochromeCheck);
-            if (index >= 0 && index < static_cast<int>(m_frameTriggerIds.size())) {
-                const uint32_t trigger = m_frameTriggerIds[static_cast<std::size_t>(index)];
-                const bool isMono = trigger == static_cast<uint32_t>(kMonochromeTriggerId);
-                m_triggerMonochromeCheck->setChecked(isMono);
-                m_triggerMonochromeCheck->setEnabled(true);
-                m_triggerIdSpin->setEnabled(true);
-                m_triggerIdSpin->setReadOnly(isMono);
-                if (isMono) {
-                    m_triggerIdSpin->setValue(kMonochromeTriggerId);
-                } else if (trigger == 0xffffffffu) {
-                    m_triggerIdSpin->setValue(-1);
-                } else {
-                    m_triggerIdSpin->setValue(static_cast<int>(trigger));
-                }
-            } else {
-                m_triggerMonochromeCheck->setChecked(false);
-                m_triggerMonochromeCheck->setEnabled(false);
-                m_triggerIdSpin->setEnabled(false);
-                m_triggerIdSpin->setReadOnly(false);
+    m_framesCanvas->canvas()->clearPreviewImage();
+    updateFrameCanvasImage(index);
+    updatePlaybackIdleFrame(index);
+    if (index == 0 && m_drawPointEnabled == false) {
+        QTimer::singleShot(0, this, [this]() {
+            m_framesCanvas->canvas()->requestFitOnResize(true);
+        });
+    }
+    if (m_frameMaskAssign && index >= 0 && index < static_cast<int>(m_frameCompMaskIds.size())) {
+        QSignalBlocker blockAssign(m_frameMaskAssign);
+        const int maskId = m_frameCompMaskIds[static_cast<std::size_t>(index)];
+        m_frameMaskAssign->setCurrentIndex(maskId == 255 ? 0 : maskId + 1);
+    }
+    if (m_frameDynamicMaskAssign) {
+        QSignalBlocker blockAssign(m_frameDynamicMaskAssign);
+        const int selected = currentFrameDynamicMaskId();
+        m_frameDynamicMaskAssign->setCurrentIndex(selected >= 0 ? selected + 1 : 0);
+    }
+    if (m_frameBackgroundAssign && index >= 0 && index < static_cast<int>(m_frameBackgroundIds.size())) {
+        QSignalBlocker blockAssign(m_frameBackgroundAssign);
+        const uint16_t bgId = m_frameBackgroundIds[static_cast<std::size_t>(index)];
+        m_frameBackgroundAssign->setCurrentIndex(bgId == 0xffff ? 0 : static_cast<int>(bgId) + 1);
+    }
+    if (m_shapeCompToggle && index >= 0 && index < static_cast<int>(m_frameShapeCompModes.size())) {
+        QSignalBlocker blockShape(m_shapeCompToggle);
+        const uint8_t value = m_frameShapeCompModes[static_cast<std::size_t>(index)];
+        m_shapeCompToggle->setChecked(value != 0);
+    }
+    if (m_triggerIdSpin && m_triggerMonochromeCheck) {
+        QSignalBlocker blockSpin(m_triggerIdSpin);
+        QSignalBlocker blockCheck(m_triggerMonochromeCheck);
+        if (index >= 0 && index < static_cast<int>(m_frameTriggerIds.size())) {
+            const uint32_t trigger = m_frameTriggerIds[static_cast<std::size_t>(index)];
+            const bool isMono = trigger == static_cast<uint32_t>(kMonochromeTriggerId);
+            m_triggerMonochromeCheck->setChecked(isMono);
+            m_triggerMonochromeCheck->setEnabled(true);
+            m_triggerIdSpin->setEnabled(true);
+            m_triggerIdSpin->setReadOnly(isMono);
+            if (isMono) {
+                m_triggerIdSpin->setValue(kMonochromeTriggerId);
+            } else if (trigger == 0xffffffffu) {
                 m_triggerIdSpin->setValue(-1);
+            } else {
+                m_triggerIdSpin->setValue(static_cast<int>(trigger));
             }
+        } else {
+            m_triggerMonochromeCheck->setChecked(false);
+            m_triggerMonochromeCheck->setEnabled(false);
+            m_triggerIdSpin->setEnabled(false);
+            m_triggerIdSpin->setReadOnly(false);
+            m_triggerIdSpin->setValue(-1);
         }
+    }
+    if (index >= 0) {
         const bool hasHd = hasHdFrame(index);
         if (!hasHd && m_useHdFrame) {
             m_useHdFrame = false;
@@ -16845,6 +16959,10 @@ void MainWindow::commitFrameFromStore(int index, bool useHd)
     }
     if (!useHd) {
         if (m_frameStore) {
+            cv::Mat image = m_frameStore->loadCopy(index);
+            if (!image.empty()) {
+                commitFrameToSerum(index, image, false);
+            }
             m_frameStore->flushIndex(index);
         }
         return;

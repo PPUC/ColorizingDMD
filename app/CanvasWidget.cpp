@@ -16,7 +16,6 @@ CanvasWidget::CanvasWidget(const QString& title, QWidget* parent)
     , m_fitButton(new QToolButton(this))
     , m_backButton(new QToolButton(this))
     , m_forwardButton(new QToolButton(this))
-    , m_gridButton(new QToolButton(this))
     , m_originalButton(new QToolButton(this))
     , m_backgroundButton(new QToolButton(this))
     , m_maskButton(new QToolButton(this))
@@ -37,7 +36,6 @@ CanvasWidget::CanvasWidget(const QString& title, QWidget* parent)
     toolbar->addWidget(m_backButton);
     toolbar->addWidget(m_forwardButton);
     toolbar->addWidget(m_fitButton);
-    toolbar->addWidget(m_gridButton);
     toolbar->addWidget(m_originalButton);
     toolbar->addWidget(m_backgroundButton);
     toolbar->addWidget(m_maskButton);
@@ -72,14 +70,6 @@ CanvasWidget::CanvasWidget(const QString& title, QWidget* parent)
     m_forwardButton->setCursor(Qt::PointingHandCursor);
     m_forwardButton->setEnabled(false);
     connect(m_forwardButton, &QToolButton::clicked, this, &CanvasWidget::forwardRequested);
-
-    m_gridButton->setText("Grid");
-    m_gridButton->setCheckable(true);
-    m_gridButton->setChecked(true);
-    m_gridButton->setAutoRaise(true);
-    m_gridButton->setToolTip("Toggle grid");
-    m_gridButton->setCursor(Qt::PointingHandCursor);
-    connect(m_gridButton, &QToolButton::toggled, this, &CanvasWidget::gridToggled);
 
     m_originalButton->setText("Original");
     m_originalButton->setCheckable(true);
